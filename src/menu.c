@@ -118,6 +118,8 @@ static int g_hist_n;
 static int g_run_list[MAX_CB], g_run_n, g_run_pos;  // "Run Selected" sweep list
 #define ID_SELECT_ALL 3765
 static HWND g_selall_btn;  // "Select All" / "Clear All" toggle (Benchmark view)
+#define ID_DX11_DEMOS 3766  // "Demo Scenes ->" button (DX11 feature picker)
+#define ID_DX11_BACK 3767   // "<- Back" button (DX11 demo-scenes picker)
 
 static void get_content_rect(HWND frame, RECT *out) {
     RECT rc;
@@ -632,25 +634,18 @@ static void show_dx11_scenes(HWND frame) {
         g_hinst, NULL);
     if (g_ui_font) SendMessage(g_placeholder, WM_SETFONT, (WPARAM)g_ui_font, TRUE);
 
+    // Feature / pipeline tests. The visual showpieces live under "Demo Scenes".
     static const char *labels[] = {"Spinning cube",        "Textured cube",
                                    "Instanced (512 cubes)", "Tessellation (sphere)",
-                                   "Compute particles",     "Dolphin (swim)",
-                                   "Raymarch SDF (shader)", "Ocean (raymarched)",
-                                   "Mandelbulb fractal",    "Volumetric nebula",
-                                   "Showcase (reflect+shadow)", "Space (planet+asteroids)",
-                                   "GS mesh exploder",      "Cel shading (torus)",
-                                   "Matcap (chrome ball)",  "Atomics (histogram)",
+                                   "Compute particles",     "GS mesh exploder",
+                                   "Atomics (histogram)",   "Dolphin (swim)",
                                    "Draw stress 128",       "Draw stress 256",
                                    "Draw stress 512",       "Draw stress 1024",
                                    "Draw stress 2048"};
     static const char *args[] = {"dx11 --scene spin",      "dx11 --scene textured",
                                  "dx11 --scene instanced", "dx11 --scene tess",
-                                 "dx11 --scene compute",   "dx11 --scene dolphin",
-                                 "dx11 --scene raymarch",  "dx11 --scene ocean",
-                                 "dx11 --scene mandelbulb", "dx11 --scene nebula",
-                                 "dx11 --scene showcase",  "dx11 --scene space",
-                                 "dx11 --scene gsexplode", "dx11 --scene cel",
-                                 "dx11 --scene matcap",    "dx11 --scene atomics",
+                                 "dx11 --scene compute",   "dx11 --scene gsexplode",
+                                 "dx11 --scene atomics",   "dx11 --scene dolphin",
                                  "dx11 --scene drawstress --draws 128",
                                  "dx11 --scene drawstress --draws 256",
                                  "dx11 --scene drawstress --draws 512",
@@ -659,10 +654,10 @@ static void show_dx11_scenes(HWND frame) {
     static const char *counts[] = {"128", "256", "512", "1024", "2048"};
     g_cbtn_n = (int)(sizeof(args) / sizeof(args[0]));
     int y = cr.top + 70;
-    const int n_full = g_cbtn_n - 5;  // scenes shown as buttons; last 5 = draw counts
+    const int n_full = g_cbtn_n - 5;  // feature buttons; last 5 = draw counts
     const int colw = 220, rowh = 38;
     int i = 0;
-    for (; i < n_full; i++) {  // the scenes as launch buttons in a 2-column grid
+    for (; i < n_full; i++) {  // feature tests as launch buttons in a 2-column grid
         int col = i % 2, row = i / 2;
         g_cbtn_arg[i] = args[i];
         g_cbtn_label[i] = NULL;
@@ -674,7 +669,7 @@ static void show_dx11_scenes(HWND frame) {
                                   (HMENU)(INT_PTR)(ID_CB_FIRST + i), g_hinst, NULL);
         if (g_ui_font) SendMessage(g_cbtn[i], WM_SETFONT, (WPARAM)g_ui_font, TRUE);
     }
-    y += ((n_full + 1) / 2) * rowh + 12;
+    y += ((n_full + 1) / 2) * rowh + 10;
     // Draw stress: one "Draw stress:" label + the five draw counts on a single row.
     g_draw_label = CreateWindowA("STATIC", "Draw stress:", WS_CHILD | WS_VISIBLE | SS_LEFT, cr.left,
                                  y + 8, 96, 22, frame, NULL, g_hinst, NULL);
@@ -692,6 +687,57 @@ static void show_dx11_scenes(HWND frame) {
         if (g_ui_font) SendMessage(g_cbtn[i], WM_SETFONT, (WPARAM)g_ui_font, TRUE);
         dx += 68;
     }
+    // Link to the procedural demo-scene gallery.
+    g_run_all = CreateWindowA("BUTTON", "Demo Scenes  >", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                              cr.left, y + 44, 220, 32, frame, (HMENU)(INT_PTR)ID_DX11_DEMOS, g_hinst,
+                              NULL);
+    if (g_ui_font) SendMessage(g_run_all, WM_SETFONT, (WPARAM)g_ui_font, TRUE);
+}
+
+// Direct3D 11 demo-scene gallery: the procedural showpieces (raymarched), each
+// launch-only. Reached from the DX11 feature picker's "Demo Scenes" button.
+static void show_dx11_demos(HWND frame) {
+    destroy_content();
+    g_cb_bench = 0;
+    SetWindowTextA(g_header, "Direct3D 11 - Demo Scenes");
+    RECT cr;
+    get_content_rect(frame, &cr);
+
+    g_placeholder = CreateWindowA(
+        "STATIC",
+        "Procedural showcase scenes (ray-marched: reflections, shadows, lighting, moving objects).\n"
+        "Each opens in a new window; press Esc to close it.",
+        WS_CHILD | WS_VISIBLE | SS_LEFT, cr.left, cr.top, cr.right - cr.left, 56, frame, NULL, g_hinst,
+        NULL);
+    if (g_ui_font) SendMessage(g_placeholder, WM_SETFONT, (WPARAM)g_ui_font, TRUE);
+
+    static const char *labels[] = {"Raymarch SDF",            "Ocean (raymarched)",
+                                   "Mandelbulb fractal",      "Volumetric nebula",
+                                   "Showcase (reflect+shadow)", "Space (planet+asteroids)",
+                                   "Cel shading (torus)",     "Matcap (chrome ball)"};
+    static const char *args[] = {"dx11 --scene raymarch",   "dx11 --scene ocean",
+                                 "dx11 --scene mandelbulb",  "dx11 --scene nebula",
+                                 "dx11 --scene showcase",    "dx11 --scene space",
+                                 "dx11 --scene cel",         "dx11 --scene matcap"};
+    g_cbtn_n = (int)(sizeof(args) / sizeof(args[0]));
+    int y = cr.top + 70;
+    const int colw = 220, rowh = 38;
+    for (int i = 0; i < g_cbtn_n; i++) {
+        int col = i % 2, row = i / 2;
+        g_cbtn_arg[i] = args[i];
+        g_cbtn_label[i] = NULL;
+        g_cbtn_proc[i] = NULL;
+        g_cbtn_result[i] = NULL;
+        g_cbtn_avg[i] = NULL;
+        g_cbtn[i] = CreateWindowA("BUTTON", labels[i], WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                  cr.left + col * (colw + 12), y + row * rowh, colw, 30, frame,
+                                  (HMENU)(INT_PTR)(ID_CB_FIRST + i), g_hinst, NULL);
+        if (g_ui_font) SendMessage(g_cbtn[i], WM_SETFONT, (WPARAM)g_ui_font, TRUE);
+    }
+    y += ((g_cbtn_n + 1) / 2) * rowh + 12;
+    g_run_all = CreateWindowA("BUTTON", "<  Back to D3D11 tests", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                              cr.left, y, 220, 32, frame, (HMENU)(INT_PTR)ID_DX11_BACK, g_hinst, NULL);
+    if (g_ui_font) SendMessage(g_run_all, WM_SETFONT, (WPARAM)g_ui_font, TRUE);
 }
 
 // Vulkan scene picker: native-Vulkan tests (no DXVK). Launch-only buttons.
@@ -1101,6 +1147,14 @@ static LRESULT CALLBACK shell_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             }
             if (id == ID_RESULTS_BACK) {
                 rebuild_view(hwnd, show_benchmark);
+                return 0;
+            }
+            if (id == ID_DX11_DEMOS) {  // open the demo-scene gallery
+                rebuild_view(hwnd, show_dx11_demos);
+                return 0;
+            }
+            if (id == ID_DX11_BACK) {  // back to the DX11 feature picker
+                rebuild_view(hwnd, show_dx11_scenes);
                 return 0;
             }
             int cb = id - ID_CB_FIRST;
