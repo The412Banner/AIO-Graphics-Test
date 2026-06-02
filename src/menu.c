@@ -391,9 +391,8 @@ static void show_benchmark(HWND frame) {
 
     g_bench_append = 1;  // rows get --bench <secs> [+ --vsync] appended at launch
     g_placeholder = CreateWindowA(
-        "STATIC", "Tick the tests to run, then Run Selected. Results open in Benchmark Results.",
-        WS_CHILD | WS_VISIBLE | SS_LEFT, cr.left, cr.top, cr.right - cr.left - 330, 22, frame, NULL,
-        g_hinst, NULL);
+        "STATIC", "Tick the tests to run, then Run Selected.", WS_CHILD | WS_VISIBLE | SS_LEFT,
+        cr.left, cr.top, cr.right - cr.left - 330, 22, frame, NULL, g_hinst, NULL);
     if (g_ui_font) SendMessage(g_placeholder, WM_SETFONT, (WPARAM)g_ui_font, TRUE);
 
     // Top-right: open the Results screen, and run the selected rows sequentially.
@@ -787,11 +786,23 @@ static void launch_bench_row(HWND frame, int i) {
     SetTimer(frame, 1, 500, NULL);
 }
 
+// Rebuild a content view with redraw frozen, then repaint once - otherwise the
+// destroy-old + create-many-children churn paints each control as it appears
+// (a visible top-to-bottom "scan"). Used for in-view rebuilds (expand, results).
+static void rebuild_view(HWND frame, void (*build)(HWND)) {
+    SendMessage(frame, WM_SETREDRAW, FALSE, 0);
+    build(frame);
+    SendMessage(frame, WM_SETREDRAW, TRUE, 0);
+    RedrawWindow(frame, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+}
+
 static void on_select(HWND frame, int action) {
+    if (action == AIO_MODE_EXIT) {
+        DestroyWindow(frame);
+        return;
+    }
+    SendMessage(frame, WM_SETREDRAW, FALSE, 0);  // freeze; thawed + repainted once below
     switch (action) {
-        case AIO_MODE_EXIT:
-            DestroyWindow(frame);
-            break;
         case AIO_MODE_GPUINFO:
             show_gpuinfo(frame);
             break;
@@ -858,6 +869,8 @@ static void on_select(HWND frame, int action) {
         default:
             break;
     }
+    SendMessage(frame, WM_SETREDRAW, TRUE, 0);
+    RedrawWindow(frame, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
 }
 
 static LRESULT CALLBACK shell_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -898,7 +911,7 @@ static LRESULT CALLBACK shell_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             int id = LOWORD(wParam);
             if (HIWORD(wParam) == CBN_SELCHANGE && id == ID_RESULTS_COMBO) {  // run picker changed
                 g_results_sel = (int)SendMessage(g_results_combo, CB_GETCURSEL, 0, 0);
-                show_bench_results(hwnd);
+                rebuild_view(hwnd, show_bench_results);
                 return 0;
             }
             if (id == ID_RUN_ALL && g_cb_bench && g_cbtn_n > 0) {  // run selected rows in sequence
@@ -958,16 +971,16 @@ static LRESULT CALLBACK shell_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             }
             if (id == ID_D3D11_EXPAND) {  // show/hide the D3D11 scene grid
                 g_d3d11_expanded = !g_d3d11_expanded;
-                show_benchmark(hwnd);
+                rebuild_view(hwnd, show_benchmark);
                 return 0;
             }
             if (id == ID_SHOW_RESULTS) {
                 g_results_sel = 0;  // default to the current-session view
-                show_bench_results(hwnd);
+                rebuild_view(hwnd, show_bench_results);
                 return 0;
             }
             if (id == ID_RESULTS_BACK) {
-                show_benchmark(hwnd);
+                rebuild_view(hwnd, show_benchmark);
                 return 0;
             }
             int cb = id - ID_CB_FIRST;
@@ -1114,7 +1127,8 @@ int aio_run_shell(HINSTANCE hInstance) {
     if (sx < 0) sx = 0;
     if (sy < 0) sy = 0;
 
-    HWND hwnd = CreateWindowA(cls, "AIO Graphics Test", WS_OVERLAPPEDWINDOW, sx, sy, w, h, NULL, NULL,
+    HWND hwnd = CreateWindowA(cls, "AIO Graphics Test", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, sx, sy,
+                              w, h, NULL, NULL,
                               hInstance, NULL);
     if (!hwnd) return 1;
     ShowWindow(hwnd, SW_SHOW);
