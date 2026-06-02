@@ -90,6 +90,7 @@ static int g_cbtn_d3d11[MAX_CB];      // 1 = this row is a D3D11 sub-scene (grid
 static const char *g_cbtn_short[MAX_CB];  // short label (grid cells show "<short>  <avg>")
 static HWND g_d3d11_chk, g_d3d11_btn;     // D3D11 group select-all checkbox + expand toggle
 static HWND g_results_btn;                 // "Benchmark Results" button (Benchmark view)
+static HWND g_draw_label;                  // "Draw stress:" sub-label (picker + bench group)
 #define ID_SHOW_RESULTS 3762
 #define ID_RESULTS_BACK 3763
 #define ID_RESULTS_COMBO 3764
@@ -139,6 +140,7 @@ static void destroy_content(void) {
     if (g_d3d11_btn) { DestroyWindow(g_d3d11_btn); g_d3d11_btn = NULL; }
     if (g_results_btn) { DestroyWindow(g_results_btn); g_results_btn = NULL; }
     if (g_results_combo) { DestroyWindow(g_results_combo); g_results_combo = NULL; }
+    if (g_draw_label) { DestroyWindow(g_draw_label); g_draw_label = NULL; }
     for (int i = 0; i < 4; i++)
         if (g_dur_btn[i]) { DestroyWindow(g_dur_btn[i]); g_dur_btn[i] = NULL; }
     g_is_probe = 0;
@@ -470,9 +472,18 @@ static void show_benchmark(HWND frame) {
     if (g_ui_font) SendMessage(g_d3d11_btn, WM_SETFONT, (WPARAM)g_ui_font, TRUE);
     y += 34;
 
-    if (g_d3d11_expanded) {  // 3-column grid of D3D11 scene checkboxes
+    if (g_d3d11_expanded) {
+        // 3-column grid of the normal D3D11 scenes; the draw-stress counts are
+        // pulled out into a compact "Draw Stress:" sub-row below (else they'd add
+        // many rows and overflow).
+        int cell = 0, firstDraw = -1;
         for (int k = 0; k < nD; k++) {
-            int idx = firstD + k, col = k % 3, row = k / 3;
+            int idx = firstD + k;
+            if (strstr(kBenchRows[idx].arg, "drawstress")) {
+                if (firstDraw < 0) firstDraw = idx;
+                continue;
+            }
+            int col = cell % 3, row = cell / 3;
             int cx = cr.left + 24 + col * 150, cy = y + row * 26;
             g_cbtn[idx] =
                 CreateWindowA("BUTTON", kBenchRows[idx].label, WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
@@ -480,8 +491,27 @@ static void show_benchmark(HWND frame) {
                               NULL);
             if (g_ui_font) SendMessage(g_cbtn[idx], WM_SETFONT, (WPARAM)g_ui_font, TRUE);
             SendMessage(g_cbtn[idx], BM_SETCHECK, g_cbtn_sel[idx] ? BST_CHECKED : BST_UNCHECKED, 0);
+            cell++;
         }
-        y += ((nD + 2) / 3) * 26 + 8;
+        y += ((cell + 2) / 3) * 26 + 6;
+        if (firstDraw >= 0) {  // Draw Stress sub-checkboxes (which counts to run)
+            static const char *counts[] = {"128", "256", "512", "1024", "2048"};
+            g_draw_label = CreateWindowA("STATIC", "Draw Stress:", WS_CHILD | WS_VISIBLE | SS_LEFT,
+                                         cr.left + 24, y + 2, 88, 22, frame, NULL, g_hinst, NULL);
+            if (g_ui_font) SendMessage(g_draw_label, WM_SETFONT, (WPARAM)g_ui_font, TRUE);
+            int dx = cr.left + 116, ci = 0;
+            for (int idx = firstDraw; idx < firstD + nD; idx++) {
+                if (!strstr(kBenchRows[idx].arg, "drawstress")) continue;
+                g_cbtn[idx] = CreateWindowA("BUTTON", counts[ci], WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                                            dx, y, 66, 22, frame, (HMENU)(INT_PTR)(ID_CHK_FIRST + idx),
+                                            g_hinst, NULL);
+                if (g_ui_font) SendMessage(g_cbtn[idx], WM_SETFONT, (WPARAM)g_ui_font, TRUE);
+                SendMessage(g_cbtn[idx], BM_SETCHECK, g_cbtn_sel[idx] ? BST_CHECKED : BST_UNCHECKED, 0);
+                dx += 70;
+                ci++;
+            }
+            y += 28;
+        }
     }
 
     for (i = firstD + nD; i < g_cbtn_n; i++) make_bench_top_row(frame, i, &cr, &y);  // D3D12 etc.
@@ -605,9 +635,11 @@ static void show_dx11_scenes(HWND frame) {
                                  "dx11 --scene drawstress --draws 512",
                                  "dx11 --scene drawstress --draws 1024",
                                  "dx11 --scene drawstress --draws 2048"};
+    static const char *counts[] = {"128", "256", "512", "1024", "2048"};
     g_cbtn_n = (int)(sizeof(args) / sizeof(args[0]));
     int y = cr.top + 70;
-    for (int i = 0; i < g_cbtn_n; i++) {
+    int i = 0;
+    for (; i < 10; i++) {  // the 10 scenes as full-width launch buttons
         g_cbtn_arg[i] = args[i];
         g_cbtn_label[i] = NULL;
         g_cbtn_proc[i] = NULL;
@@ -618,6 +650,22 @@ static void show_dx11_scenes(HWND frame) {
                                   g_hinst, NULL);
         if (g_ui_font) SendMessage(g_cbtn[i], WM_SETFONT, (WPARAM)g_ui_font, TRUE);
         y += 44;
+    }
+    // Draw stress: one "Draw stress:" label + the five draw counts on a single row.
+    g_draw_label = CreateWindowA("STATIC", "Draw stress:", WS_CHILD | WS_VISIBLE | SS_LEFT, cr.left,
+                                 y + 8, 96, 22, frame, NULL, g_hinst, NULL);
+    if (g_ui_font) SendMessage(g_draw_label, WM_SETFONT, (WPARAM)g_ui_font, TRUE);
+    int dx = cr.left + 100;
+    for (; i < g_cbtn_n; i++) {
+        g_cbtn_arg[i] = args[i];
+        g_cbtn_label[i] = NULL;
+        g_cbtn_proc[i] = NULL;
+        g_cbtn_result[i] = NULL;
+        g_cbtn_avg[i] = NULL;
+        g_cbtn[i] = CreateWindowA("BUTTON", counts[i - 10], WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, dx,
+                                  y, 62, 30, frame, (HMENU)(INT_PTR)(ID_CB_FIRST + i), g_hinst, NULL);
+        if (g_ui_font) SendMessage(g_cbtn[i], WM_SETFONT, (WPARAM)g_ui_font, TRUE);
+        dx += 68;
     }
 }
 
