@@ -115,8 +115,9 @@ typedef struct {
 } HistRun;
 static HistRun g_hist[MAX_HIST_RUNS];  // loaded oldest..newest
 static int g_hist_n;
-static int g_sel_inited = 0;              // selections seeded (all-on) once per session
 static int g_run_list[MAX_CB], g_run_n, g_run_pos;  // "Run Selected" sweep list
+#define ID_SELECT_ALL 3765
+static HWND g_selall_btn;  // "Select All" / "Clear All" toggle (Benchmark view)
 
 static void get_content_rect(HWND frame, RECT *out) {
     RECT rc;
@@ -139,6 +140,7 @@ static void destroy_content(void) {
     if (g_d3d11_chk) { DestroyWindow(g_d3d11_chk); g_d3d11_chk = NULL; }
     if (g_d3d11_btn) { DestroyWindow(g_d3d11_btn); g_d3d11_btn = NULL; }
     if (g_results_btn) { DestroyWindow(g_results_btn); g_results_btn = NULL; }
+    if (g_selall_btn) { DestroyWindow(g_selall_btn); g_selall_btn = NULL; }
     if (g_results_combo) { DestroyWindow(g_results_combo); g_results_combo = NULL; }
     if (g_draw_label) { DestroyWindow(g_draw_label); g_draw_label = NULL; }
     for (int i = 0; i < 4; i++)
@@ -438,11 +440,17 @@ static void show_benchmark(HWND frame) {
     if (g_ui_font) SendMessage(g_vsync_chk, WM_SETFONT, (WPARAM)g_ui_font, TRUE);
     SendMessage(g_vsync_chk, BM_SETCHECK, g_vsync_ui ? BST_CHECKED : BST_UNCHECKED, 0);
 
-    // Seed selections (all on) once per session; survives expand/collapse + nav.
-    if (!g_sel_inited) {
-        for (int i = 0; i < N_BENCH_ROWS; i++) g_cbtn_sel[i] = 1;
-        g_sel_inited = 1;
-    }
+    // Select All / Clear All toggle: label reflects whether everything is already ticked.
+    int all_sel = 1;
+    for (int k = 0; k < N_BENCH_ROWS; k++)
+        if (!g_cbtn_sel[k]) { all_sel = 0; break; }
+    g_selall_btn = CreateWindowA("BUTTON", all_sel ? "Clear All" : "Select All",
+                                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, cr.right - 120, cr.top + 46,
+                                 120, 26, frame, (HMENU)(INT_PTR)ID_SELECT_ALL, g_hinst, NULL);
+    if (g_ui_font) SendMessage(g_selall_btn, WM_SETFONT, (WPARAM)g_ui_font, TRUE);
+
+    // Nothing is selected by default; the user ticks tests (or uses Select All).
+    // g_cbtn_sel[] is the persistent source of truth (survives expand/collapse + nav).
     g_cbtn_n = N_BENCH_ROWS;
     int firstD = -1, nD = 0;
     for (int i = 0; i < g_cbtn_n; i++) {
@@ -1066,6 +1074,15 @@ static LRESULT CALLBACK shell_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
                         if (g_cbtn[k])
                             SendMessage(g_cbtn[k], BM_SETCHECK, on ? BST_CHECKED : BST_UNCHECKED, 0);
                     }
+                return 0;
+            }
+            if (id == ID_SELECT_ALL) {  // toggle: all ticked -> clear all, else select all
+                int all = 1;
+                for (int k = 0; k < g_cbtn_n; k++)
+                    if (!g_cbtn_sel[k]) { all = 0; break; }
+                int on = all ? 0 : 1;
+                for (int k = 0; k < g_cbtn_n; k++) g_cbtn_sel[k] = on;
+                rebuild_view(hwnd, show_benchmark);  // refresh every checkbox + the label
                 return 0;
             }
             if (id == ID_D3D11_EXPAND) {  // show/hide the D3D11 scene grid
