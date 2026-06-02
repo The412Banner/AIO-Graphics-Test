@@ -362,6 +362,7 @@ static const BenchRow kBenchRows[] = {
     {"GS Explode", "dx11 --scene gsexplode", "D3D11 GS Exploder", 1},
     {"Cel", "dx11 --scene cel", "D3D11 Cel Shading", 1},
     {"Matcap", "dx11 --scene matcap", "D3D11 Matcap", 1},
+    {"Atomics", "dx11 --scene atomics", "D3D11 Atomics", 1},
     {"Draw 128", "dx11 --scene drawstress --draws 128", "D3D11 Draw 128", 1},
     {"Draw 256", "dx11 --scene drawstress --draws 256", "D3D11 Draw 256", 1},
     {"Draw 512", "dx11 --scene drawstress --draws 512", "D3D11 Draw 512", 1},
@@ -622,6 +623,7 @@ static void show_dx11_scenes(HWND frame) {
                                    "Compute particles",     "Dolphin (swim)",
                                    "Raymarch SDF (shader)", "GS mesh exploder",
                                    "Cel shading (torus)",   "Matcap (chrome ball)",
+                                   "Atomics (histogram)",
                                    "Draw stress 128",       "Draw stress 256",
                                    "Draw stress 512",       "Draw stress 1024",
                                    "Draw stress 2048"};
@@ -630,6 +632,7 @@ static void show_dx11_scenes(HWND frame) {
                                  "dx11 --scene compute",   "dx11 --scene dolphin",
                                  "dx11 --scene raymarch",  "dx11 --scene gsexplode",
                                  "dx11 --scene cel",       "dx11 --scene matcap",
+                                 "dx11 --scene atomics",
                                  "dx11 --scene drawstress --draws 128",
                                  "dx11 --scene drawstress --draws 256",
                                  "dx11 --scene drawstress --draws 512",
@@ -638,8 +641,9 @@ static void show_dx11_scenes(HWND frame) {
     static const char *counts[] = {"128", "256", "512", "1024", "2048"};
     g_cbtn_n = (int)(sizeof(args) / sizeof(args[0]));
     int y = cr.top + 70;
+    const int n_full = g_cbtn_n - 5;  // scenes shown as full rows; last 5 = draw counts
     int i = 0;
-    for (; i < 10; i++) {  // the 10 scenes as full-width launch buttons
+    for (; i < n_full; i++) {  // the scenes as full-width launch buttons
         g_cbtn_arg[i] = args[i];
         g_cbtn_label[i] = NULL;
         g_cbtn_proc[i] = NULL;
@@ -662,8 +666,9 @@ static void show_dx11_scenes(HWND frame) {
         g_cbtn_proc[i] = NULL;
         g_cbtn_result[i] = NULL;
         g_cbtn_avg[i] = NULL;
-        g_cbtn[i] = CreateWindowA("BUTTON", counts[i - 10], WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, dx,
-                                  y, 62, 30, frame, (HMENU)(INT_PTR)(ID_CB_FIRST + i), g_hinst, NULL);
+        g_cbtn[i] = CreateWindowA("BUTTON", counts[i - n_full], WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                  dx, y, 62, 30, frame, (HMENU)(INT_PTR)(ID_CB_FIRST + i), g_hinst,
+                                  NULL);
         if (g_ui_font) SendMessage(g_cbtn[i], WM_SETFONT, (WPARAM)g_ui_font, TRUE);
         dx += 68;
     }

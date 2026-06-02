@@ -1954,6 +1954,178 @@ static void ds_cleanup(void) {
     memset(&g_ds, 0, sizeof(g_ds));
 }
 
+// =============================== ATOMICS scene ==============================
+// A histogram built entirely with GPU atomics: a compute shader scatters tens of
+// thousands of threads into N bins via InterlockedAdd, then the bins are drawn as
+// animated bars (read back as an SRV in the vertex shader, one instanced draw, no
+// vertex buffer). Tests UAV atomics (InterlockedAdd), ClearUnorderedAccessViewUint
+// and a structured-buffer SRV in the VS - things a translation layer (DXVK->Turnip)
+// can mishandle, so it is a correctness probe as much as a perf one.
+#define ATOM_BINS 64
+#define ATOM_THREADS 65536
+#define ATOM_GROUPS (ATOM_THREADS / 64)
+
+static const char *kAtomHLSL =
+    "cbuffer CB : register(b0){ float time; uint nthreads; uint nbins; float maxcount; };\n"
+    "RWStructuredBuffer<uint> bins : register(u0);\n"
+    "[numthreads(64,1,1)]\n"
+    "void CSMain(uint3 id : SV_DispatchThreadID){\n"
+    "  uint i = id.x; if (i >= nthreads) return;\n"
+    "  float v = sin(i*0.0131 + time)*0.5 + 0.5;\n"
+    "  v = frac(v + sin(i*0.00071 + time*0.6)*0.25 + 0.5);\n"
+    "  uint b = (uint)(v * nbins); if (b >= nbins) b = nbins - 1;\n"
+    "  InterlockedAdd(bins[b], 1);\n"
+    "}\n"
+    "StructuredBuffer<uint> binsR : register(t0);\n"
+    "struct VSOut { float4 pos:SV_POSITION; float3 col:COLOR; };\n"
+    "VSOut VSMain(uint vid:SV_VertexID, uint iid:SV_InstanceID){\n"
+    "  float2 quad[6] = {float2(0,0),float2(1,0),float2(1,1),float2(0,0),float2(1,1),float2(0,1)};\n"
+    "  float2 q = quad[vid];\n"
+    "  float h = saturate((float)binsR[iid] / maxcount);\n"
+    "  float bw = (2.0/nbins) * 0.82;\n"
+    "  float cx = -1.0 + (iid + 0.5) * (2.0/nbins);\n"
+    "  float x = cx + (q.x - 0.5)*bw;\n"
+    "  float y = -0.92 + q.y * (h*1.7 + 0.02);\n"
+    "  VSOut o; o.pos = float4(x, y, 0.0, 1.0);\n"
+    "  o.col = 0.5 + 0.5*cos(float3(0.0,2.0,4.0) + h*3.0 + iid*0.05);\n"
+    "  return o;\n"
+    "}\n"
+    "float4 PSMain(VSOut i):SV_TARGET { return float4(i.col, 1.0); }\n";
+
+typedef struct {
+    float time;
+    unsigned nthreads, nbins;
+    float maxcount;
+} AtomCB;
+
+static struct {
+    ID3D11ComputeShader *cs;
+    ID3D11VertexShader *vs;
+    ID3D11PixelShader *ps;
+    ID3D11Buffer *bins, *cb;
+    ID3D11UnorderedAccessView *uav;
+    ID3D11ShaderResourceView *srv;
+    ID3D11RasterizerState *rs;
+} g_atom;
+
+static int atom_init(ID3D11Device *dev, ID3D11DeviceContext *ctx, int w, int h) {
+    (void)ctx;
+    (void)w;
+    (void)h;
+    ID3DBlob *csb = compile_hlsl(kAtomHLSL, "CSMain", "cs_5_0");
+    ID3DBlob *vsb = compile_hlsl(kAtomHLSL, "VSMain", "vs_5_0");
+    ID3DBlob *psb = compile_hlsl(kAtomHLSL, "PSMain", "ps_5_0");
+    if (!csb || !vsb || !psb) return 1;
+    HRESULT hc = ID3D11Device_CreateComputeShader(dev, ID3D10Blob_GetBufferPointer(csb),
+                                                  ID3D10Blob_GetBufferSize(csb), NULL, &g_atom.cs);
+    ID3D11Device_CreateVertexShader(dev, ID3D10Blob_GetBufferPointer(vsb),
+                                    ID3D10Blob_GetBufferSize(vsb), NULL, &g_atom.vs);
+    ID3D11Device_CreatePixelShader(dev, ID3D10Blob_GetBufferPointer(psb),
+                                   ID3D10Blob_GetBufferSize(psb), NULL, &g_atom.ps);
+    ID3D10Blob_Release(csb);
+    ID3D10Blob_Release(vsb);
+    ID3D10Blob_Release(psb);
+    if (FAILED(hc) || !g_atom.cs) {
+        fail_box("Compute shaders (cs_5_0) are not available on this Direct3D 11 device.");
+        return 1;
+    }
+
+    D3D11_BUFFER_DESC bd;
+    memset(&bd, 0, sizeof(bd));
+    bd.ByteWidth = sizeof(unsigned) * ATOM_BINS;
+    bd.Usage = D3D11_USAGE_DEFAULT;
+    bd.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
+    bd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+    bd.StructureByteStride = sizeof(unsigned);
+    ID3D11Device_CreateBuffer(dev, &bd, NULL, &g_atom.bins);
+
+    D3D11_UNORDERED_ACCESS_VIEW_DESC ud;
+    memset(&ud, 0, sizeof(ud));
+    ud.Format = DXGI_FORMAT_UNKNOWN;
+    ud.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+    ud.Buffer.NumElements = ATOM_BINS;
+    ID3D11Device_CreateUnorderedAccessView(dev, (ID3D11Resource *)g_atom.bins, &ud, &g_atom.uav);
+
+    D3D11_SHADER_RESOURCE_VIEW_DESC sd;
+    memset(&sd, 0, sizeof(sd));
+    sd.Format = DXGI_FORMAT_UNKNOWN;
+    sd.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+    sd.Buffer.NumElements = ATOM_BINS;
+    ID3D11Device_CreateShaderResourceView(dev, (ID3D11Resource *)g_atom.bins, &sd, &g_atom.srv);
+
+    D3D11_BUFFER_DESC cbd;
+    memset(&cbd, 0, sizeof(cbd));
+    cbd.ByteWidth = sizeof(AtomCB);
+    cbd.Usage = D3D11_USAGE_DYNAMIC;
+    cbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    cbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    ID3D11Device_CreateBuffer(dev, &cbd, NULL, &g_atom.cb);
+
+    D3D11_RASTERIZER_DESC rd;
+    memset(&rd, 0, sizeof(rd));
+    rd.FillMode = D3D11_FILL_SOLID;
+    rd.CullMode = D3D11_CULL_NONE;  // the bar quads are CCW; don't cull them
+    rd.DepthClipEnable = TRUE;
+    ID3D11Device_CreateRasterizerState(dev, &rd, &g_atom.rs);
+    return (g_atom.cs && g_atom.vs && g_atom.ps && g_atom.bins && g_atom.uav && g_atom.srv &&
+            g_atom.cb && g_atom.rs)
+               ? 0
+               : 1;
+}
+
+static void atom_frame(ID3D11DeviceContext *ctx, double t, float aspect) {
+    (void)aspect;
+    D3D11_MAPPED_SUBRESOURCE m;
+    if (SUCCEEDED(ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)g_atom.cb, 0, D3D11_MAP_WRITE_DISCARD,
+                                          0, &m))) {
+        AtomCB *c = (AtomCB *)m.pData;
+        c->time = (float)t;
+        c->nthreads = ATOM_THREADS;
+        c->nbins = ATOM_BINS;
+        c->maxcount = (float)ATOM_THREADS / ATOM_BINS * 2.6f;
+        ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)g_atom.cb, 0);
+    }
+
+    // Clear the bins, then scatter into them with atomics.
+    UINT zero[4] = {0, 0, 0, 0};
+    ID3D11DeviceContext_ClearUnorderedAccessViewUint(ctx, g_atom.uav, zero);
+    UINT initc = 0;
+    ID3D11DeviceContext_CSSetShader(ctx, g_atom.cs, NULL, 0);
+    ID3D11DeviceContext_CSSetConstantBuffers(ctx, 0, 1, &g_atom.cb);
+    ID3D11DeviceContext_CSSetUnorderedAccessViews(ctx, 0, 1, &g_atom.uav, &initc);
+    ID3D11DeviceContext_Dispatch(ctx, ATOM_GROUPS, 1, 1);
+
+    // Unbind the UAV + compute shader before reading the bins as an SRV.
+    ID3D11UnorderedAccessView *nu = NULL;
+    ID3D11DeviceContext_CSSetUnorderedAccessViews(ctx, 0, 1, &nu, &initc);
+    ID3D11DeviceContext_CSSetShader(ctx, NULL, NULL, 0);
+
+    // Draw the bins as bars (one instanced draw, no vertex buffer).
+    ID3D11DeviceContext_RSSetState(ctx, g_atom.rs);
+    ID3D11DeviceContext_IASetInputLayout(ctx, NULL);
+    ID3D11DeviceContext_IASetPrimitiveTopology(ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ID3D11DeviceContext_VSSetShader(ctx, g_atom.vs, NULL, 0);
+    ID3D11DeviceContext_VSSetConstantBuffers(ctx, 0, 1, &g_atom.cb);
+    ID3D11DeviceContext_VSSetShaderResources(ctx, 0, 1, &g_atom.srv);
+    ID3D11DeviceContext_PSSetShader(ctx, g_atom.ps, NULL, 0);
+    ID3D11DeviceContext_DrawInstanced(ctx, 6, ATOM_BINS, 0, 0);
+
+    ID3D11ShaderResourceView *ns = NULL;
+    ID3D11DeviceContext_VSSetShaderResources(ctx, 0, 1, &ns);
+}
+
+static void atom_cleanup(void) {
+    if (g_atom.rs) ID3D11RasterizerState_Release(g_atom.rs);
+    if (g_atom.cb) ID3D11Buffer_Release(g_atom.cb);
+    if (g_atom.srv) ID3D11ShaderResourceView_Release(g_atom.srv);
+    if (g_atom.uav) ID3D11UnorderedAccessView_Release(g_atom.uav);
+    if (g_atom.bins) ID3D11Buffer_Release(g_atom.bins);
+    if (g_atom.ps) ID3D11PixelShader_Release(g_atom.ps);
+    if (g_atom.vs) ID3D11VertexShader_Release(g_atom.vs);
+    if (g_atom.cs) ID3D11ComputeShader_Release(g_atom.cs);
+    memset(&g_atom, 0, sizeof(g_atom));
+}
+
 // ============================== scene registry ==============================
 static const D3D11Scene kScenes[] = {
     {"spin", "D3D11 Cube", spin_init, spin_frame, spin_cleanup},
@@ -1966,6 +2138,7 @@ static const D3D11Scene kScenes[] = {
     {"gsexplode", "D3D11 GS Exploder", gs_init, gs_frame, gs_cleanup},
     {"cel", "D3D11 Cel Shading", cel_init, cel_frame, cel_cleanup},
     {"matcap", "D3D11 Matcap", mat_init, mat_frame, mat_cleanup},
+    {"atomics", "D3D11 Atomics", atom_init, atom_frame, atom_cleanup},
     {"drawstress", "D3D11 Draw Stress", ds_init, ds_frame, ds_cleanup},
 };
 
