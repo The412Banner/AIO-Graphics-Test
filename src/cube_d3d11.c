@@ -1749,6 +1749,58 @@ static int space_init(ID3D11Device *d, ID3D11DeviceContext *c, int w, int h) {
 static void space_frame(ID3D11DeviceContext *c, double t, float a) { stoy_frame(c, &g_space, t, a); }
 static void space_cleanup(void) { stoy_cleanup(&g_space); }
 
+// ----------------------------- CITYSCAPE scene ------------------------------
+// A night Blade-Runner city: a domain-repeated grid of towers (hashed heights)
+// with emissive window grids + neon, a WET REFLECTIVE STREET that mirrors the
+// lights, volumetric night haze, and a camera gliding down the avenue. Reflections
+// (wet road), shadows (towers occlude), lighting (windows + sky), moving (forward
+// camera), city-themed.
+static const char *kCityHLSL =
+    AIO_STOY_HEADER
+    "float h21(float2 p){p=frac(p*float2(127.1,311.7));p+=dot(p,p+34.5);return frac(p.x*p.y);}\n"
+    "float h11(float n){return frac(sin(n)*43758.5453);}\n"
+    "float sdBox(float3 p,float3 b){float3 q=abs(p)-b;return length(max(q,0.0))+min(max(q.x,max(q.y,q.z)),0.0);}\n"
+    "float2 mapCity(float3 p){float2 res=float2(p.y,0.0);\n"
+    "  float cs=7.0;float2 cell=floor(p.xz/cs+0.5);float2 local=p.xz-cell*cs;\n"
+    "  float ht=3.0+h21(cell)*15.0;float fw=2.0+h21(cell+5.3)*0.7;\n"
+    "  float3 q=float3(local.x,p.y-ht*0.5,local.y);float bld=sdBox(q,float3(fw,ht*0.5,fw));\n"
+    "  if(bld<res.x)res=float2(bld,1.0);return res;}\n"
+    "float3 nrmCity(float3 p){float2 e=float2(0.01,0.0);return normalize(float3(mapCity(p+e.xyy).x-mapCity(p-e.xyy).x,mapCity(p+e.yxy).x-mapCity(p-e.yxy).x,mapCity(p+e.yyx).x-mapCity(p-e.yyx).x));}\n"
+    "float marchCity(float3 ro,float3 rd,out float mid){float t=0.0;mid=-1.0;[loop]for(int i=0;i<130;i++){float2 r=mapCity(ro+rd*t);if(r.x<0.002*t+0.002){mid=r.y;return t;}t+=r.x*0.85;if(t>90.0)break;}return -1.0;}\n"
+    "float3 windows(float3 p,float3 n){float2 uv=(abs(n.x)>0.5)?p.zy:p.xy;\n"
+    "  float2 g=floor(uv*1.3);float2 f=frac(uv*1.3);\n"
+    "  float win=step(0.12,f.x)*step(f.x,0.88)*step(0.12,f.y)*step(f.y,0.88);\n"
+    "  float lit=step(0.42,h11(dot(g,float2(12.3,7.7))+iTime*0.0));\n"
+    "  float3 wc=lerp(float3(1.0,0.72,0.32),float3(0.40,0.8,1.0),h11(dot(g,float2(3.1,9.7))));\n"
+    "  return wc*win*lit*1.7;}\n"
+    "float3 cityShade(float3 p,float3 n,float3 rd,float mid){\n"
+    "  if(mid<0.5)return float3(0.015,0.015,0.02);\n"
+    "  float3 base=float3(0.05,0.05,0.07);\n"
+    "  float3 win=(abs(n.y)<0.5)?windows(p,n):float3(0.02,0.02,0.03);\n"
+    "  float3 L=normalize(float3(0.3,0.85,0.25));float dif=saturate(dot(n,L))*0.12;\n"
+    "  float fres=pow(1.0-saturate(dot(n,-rd)),4.0);\n"
+    "  return base*(0.4+dif)+win+float3(0.15,0.10,0.25)*fres;}\n"
+    "float4 PSMain(VSOut inp):SV_TARGET{float2 uv=inp.ndc;uv.x*=iAspect;\n"
+    "  float3 ro=float3(3.5,2.6+sin(iTime*0.3)*0.5,iTime*4.0);\n"
+    "  float3 ta=ro+float3(sin(iTime*0.15)*0.3,-0.12,1.0);\n"
+    "  float3 fw=normalize(ta-ro),rt=normalize(cross(float3(0,1,0),fw)),up=cross(fw,rt);float3 rd=normalize(uv.x*rt+uv.y*up+1.5*fw);\n"
+    "  float3 fog=float3(0.04,0.025,0.07);\n"
+    "  float mid;float t=marchCity(ro,rd,mid);float3 col;\n"
+    "  if(t>0.0){float3 p=ro+rd*t;float3 n=nrmCity(p);col=cityShade(p,n,rd,mid);\n"
+    "    if(mid<0.5){float3 r=reflect(rd,n);float m2;float t2=marchCity(p+n*0.02,r,m2);\n"
+    "      float3 refl=(t2>0.0)?cityShade(p+r*t2,nrmCity(p+r*t2),r,m2):(fog+float3(0.06,0.03,0.10)*pow(saturate(r.y+0.1),2.0));\n"
+    "      float fres=0.25+0.75*pow(1.0-saturate(dot(n,-rd)),4.0);col=lerp(col,refl,fres*0.85);}\n"
+    "    col=lerp(col,fog,1.0-exp(-0.022*t));\n"
+    "  }else col=fog+float3(0.07,0.035,0.11)*pow(saturate(rd.y+0.1),2.0);\n"
+    "  col=col/(col+0.55);col=pow(saturate(col),1.0/2.2);return float4(col,1.0);}\n";
+
+static StoyState g_city;
+static int city_init(ID3D11Device *d, ID3D11DeviceContext *c, int w, int h) {
+    (void)c; (void)w; (void)h; return stoy_init(d, &g_city, kCityHLSL);
+}
+static void city_frame(ID3D11DeviceContext *c, double t, float a) { stoy_frame(c, &g_city, t, a); }
+static void city_cleanup(void) { stoy_cleanup(&g_city); }
+
 // ========================= GEOMETRY-SHADER scene ===========================
 // A mesh exploder: the geometry shader receives each triangle, computes its face
 // normal, pushes the whole triangle outward along that normal by a time-varying
@@ -2465,6 +2517,7 @@ static const D3D11Scene kScenes[] = {
     {"nebula", "D3D11 Nebula", nebula_init, nebula_frame, nebula_cleanup},
     {"showcase", "D3D11 Showcase", show_init, show_frame, show_cleanup},
     {"space", "D3D11 Space", space_init, space_frame, space_cleanup},
+    {"city", "D3D11 Cityscape", city_init, city_frame, city_cleanup},
     {"gsexplode", "D3D11 GS Exploder", gs_init, gs_frame, gs_cleanup},
     {"cel", "D3D11 Cel Shading", cel_init, cel_frame, cel_cleanup},
     {"matcap", "D3D11 Matcap", mat_init, mat_frame, mat_cleanup},

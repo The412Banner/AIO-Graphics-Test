@@ -369,6 +369,7 @@ static const BenchRow kBenchRows[] = {
     {"Nebula", "dx11 --scene nebula", "D3D11 Nebula", 1},
     {"Showcase", "dx11 --scene showcase", "D3D11 Showcase", 1},
     {"Space", "dx11 --scene space", "D3D11 Space", 1},
+    {"Cityscape", "dx11 --scene city", "D3D11 Cityscape", 1},
     {"GS Explode", "dx11 --scene gsexplode", "D3D11 GS Exploder", 1},
     {"Cel", "dx11 --scene cel", "D3D11 Cel Shading", 1},
     {"Matcap", "dx11 --scene matcap", "D3D11 Matcap", 1},
@@ -714,11 +715,13 @@ static void show_dx11_demos(HWND frame) {
     static const char *labels[] = {"Raymarch SDF",            "Ocean (raymarched)",
                                    "Mandelbulb fractal",      "Volumetric nebula",
                                    "Showcase (reflect+shadow)", "Space (planet+asteroids)",
-                                   "Cel shading (torus)",     "Matcap (chrome ball)"};
+                                   "Cityscape (neon city)",   "Cel shading (torus)",
+                                   "Matcap (chrome ball)"};
     static const char *args[] = {"dx11 --scene raymarch",   "dx11 --scene ocean",
                                  "dx11 --scene mandelbulb",  "dx11 --scene nebula",
                                  "dx11 --scene showcase",    "dx11 --scene space",
-                                 "dx11 --scene cel",         "dx11 --scene matcap"};
+                                 "dx11 --scene city",        "dx11 --scene cel",
+                                 "dx11 --scene matcap"};
     g_cbtn_n = (int)(sizeof(args) / sizeof(args[0]));
     int y = cr.top + 70;
     const int colw = 220, rowh = 38;
