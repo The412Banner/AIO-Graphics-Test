@@ -1759,40 +1759,57 @@ static const char *kCityHLSL =
     AIO_STOY_HEADER
     "float h21(float2 p){p=frac(p*float2(127.1,311.7));p+=dot(p,p+34.5);return frac(p.x*p.y);}\n"
     "float h11(float n){return frac(sin(n)*43758.5453);}\n"
+    "float n2(float2 p){float2 i=floor(p),f=frac(p);f=f*f*(3.0-2.0*f);float a=h21(i),b=h21(i+float2(1,0)),c=h21(i+float2(0,1)),d=h21(i+float2(1,1));return lerp(lerp(a,b,f.x),lerp(c,d,f.x),f.y);}\n"
     "float sdBox(float3 p,float3 b){float3 q=abs(p)-b;return length(max(q,0.0))+min(max(q.x,max(q.y,q.z)),0.0);}\n"
-    "float2 mapCity(float3 p){float2 res=float2(p.y,0.0);\n"
-    "  float cs=7.0;float2 cell=floor(p.xz/cs+0.5);float2 local=p.xz-cell*cs;\n"
-    "  float ht=3.0+h21(cell)*15.0;float fw=2.0+h21(cell+5.3)*0.7;\n"
-    "  float3 q=float3(local.x,p.y-ht*0.5,local.y);float bld=sdBox(q,float3(fw,ht*0.5,fw));\n"
-    "  if(bld<res.x)res=float2(bld,1.0);return res;}\n"
-    "float3 nrmCity(float3 p){float2 e=float2(0.01,0.0);return normalize(float3(mapCity(p+e.xyy).x-mapCity(p-e.xyy).x,mapCity(p+e.yxy).x-mapCity(p-e.yxy).x,mapCity(p+e.yyx).x-mapCity(p-e.yyx).x));}\n"
-    "float marchCity(float3 ro,float3 rd,out float mid){float t=0.0;mid=-1.0;[loop]for(int i=0;i<130;i++){float2 r=mapCity(ro+rd*t);if(r.x<0.002*t+0.002){mid=r.y;return t;}t+=r.x*0.85;if(t>90.0)break;}return -1.0;}\n"
-    "float3 windows(float3 p,float3 n){float2 uv=(abs(n.x)>0.5)?p.zy:p.xy;\n"
-    "  float2 g=floor(uv*1.3);float2 f=frac(uv*1.3);\n"
-    "  float win=step(0.12,f.x)*step(f.x,0.88)*step(0.12,f.y)*step(f.y,0.88);\n"
-    "  float lit=step(0.58,h11(dot(g,float2(12.3,7.7))));\n"
-    "  float3 wc=lerp(float3(1.0,0.68,0.28),float3(0.35,0.8,1.0),h11(dot(g,float2(3.1,9.7))));\n"
-    "  return wc*win*lit*2.4;}\n"
+    "float sdCyl(float3 p,float h,float r){float2 d=float2(length(p.xz)-r,abs(p.y)-h);return min(max(d.x,d.y),0.0)+length(max(d,0.0));}\n"
+    "float2 mapCity(float3 p){float ax=abs(p.x);float2 res=float2(p.y,0.0);\n"  // road = ground
+    "  float sw=sdBox(float3(ax-5.4,p.y-0.07,0.0),float3(1.6,0.07,2000.0));if(sw<res.x)res=float2(sw,1.0);\n"  // sidewalk
+    "  float bw=sdBox(float3(ax-20.0,p.y-16.0,0.0),float3(13.0,16.0,2000.0));if(bw<res.x)res=float2(bw,2.0);\n"  // building wall
+    "  float3 lp=float3(ax-5.3,p.y,fmod(p.z+6.0,12.0)-6.0);\n"  // street-lamp repeat every 12m, x=+/-5.3
+    "  float pole=sdCyl(lp-float3(0.0,2.5,0.0),2.5,0.07);if(pole<res.x)res=float2(pole,3.0);\n"
+    "  float head=length(lp-float3(0.0,5.1,0.0))-0.25;if(head<res.x)res=float2(head,4.0);\n"  // emissive lamp
+    "  return res;}\n"
+    "float3 nrmCity(float3 p){float2 e=float2(0.008,0.0);return normalize(float3(mapCity(p+e.xyy).x-mapCity(p-e.xyy).x,mapCity(p+e.yxy).x-mapCity(p-e.yxy).x,mapCity(p+e.yyx).x-mapCity(p-e.yyx).x));}\n"
+    "float marchCity(float3 ro,float3 rd,out float mid){float t=0.02;mid=-1.0;[loop]for(int i=0;i<150;i++){float2 r=mapCity(ro+rd*t);if(r.x<0.0015*t+0.001){mid=r.y;return t;}t+=r.x*0.9;if(t>150.0)break;}return -1.0;}\n"
+    "float3 lampP(float3 p){float k=floor((p.z+6.0)/12.0+0.5);return float3((p.x>0.0?1.0:-1.0)*5.3,5.1,12.0*k-6.0);}\n"
+    "float shad(float3 ro,float3 rd,float mx){float res=1.0,t=0.06;[loop]for(int i=0;i<22;i++){float h=mapCity(ro+rd*t).x;if(h<0.003)return 0.0;res=min(res,12.0*h/t);t+=clamp(h,0.06,0.5);if(t>mx)break;}return saturate(res);}\n"
     "float3 cityShade(float3 p,float3 n,float3 rd,float mid){\n"
-    "  if(mid<0.5)return float3(0.006,0.006,0.010);\n"
-    "  float3 base=float3(0.016,0.016,0.024);\n"
-    "  float3 win=(abs(n.y)<0.5)?windows(p,n):float3(0.0,0.0,0.0);\n"
-    "  float3 L=normalize(float3(0.3,0.85,0.25));float dif=saturate(dot(n,L))*0.06;\n"
-    "  float fres=pow(1.0-saturate(dot(n,-rd)),5.0);\n"
-    "  return base+base*dif+win+float3(0.05,0.035,0.11)*fres;}\n"
+    "  if(mid>3.5)return float3(1.0,0.78,0.48)*8.0;\n"  // lamp head emissive
+    "  float3 amb=float3(0.018,0.022,0.038);\n"
+    "  float3 lp=lampP(p);float3 ld=lp-p;float dist=length(ld);float3 L=ld/max(dist,0.01);\n"
+    "  float atten=1.0/(1.0+0.12*dist+0.035*dist*dist);\n"
+    "  float ndl=saturate(dot(n,L));float sh=shad(p+n*0.04,L,dist-0.4);\n"
+    "  float3 lit=float3(1.0,0.74,0.42)*10.0*atten*ndl*sh;\n"
+    "  if(mid<0.5){float cx=abs(p.x);float3 base=float3(0.022,0.022,0.028);\n"  // ROAD + markings
+    "    float center=(cx<0.14)?step(0.55,frac(p.z*0.3)):0.0;float side=smoothstep(0.07,0.0,abs(cx-3.6));\n"
+    "    base+=float3(0.7,0.62,0.32)*saturate(center+side)*0.4;base*=(0.8+0.2*n2(p.xz*3.0));return base*(amb+lit);}\n"
+    "  if(mid<1.5){float3 base=float3(0.085,0.085,0.095);\n"  // SIDEWALK + paving cracks
+    "    float2 g=p.xz*1.1;float cr=smoothstep(0.05,0.0,abs(frac(g.x)-0.5))+smoothstep(0.05,0.0,abs(frac(g.y)-0.5));\n"
+    "    base*=(1.0-0.55*saturate(cr));base*=(0.8+0.2*n2(p.xz*7.0));return base*(amb+lit);}\n"
+    "  if(mid<2.5){float fx=(p.x>0.0?p.z:-p.z);float3 base=float3(0.05,0.045,0.05);float3 emit=float3(0,0,0);\n"  // BUILDING
+    "    float seam=smoothstep(0.05,0.0,abs(frac(fx*0.05)-0.5));base*=(1.0-0.5*seam);\n"  // building divisions
+    "    if(p.y>3.0){float2 g=floor(float2(fx*0.5,p.y*0.42));float2 f=frac(float2(fx*0.5,p.y*0.42));\n"
+    "      float win=step(0.12,f.x)*step(f.x,0.88)*step(0.14,f.y)*step(f.y,0.86);\n"
+    "      float onw=step(0.62,h11(dot(g,float2(11.0,7.0))));emit=lerp(float3(1.0,0.7,0.32),float3(0.4,0.8,1.0),h11(dot(g,float2(3.0,9.0))))*win*onw*1.6;}\n"
+    "    else{float door=step(0.74,frac(fx*0.22))*step(0.15,p.y)*step(p.y,2.1);base=lerp(base,float3(0.06,0.04,0.03),door);\n"
+    "      float sgn=step(0.87,frac(fx*0.12+0.3))*step(2.25,p.y)*step(p.y,2.85);emit+=lerp(float3(1.0,0.25,0.2),float3(0.25,0.6,1.0),h11(floor(fx*0.12)))*sgn*2.2;}\n"
+    "    return base*(amb+lit)+emit;}\n"
+    "  return float3(0.04,0.04,0.045)*(amb+lit*0.6);}\n"  // lamp pole (dark metal)
+    "float3 sky(float3 rd){return float3(0.015,0.02,0.04)+float3(0.04,0.03,0.06)*pow(saturate(rd.y+0.2),2.0);}\n"
     "float4 PSMain(VSOut inp):SV_TARGET{float2 uv=inp.ndc;uv.x*=iAspect;\n"
-    "  float3 ro=float3(3.5,2.6+sin(iTime*0.3)*0.5,iTime*4.0);\n"
-    "  float3 ta=ro+float3(sin(iTime*0.15)*0.3,-0.12,1.0);\n"
-    "  float3 fw=normalize(ta-ro),rt=normalize(cross(float3(0,1,0),fw)),up=cross(fw,rt);float3 rd=normalize(uv.x*rt+uv.y*up+1.5*fw);\n"
-    "  float3 fog=float3(0.012,0.008,0.022);\n"
+    "  float3 ro=float3(sin(iTime*0.4)*0.4,1.7+sin(iTime*1.7)*0.04,iTime*1.7);\n"  // walk down the street (eye height + bob)
+    "  float3 ta=ro+float3(sin(iTime*0.2)*0.25,-0.04,1.0);\n"
+    "  float3 fw=normalize(ta-ro),rt=normalize(cross(float3(0,1,0),fw)),up=cross(fw,rt);float3 rd=normalize(uv.x*rt+uv.y*up+1.7*fw);\n"
     "  float mid;float t=marchCity(ro,rd,mid);float3 col;\n"
     "  if(t>0.0){float3 p=ro+rd*t;float3 n=nrmCity(p);col=cityShade(p,n,rd,mid);\n"
-    "    if(mid<0.5){float3 r=reflect(rd,n);float m2;float t2=marchCity(p+n*0.02,r,m2);\n"
-    "      float3 refl=(t2>0.0)?cityShade(p+r*t2,nrmCity(p+r*t2),r,m2):(fog+float3(0.04,0.02,0.07)*pow(saturate(r.y+0.1),3.0));\n"
-    "      float fres=0.15+0.85*pow(1.0-saturate(dot(n,-rd)),4.0);col=lerp(col,refl,fres*0.8);}\n"
-    "    col=lerp(col,fog,1.0-exp(-0.02*t));\n"
-    "  }else col=fog+float3(0.05,0.025,0.09)*pow(saturate(rd.y+0.1),3.0);\n"
-    "  col=col/(col+0.85);col=pow(saturate(col),1.0/2.2);return float4(col,1.0);}\n";
+    "    if(mid<0.5){float wet=smoothstep(0.45,0.62,n2(p.xz*0.35));\n"  // wet road / puddles + ripple reflection
+    "      float3 rn=n;rn.xz+=0.05*(float2(n2(p.xz*8.0+iTime*0.6),n2(p.xz*8.0+5.0+iTime*0.6))-0.5);rn=normalize(rn);\n"
+    "      float3 r=reflect(rd,rn);float m2;float t2=marchCity(p+n*0.03,r,m2);\n"
+    "      float3 refl=(t2>0.0)?cityShade(p+r*t2,nrmCity(p+r*t2),r,m2):sky(r);\n"
+    "      float fres=0.03+0.97*pow(1.0-saturate(dot(n,-rd)),4.0);col=lerp(col,refl,fres*(0.25+0.65*wet));}\n"
+    "    col=lerp(col,sky(rd)*0.7,1.0-exp(-0.014*t));}\n"
+    "  else col=sky(rd);\n"
+    "  col=col/(col+0.7);col=pow(saturate(col),1.0/2.2);return float4(col,1.0);}\n";
 
 static StoyState g_city;
 static int city_init(ID3D11Device *d, ID3D11DeviceContext *c, int w, int h) {
