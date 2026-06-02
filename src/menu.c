@@ -786,14 +786,12 @@ static void launch_bench_row(HWND frame, int i) {
     SetTimer(frame, 1, 500, NULL);
 }
 
-// Rebuild a content view with redraw frozen, then repaint once - otherwise the
-// destroy-old + create-many-children churn paints each control as it appears
-// (a visible top-to-bottom "scan"). Used for in-view rebuilds (expand, results).
+// Rebuild a content view. The window is WS_EX_COMPOSITED, so the destroy-old +
+// create-many-children churn is double-buffered and presented atomically (no
+// top-to-bottom paint scan, no black unpainted boxes). Used for in-view rebuilds.
 static void rebuild_view(HWND frame, void (*build)(HWND)) {
-    SendMessage(frame, WM_SETREDRAW, FALSE, 0);
     build(frame);
-    SendMessage(frame, WM_SETREDRAW, TRUE, 0);
-    RedrawWindow(frame, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+    InvalidateRect(frame, NULL, TRUE);
 }
 
 static void on_select(HWND frame, int action) {
@@ -801,7 +799,6 @@ static void on_select(HWND frame, int action) {
         DestroyWindow(frame);
         return;
     }
-    SendMessage(frame, WM_SETREDRAW, FALSE, 0);  // freeze; thawed + repainted once below
     switch (action) {
         case AIO_MODE_GPUINFO:
             show_gpuinfo(frame);
@@ -869,8 +866,7 @@ static void on_select(HWND frame, int action) {
         default:
             break;
     }
-    SendMessage(frame, WM_SETREDRAW, TRUE, 0);
-    RedrawWindow(frame, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+    InvalidateRect(frame, NULL, TRUE);  // WS_EX_COMPOSITED presents the new view atomically
 }
 
 static LRESULT CALLBACK shell_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -1127,9 +1123,12 @@ int aio_run_shell(HINSTANCE hInstance) {
     if (sx < 0) sx = 0;
     if (sy < 0) sy = 0;
 
-    HWND hwnd = CreateWindowA(cls, "AIO Graphics Test", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, sx, sy,
-                              w, h, NULL, NULL,
-                              hInstance, NULL);
+    // WS_EX_COMPOSITED double-buffers child painting: on a view rebuild the new
+    // controls are composited off-screen and presented at once, so the brief
+    // unpainted state (which Wine draws as black boxes) never reaches the screen.
+    HWND hwnd = CreateWindowExA(WS_EX_COMPOSITED, cls, "AIO Graphics Test",
+                                WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, sx, sy, w, h, NULL, NULL,
+                                hInstance, NULL);
     if (!hwnd) return 1;
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
