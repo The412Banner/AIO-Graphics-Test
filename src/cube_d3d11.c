@@ -39,6 +39,11 @@
 
 static int g_w = 640, g_h = 480;
 static int g_quit;
+// Pending swapchain resize (set from WM_SIZE, applied in the render loop where the
+// swapchain/RTV/DSV are in scope). Otherwise maximizing stretches a fixed-size
+// image, squashing the aspect ratio (e.g. the Space planet goes oval).
+static volatile int g_resize_pending = 0;
+static int g_resize_w = 0, g_resize_h = 0;
 
 static LRESULT CALLBACK d3d11_wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
     switch (m) {
@@ -46,6 +51,16 @@ static LRESULT CALLBACK d3d11_wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
             if (w == VK_ESCAPE) {
                 g_quit = 1;
                 PostQuitMessage(0);
+            }
+            return 0;
+        case WM_SIZE:
+            if (w != SIZE_MINIMIZED) {
+                int nw = LOWORD(l), nh = HIWORD(l);
+                if (nw > 0 && nh > 0) {
+                    g_resize_w = nw;
+                    g_resize_h = nh;
+                    g_resize_pending = 1;
+                }
             }
             return 0;
         case WM_CLOSE:
@@ -2616,6 +2631,35 @@ int aio_run_d3d11_cube(HINSTANCE hinst, const char *scene_name) {
             DispatchMessage(&msg);
         }
         if (g_quit) break;
+
+        // Apply a pending window resize: resize the swapchain + recreate RTV/DSV +
+        // viewport, and refresh the aspect ratio (so circles stay round, not oval).
+        if (g_resize_pending) {
+            g_resize_pending = 0;
+            int nw = g_resize_w, nh = g_resize_h;
+            if (nw > 0 && nh > 0 && (nw != g_w || nh != g_h)) {
+                ID3D11DeviceContext_OMSetRenderTargets(ctx, 0, NULL, NULL);
+                if (rtv) { ID3D11RenderTargetView_Release(rtv); rtv = NULL; }
+                if (backbuf) { ID3D11Texture2D_Release(backbuf); backbuf = NULL; }
+                if (dsv) { ID3D11DepthStencilView_Release(dsv); dsv = NULL; }
+                if (depth_tex) { ID3D11Texture2D_Release(depth_tex); depth_tex = NULL; }
+                if (SUCCEEDED(IDXGISwapChain_ResizeBuffers(swap, 0, nw, nh, DXGI_FORMAT_UNKNOWN, 0))) {
+                    g_w = nw;
+                    g_h = nh;
+                    IDXGISwapChain_GetBuffer(swap, 0, &IID_ID3D11Texture2D, (void **)&backbuf);
+                    ID3D11Device_CreateRenderTargetView(dev, (ID3D11Resource *)backbuf, NULL, &rtv);
+                    dd.Width = g_w;
+                    dd.Height = g_h;
+                    ID3D11Device_CreateTexture2D(dev, &dd, NULL, &depth_tex);
+                    ID3D11Device_CreateDepthStencilView(dev, (ID3D11Resource *)depth_tex, NULL, &dsv);
+                    ID3D11DeviceContext_OMSetRenderTargets(ctx, 1, &rtv, dsv);
+                    vp.Width = (float)g_w;
+                    vp.Height = (float)g_h;
+                    ID3D11DeviceContext_RSSetViewports(ctx, 1, &vp);
+                    aspect = (g_h > 0) ? (float)g_w / (float)g_h : 1.0f;
+                }
+            }
+        }
 
         LARGE_INTEGER now;
         QueryPerformanceCounter(&now);
