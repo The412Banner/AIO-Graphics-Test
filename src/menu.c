@@ -71,8 +71,7 @@ static float g_probe_avg[2];  // [0] = timeline avg FPS, [1] = binary avg FPS
 static HWND g_verdict;        // probe verdict label
 #define ID_RUN_ALL 3500
 static HWND g_run_all;        // "Run All" sweep button (Benchmark view)
-static int g_sweep_active;    // sequential run-all sweep in progress
-static int g_sweep_idx;       // current row in the sweep
+static int g_sweep_active;    // sequential run-selected sweep in progress
 #define ID_DUR_FIRST 3600     // duration buttons (15/30/45/60 s)
 #define ID_VSYNC 3620
 static HWND g_dur_btn[4];
@@ -81,6 +80,21 @@ static HWND g_vsync_chk;
 static int g_bench_secs = 15;   // selected benchmark duration
 static int g_vsync_ui = 0;      // vsync toggle state
 static int g_bench_append = 0;  // launch_bench_row appends --bench/--vsync (Benchmark view)
+
+// Benchmark selection + collapsible D3D11 group (Benchmark view only).
+#define ID_CHK_FIRST 3700     // per-row selection checkbox (ID_CHK_FIRST + row index)
+#define ID_D3D11_HDR 3760     // "Direct3D 11" group select-all checkbox
+#define ID_D3D11_EXPAND 3761  // D3D11 expand/collapse toggle
+static int g_cbtn_sel[MAX_CB];        // per-row selection state (source of truth, survives rebuild)
+static int g_cbtn_d3d11[MAX_CB];      // 1 = this row is a D3D11 sub-scene (grid cell)
+static const char *g_cbtn_short[MAX_CB];  // short label (grid cells show "<short>  <avg>")
+static HWND g_d3d11_chk, g_d3d11_btn;     // D3D11 group select-all checkbox + expand toggle
+static HWND g_results_btn;                 // "Benchmark Results" button (Benchmark view)
+#define ID_SHOW_RESULTS 3762
+#define ID_RESULTS_BACK 3763
+static int g_d3d11_expanded = 1;          // is the D3D11 grid shown?
+static int g_sel_inited = 0;              // selections seeded (all-on) once per session
+static int g_run_list[MAX_CB], g_run_n, g_run_pos;  // "Run Selected" sweep list
 
 static void get_content_rect(HWND frame, RECT *out) {
     RECT rc;
@@ -100,6 +114,9 @@ static void destroy_content(void) {
     if (g_run_all) { DestroyWindow(g_run_all); g_run_all = NULL; }
     if (g_dur_label) { DestroyWindow(g_dur_label); g_dur_label = NULL; }
     if (g_vsync_chk) { DestroyWindow(g_vsync_chk); g_vsync_chk = NULL; }
+    if (g_d3d11_chk) { DestroyWindow(g_d3d11_chk); g_d3d11_chk = NULL; }
+    if (g_d3d11_btn) { DestroyWindow(g_d3d11_btn); g_d3d11_btn = NULL; }
+    if (g_results_btn) { DestroyWindow(g_results_btn); g_results_btn = NULL; }
     for (int i = 0; i < 4; i++)
         if (g_dur_btn[i]) { DestroyWindow(g_dur_btn[i]); g_dur_btn[i] = NULL; }
     g_is_probe = 0;
@@ -242,6 +259,52 @@ static void show_placeholder(HWND frame, const char *title, const char *msg) {
     if (g_ui_font) SendMessage(g_placeholder, WM_SETFONT, (WPARAM)g_ui_font, TRUE);
 }
 
+// The benchmark rows. The contiguous run with d3d11==1 is the collapsible group;
+// .label is what each row/grid cell shows, .apilabel MUST match the label each
+// backend passes to aio_bench_finish (so result files + cache line up).
+typedef struct {
+    const char *label, *arg, *apilabel;
+    int d3d11;
+} BenchRow;
+static const BenchRow kBenchRows[] = {
+    {"Vulkan", "vk", "Vulkan", 0},
+    {"OpenGL", "gl", "OpenGL", 0},
+    {"DDraw: D3D7", "dx7", "Direct3D 7 (DirectDraw)", 0},
+    {"DDraw: 2D Blit", "ddraw2d", "DirectDraw 2D", 0},
+    {"D3D8: Cube", "dx8", "Direct3D 8", 0},
+    {"D3D9: Cube", "dx9", "Direct3D 9", 0},
+    {"D3D10: Cube", "dx10", "Direct3D 10", 0},
+    {"Cube", "dx11 --scene spin", "D3D11 Cube", 1},
+    {"Instanced", "dx11 --scene instanced", "D3D11 Instanced", 1},
+    {"Tessellate", "dx11 --scene tess", "D3D11 Tessellation", 1},
+    {"Compute", "dx11 --scene compute", "D3D11 Compute Particles", 1},
+    {"Dolphin", "dx11 --scene dolphin", "D3D11 Dolphin", 1},
+    {"Raymarch", "dx11 --scene raymarch", "D3D11 Raymarch SDF", 1},
+    {"GS Explode", "dx11 --scene gsexplode", "D3D11 GS Exploder", 1},
+    {"Cel", "dx11 --scene cel", "D3D11 Cel Shading", 1},
+    {"Matcap", "dx11 --scene matcap", "D3D11 Matcap", 1},
+    {"D3D12: Cube", "dx12", "Direct3D 12", 0},
+};
+#define N_BENCH_ROWS ((int)(sizeof(kBenchRows) / sizeof(kBenchRows[0])))
+
+// A full-width benchmark row: a selection checkbox (label) + Avg + Min/Max labels.
+static void make_bench_top_row(HWND frame, int i, RECT *cr, int *py) {
+    int y = *py;
+    g_cbtn[i] = CreateWindowA("BUTTON", g_cbtn_short[i], WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                              cr->left, y + 2, 200, 22, frame, (HMENU)(INT_PTR)(ID_CHK_FIRST + i),
+                              g_hinst, NULL);
+    if (g_ui_font) SendMessage(g_cbtn[i], WM_SETFONT, (WPARAM)g_ui_font, TRUE);
+    SendMessage(g_cbtn[i], BM_SETCHECK, g_cbtn_sel[i] ? BST_CHECKED : BST_UNCHECKED, 0);
+    g_cbtn_avg[i] = CreateWindowA("STATIC", "", WS_CHILD | WS_VISIBLE | SS_LEFT, cr->left + 212, y + 6,
+                                  86, 24, frame, NULL, g_hinst, NULL);
+    if (g_ui_font_bold) SendMessage(g_cbtn_avg[i], WM_SETFONT, (WPARAM)g_ui_font_bold, TRUE);
+    g_cbtn_result[i] =
+        CreateWindowA("STATIC", "", WS_CHILD | WS_VISIBLE | SS_LEFT, cr->left + 300, y + 6,
+                      (cr->right - (cr->left + 300)), 24, frame, NULL, g_hinst, NULL);
+    if (g_ui_font) SendMessage(g_cbtn_result[i], WM_SETFONT, (WPARAM)g_ui_font, TRUE);
+    *py = y + 34;
+}
+
 static void show_benchmark(HWND frame) {
     destroy_content();
     g_cb_bench = 1;  // these buttons run a benchmark and poll for a result file
@@ -251,13 +314,17 @@ static void show_benchmark(HWND frame) {
 
     g_bench_append = 1;  // rows get --bench <secs> [+ --vsync] appended at launch
     g_placeholder = CreateWindowA(
-        "STATIC", "Benchmark one API, or Run All to sweep them. Per-frame data -> CSV.",
-        WS_CHILD | WS_VISIBLE | SS_LEFT, cr.left, cr.top, cr.right - cr.left - 200, 22, frame, NULL,
+        "STATIC", "Tick the tests to run, then Run Selected. Results open in Benchmark Results.",
+        WS_CHILD | WS_VISIBLE | SS_LEFT, cr.left, cr.top, cr.right - cr.left - 330, 22, frame, NULL,
         g_hinst, NULL);
     if (g_ui_font) SendMessage(g_placeholder, WM_SETFONT, (WPARAM)g_ui_font, TRUE);
 
-    // One-tap sequential sweep of every row.
-    g_run_all = CreateWindowA("BUTTON", "Run All  (sequential)", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+    // Top-right: open the Results screen, and run the selected rows sequentially.
+    g_results_btn = CreateWindowA("BUTTON", "Benchmark Results", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                  cr.right - 320, cr.top, 125, 32, frame,
+                                  (HMENU)(INT_PTR)ID_SHOW_RESULTS, g_hinst, NULL);
+    if (g_ui_font) SendMessage(g_results_btn, WM_SETFONT, (WPARAM)g_ui_font, TRUE);
+    g_run_all = CreateWindowA("BUTTON", "Run Selected", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                               cr.right - 190, cr.top, 190, 32, frame, (HMENU)(INT_PTR)ID_RUN_ALL,
                               g_hinst, NULL);
     if (g_ui_font) SendMessage(g_run_all, WM_SETFONT, (WPARAM)g_ui_font, TRUE);
@@ -283,49 +350,109 @@ static void show_benchmark(HWND frame) {
     if (g_ui_font) SendMessage(g_vsync_chk, WM_SETFONT, (WPARAM)g_ui_font, TRUE);
     SendMessage(g_vsync_chk, BM_SETCHECK, g_vsync_ui ? BST_CHECKED : BST_UNCHECKED, 0);
 
-    // apilabels MUST match the label each backend passes to aio_bench_finish (the
-    // DX11 ones = scene->label); args are the base specs (--bench/--vsync appended).
-    static const char *labels[] = {
-        "Vulkan",            "OpenGL",         "DDraw: D3D7",    "DDraw: 2D Blit",
-        "D3D8: Cube",        "D3D9: Cube",     "D3D10: Cube",
-        "D3D11: Cube",       "D3D11: Instanced", "D3D11: Tessellate", "D3D11: Compute",
-        "D3D11: Dolphin",    "D3D11: Raymarch", "D3D11: GS Explode", "D3D11: Cel",
-        "D3D11: Matcap",     "D3D12: Cube",
-    };
-    static const char *args[] = {
-        "vk", "gl", "dx7", "ddraw2d", "dx8", "dx9", "dx10", "dx11 --scene spin",
-        "dx11 --scene instanced", "dx11 --scene tess", "dx11 --scene compute",
-        "dx11 --scene dolphin", "dx11 --scene raymarch", "dx11 --scene gsexplode",
-        "dx11 --scene cel", "dx11 --scene matcap", "dx12",
-    };
-    static const char *apilabels[] = {
-        "Vulkan",          "OpenGL",         "Direct3D 7 (DirectDraw)", "DirectDraw 2D",
-        "Direct3D 8",      "Direct3D 9",     "Direct3D 10",
-        "D3D11 Cube",      "D3D11 Instanced", "D3D11 Tessellation", "D3D11 Compute Particles",
-        "D3D11 Dolphin",   "D3D11 Raymarch SDF", "D3D11 GS Exploder", "D3D11 Cel Shading",
-        "D3D11 Matcap",    "Direct3D 12",
-    };
-    g_cbtn_n = (int)(sizeof(args) / sizeof(args[0]));
-    int y = cr.top + 86;
-    for (int i = 0; i < g_cbtn_n; i++) {
-        g_cbtn_arg[i] = args[i];
-        g_cbtn_label[i] = apilabels[i];
-        g_cbtn_proc[i] = NULL;
-        g_cbtn[i] = CreateWindowA("BUTTON", labels[i], WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, cr.left,
-                                  y, 200, 28, frame, (HMENU)(INT_PTR)(ID_CB_FIRST + i), g_hinst, NULL);
-        if (g_ui_font) SendMessage(g_cbtn[i], WM_SETFONT, (WPARAM)g_ui_font, TRUE);
-        // Two labels right of the button (filled when the run finishes): a BOLD
-        // "Avg N" then a normal "Min N   Max N".
-        g_cbtn_avg[i] = CreateWindowA("STATIC", "", WS_CHILD | WS_VISIBLE | SS_LEFT, cr.left + 212,
-                                      y + 6, 86, 24, frame, NULL, g_hinst, NULL);
-        if (g_ui_font_bold) SendMessage(g_cbtn_avg[i], WM_SETFONT, (WPARAM)g_ui_font_bold, TRUE);
-        g_cbtn_result[i] =
-            CreateWindowA("STATIC", "", WS_CHILD | WS_VISIBLE | SS_LEFT, cr.left + 300, y + 6,
-                          (cr.right - (cr.left + 300)), 24, frame, NULL, g_hinst, NULL);
-        if (g_ui_font) SendMessage(g_cbtn_result[i], WM_SETFONT, (WPARAM)g_ui_font, TRUE);
-        y += 34;
+    // Seed selections (all on) once per session; survives expand/collapse + nav.
+    if (!g_sel_inited) {
+        for (int i = 0; i < N_BENCH_ROWS; i++) g_cbtn_sel[i] = 1;
+        g_sel_inited = 1;
     }
+    g_cbtn_n = N_BENCH_ROWS;
+    int firstD = -1, nD = 0;
+    for (int i = 0; i < g_cbtn_n; i++) {
+        g_cbtn_arg[i] = kBenchRows[i].arg;
+        g_cbtn_label[i] = kBenchRows[i].apilabel;
+        g_cbtn_short[i] = kBenchRows[i].label;
+        g_cbtn_d3d11[i] = kBenchRows[i].d3d11;
+        g_cbtn_proc[i] = NULL;
+        g_cbtn[i] = g_cbtn_avg[i] = g_cbtn_result[i] = NULL;
+        if (kBenchRows[i].d3d11) {
+            if (firstD < 0) firstD = i;
+            nD++;
+        }
+    }
+
+    int y = cr.top + 86;
+    int i = 0;
+    for (; i < firstD; i++) make_bench_top_row(frame, i, &cr, &y);  // rows before D3D11
+
+    // Collapsible D3D11 group: select-all checkbox + an expand/collapse toggle.
+    int allD = 1;
+    for (int k = firstD; k < firstD + nD; k++)
+        if (!g_cbtn_sel[k]) allD = 0;
+    g_d3d11_chk = CreateWindowA("BUTTON", "Direct3D 11", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                                cr.left, y + 2, 150, 22, frame, (HMENU)(INT_PTR)ID_D3D11_HDR, g_hinst,
+                                NULL);
+    if (g_ui_font) SendMessage(g_d3d11_chk, WM_SETFONT, (WPARAM)g_ui_font, TRUE);
+    SendMessage(g_d3d11_chk, BM_SETCHECK, allD ? BST_CHECKED : BST_UNCHECKED, 0);
+    g_d3d11_btn = CreateWindowA("BUTTON", g_d3d11_expanded ? "Hide scenes" : "Show scenes",
+                                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, cr.left + 156, y, 110, 26, frame,
+                                (HMENU)(INT_PTR)ID_D3D11_EXPAND, g_hinst, NULL);
+    if (g_ui_font) SendMessage(g_d3d11_btn, WM_SETFONT, (WPARAM)g_ui_font, TRUE);
+    y += 34;
+
+    if (g_d3d11_expanded) {  // 3-column grid of D3D11 scene checkboxes
+        for (int k = 0; k < nD; k++) {
+            int idx = firstD + k, col = k % 3, row = k / 3;
+            int cx = cr.left + 24 + col * 150, cy = y + row * 26;
+            g_cbtn[idx] =
+                CreateWindowA("BUTTON", kBenchRows[idx].label, WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                              cx, cy, 145, 22, frame, (HMENU)(INT_PTR)(ID_CHK_FIRST + idx), g_hinst,
+                              NULL);
+            if (g_ui_font) SendMessage(g_cbtn[idx], WM_SETFONT, (WPARAM)g_ui_font, TRUE);
+            SendMessage(g_cbtn[idx], BM_SETCHECK, g_cbtn_sel[idx] ? BST_CHECKED : BST_UNCHECKED, 0);
+        }
+        y += ((nD + 2) / 3) * 26 + 8;
+    }
+
+    for (i = firstD + nD; i < g_cbtn_n; i++) make_bench_top_row(frame, i, &cr, &y);  // D3D12 etc.
     restore_cached_results();  // re-show results already run this session
+}
+
+// Benchmark Results screen: the full Avg/Min/Max for every test run this session
+// (read from the in-memory cache, in canonical row order). Reached from the
+// Benchmark view's "Benchmark Results" button.
+static void show_bench_results(HWND frame) {
+    destroy_content();
+    g_cb_bench = 0;  // static results: no checkbox/sweep/poll logic
+    SetWindowTextA(g_header, "Benchmark Results");
+    RECT cr;
+    get_content_rect(frame, &cr);
+
+    g_run_all = CreateWindowA("BUTTON", "< Back to Benchmark", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                              cr.right - 190, cr.top, 190, 32, frame, (HMENU)(INT_PTR)ID_RESULTS_BACK,
+                              g_hinst, NULL);
+    if (g_ui_font) SendMessage(g_run_all, WM_SETFONT, (WPARAM)g_ui_font, TRUE);
+
+    g_placeholder = CreateWindowA(
+        "STATIC", "Results from this session. Full per-frame data is in AIO-Graphics-Test_bench.csv.",
+        WS_CHILD | WS_VISIBLE | SS_LEFT, cr.left, cr.top, cr.right - cr.left - 200, 22, frame, NULL,
+        g_hinst, NULL);
+    if (g_ui_font) SendMessage(g_placeholder, WM_SETFONT, (WPARAM)g_ui_font, TRUE);
+
+    int y = cr.top + 48;
+    g_cbtn_n = 0;
+    for (int r = 0; r < N_BENCH_ROWS && g_cbtn_n < MAX_CB; r++) {
+        int ci = cache_find(kBenchRows[r].apilabel);
+        if (ci < 0) continue;  // not run this session
+        int i = g_cbtn_n++;
+        g_cbtn_label[i] = kBenchRows[r].apilabel;
+        g_cbtn[i] = CreateWindowA("STATIC", kBenchRows[r].apilabel, WS_CHILD | WS_VISIBLE | SS_LEFT,
+                                  cr.left, y, 220, 22, frame, NULL, g_hinst, NULL);
+        if (g_ui_font) SendMessage(g_cbtn[i], WM_SETFONT, (WPARAM)g_ui_font, TRUE);
+        g_cbtn_avg[i] = CreateWindowA("STATIC", g_cache[ci].avg, WS_CHILD | WS_VISIBLE | SS_LEFT,
+                                      cr.left + 230, y, 90, 22, frame, NULL, g_hinst, NULL);
+        if (g_ui_font_bold) SendMessage(g_cbtn_avg[i], WM_SETFONT, (WPARAM)g_ui_font_bold, TRUE);
+        g_cbtn_result[i] = CreateWindowA("STATIC", g_cache[ci].mm, WS_CHILD | WS_VISIBLE | SS_LEFT,
+                                         cr.left + 326, y, cr.right - (cr.left + 326), 22, frame, NULL,
+                                         g_hinst, NULL);
+        if (g_ui_font) SendMessage(g_cbtn_result[i], WM_SETFONT, (WPARAM)g_ui_font, TRUE);
+        y += 28;
+    }
+    if (g_cbtn_n == 0) {
+        g_verdict = CreateWindowA("STATIC", "No benchmarks have been run yet this session.",
+                                  WS_CHILD | WS_VISIBLE | SS_LEFT, cr.left, y, cr.right - cr.left, 22,
+                                  frame, NULL, g_hinst, NULL);
+        if (g_ui_font) SendMessage(g_verdict, WM_SETFONT, (WPARAM)g_ui_font, TRUE);
+    }
 }
 
 // Direct3D 11 test-suite picker: each button launches one DX11 scene in a new
@@ -658,10 +785,15 @@ static LRESULT CALLBACK shell_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         }
         case WM_COMMAND: {
             int id = LOWORD(wParam);
-            if (id == ID_RUN_ALL && g_cb_bench && g_cbtn_n > 0) {  // sequential sweep
-                g_sweep_active = 1;
-                g_sweep_idx = 0;
-                launch_bench_row(hwnd, 0);
+            if (id == ID_RUN_ALL && g_cb_bench && g_cbtn_n > 0) {  // run selected rows in sequence
+                g_run_n = 0;
+                for (int k = 0; k < g_cbtn_n; k++)
+                    if (g_cbtn_sel[k]) g_run_list[g_run_n++] = k;
+                if (g_run_n > 0) {
+                    g_sweep_active = 1;
+                    g_run_pos = 0;
+                    launch_bench_row(hwnd, g_run_list[0]);
+                }
                 return 0;
             }
             if (id >= ID_DUR_FIRST && id < ID_DUR_FIRST + 4) {  // benchmark length
@@ -676,6 +808,44 @@ static LRESULT CALLBACK shell_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             }
             if (id == ID_VSYNC) {  // vsync toggle
                 g_vsync_ui = (SendMessage(g_vsync_chk, BM_GETCHECK, 0, 0) == BST_CHECKED) ? 1 : 0;
+                return 0;
+            }
+            {
+                int chk = id - ID_CHK_FIRST;  // a per-row selection checkbox toggled
+                if (chk >= 0 && chk < g_cbtn_n) {
+                    g_cbtn_sel[chk] =
+                        (g_cbtn[chk] && SendMessage(g_cbtn[chk], BM_GETCHECK, 0, 0) == BST_CHECKED) ? 1
+                                                                                                    : 0;
+                    if (g_cbtn_d3d11[chk] && g_d3d11_chk) {  // keep the group header in sync
+                        int all = 1;
+                        for (int k = 0; k < g_cbtn_n; k++)
+                            if (g_cbtn_d3d11[k] && !g_cbtn_sel[k]) all = 0;
+                        SendMessage(g_d3d11_chk, BM_SETCHECK, all ? BST_CHECKED : BST_UNCHECKED, 0);
+                    }
+                    return 0;
+                }
+            }
+            if (id == ID_D3D11_HDR) {  // select/deselect all D3D11 scenes
+                int on = (SendMessage(g_d3d11_chk, BM_GETCHECK, 0, 0) == BST_CHECKED) ? 1 : 0;
+                for (int k = 0; k < g_cbtn_n; k++)
+                    if (g_cbtn_d3d11[k]) {
+                        g_cbtn_sel[k] = on;
+                        if (g_cbtn[k])
+                            SendMessage(g_cbtn[k], BM_SETCHECK, on ? BST_CHECKED : BST_UNCHECKED, 0);
+                    }
+                return 0;
+            }
+            if (id == ID_D3D11_EXPAND) {  // show/hide the D3D11 scene grid
+                g_d3d11_expanded = !g_d3d11_expanded;
+                show_benchmark(hwnd);
+                return 0;
+            }
+            if (id == ID_SHOW_RESULTS) {
+                show_bench_results(hwnd);
+                return 0;
+            }
+            if (id == ID_RESULTS_BACK) {
+                show_benchmark(hwnd);
                 return 0;
             }
             int cb = id - ID_CB_FIRST;
@@ -743,11 +913,11 @@ static LRESULT CALLBACK shell_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
                     } else if (g_cbtn_result[i]) {
                         SetWindowTextA(g_cbtn_result[i], "(no result file)");
                     }
-                    // Run-All sweep: when the current row finishes, start the next.
-                    if (g_sweep_active && i == g_sweep_idx) {
-                        g_sweep_idx++;
-                        if (g_sweep_idx < g_cbtn_n)
-                            launch_bench_row(hwnd, g_sweep_idx);
+                    // Run-Selected sweep: when the current row finishes, start the next.
+                    if (g_sweep_active && g_run_pos < g_run_n && i == g_run_list[g_run_pos]) {
+                        g_run_pos++;
+                        if (g_run_pos < g_run_n)
+                            launch_bench_row(hwnd, g_run_list[g_run_pos]);
                         else
                             g_sweep_active = 0;  // sweep complete
                     }
