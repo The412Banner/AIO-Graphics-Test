@@ -57,7 +57,7 @@ static HWND g_edit_gl;   // GPU Info: OpenGL tab text
 static HWND g_placeholder;
 
 #define ID_CB_FIRST 3000  // content-area buttons (Benchmark + scene-picker views)
-#define MAX_CB 28
+#define MAX_CB 32
 static HWND g_cbtn[MAX_CB];
 static HWND g_cbtn_avg[MAX_CB];      // bold "Avg N" label next to each benchmark button
 static HWND g_cbtn_result[MAX_CB];   // "Min N   Max N" label next to each benchmark button
@@ -365,6 +365,7 @@ static const BenchRow kBenchRows[] = {
     {"Ocean", "dx11 --scene ocean", "D3D11 Ocean", 1},
     {"Mandelbulb", "dx11 --scene mandelbulb", "D3D11 Mandelbulb", 1},
     {"Nebula", "dx11 --scene nebula", "D3D11 Nebula", 1},
+    {"Showcase", "dx11 --scene showcase", "D3D11 Showcase", 1},
     {"GS Explode", "dx11 --scene gsexplode", "D3D11 GS Exploder", 1},
     {"Cel", "dx11 --scene cel", "D3D11 Cel Shading", 1},
     {"Matcap", "dx11 --scene matcap", "D3D11 Matcap", 1},
@@ -635,7 +636,8 @@ static void show_dx11_scenes(HWND frame) {
                                    "Compute particles",     "Dolphin (swim)",
                                    "Raymarch SDF (shader)", "Ocean (raymarched)",
                                    "Mandelbulb fractal",    "Volumetric nebula",
-                                   "GS mesh exploder",      "Cel shading (torus)",
+                                   "Showcase (reflect+shadow)", "GS mesh exploder",
+                                   "Cel shading (torus)",
                                    "Matcap (chrome ball)",  "Atomics (histogram)",
                                    "Draw stress 128",       "Draw stress 256",
                                    "Draw stress 512",       "Draw stress 1024",
@@ -645,7 +647,8 @@ static void show_dx11_scenes(HWND frame) {
                                  "dx11 --scene compute",   "dx11 --scene dolphin",
                                  "dx11 --scene raymarch",  "dx11 --scene ocean",
                                  "dx11 --scene mandelbulb", "dx11 --scene nebula",
-                                 "dx11 --scene gsexplode", "dx11 --scene cel",
+                                 "dx11 --scene showcase",  "dx11 --scene gsexplode",
+                                 "dx11 --scene cel",
                                  "dx11 --scene matcap",    "dx11 --scene atomics",
                                  "dx11 --scene drawstress --draws 128",
                                  "dx11 --scene drawstress --draws 256",

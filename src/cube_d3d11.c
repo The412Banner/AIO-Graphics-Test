@@ -1606,6 +1606,59 @@ static int nebula_init(ID3D11Device *d, ID3D11DeviceContext *c, int w, int h) {
 static void nebula_frame(ID3D11DeviceContext *c, double t, float a) { stoy_frame(c, &g_nebula, t, a); }
 static void nebula_cleanup(void) { stoy_cleanup(&g_nebula); }
 
+// ----------------------------- SHOWCASE scene -------------------------------
+// A full lit/shadowed/reflective scene: three animated SDF objects (a bouncing
+// sphere, an orbiting sphere, a spinning rounded box) on a reflective checkered
+// floor, with Phong lighting, soft ray-marched shadows, and a fresnel floor
+// reflection (one bounce), under a slowly orbiting camera. Reflections + shadows
+// fall out of ray-marching for free (extra rays) - no render targets needed.
+static const char *kShowcaseHLSL =
+    AIO_STOY_HEADER
+    "float2 rot2(float2 v,float a){float s=sin(a),c=cos(a);return float2(v.x*c-v.y*s,v.x*s+v.y*c);}\n"
+    "float sdSph(float3 p,float r){return length(p)-r;}\n"
+    "float sdBox(float3 p,float3 b){float3 q=abs(p)-b;return length(max(q,0.0))+min(max(q.x,max(q.y,q.z)),0.0);}\n"
+    "float2 mapS(float3 p){float t=iTime;\n"
+    "  float2 res=float2(p.y+1.0,0.0);\n"
+    "  float3 a=float3(sin(t*0.9)*1.6,abs(sin(t*1.6))*1.3-0.45,cos(t*0.7)*1.6);\n"
+    "  float d=sdSph(p-a,0.5);if(d<res.x)res=float2(d,1.0);\n"
+    "  float3 b=float3(cos(t*1.1)*2.2,sin(t*0.9)*0.4+0.1,sin(t*1.1)*2.2);\n"
+    "  d=sdSph(p-b,0.4);if(d<res.x)res=float2(d,2.0);\n"
+    "  float3 q=p;q.xz=rot2(q.xz,t*0.6);\n"
+    "  d=sdBox(q,float3(0.45,0.45,0.45))-0.08;if(d<res.x)res=float2(d,3.0);\n"
+    "  return res;}\n"
+    "float3 nrm(float3 p){float2 e=float2(0.0015,0.0);\n"
+    "  return normalize(float3(mapS(p+e.xyy).x-mapS(p-e.xyy).x,mapS(p+e.yxy).x-mapS(p-e.yxy).x,mapS(p+e.yyx).x-mapS(p-e.yyx).x));}\n"
+    "float shadow(float3 ro,float3 rd){float res=1.0,t=0.04;\n"
+    "  [loop]for(int i=0;i<36;i++){float h=mapS(ro+rd*t).x;if(h<0.001)return 0.0;res=min(res,12.0*h/t);t+=clamp(h,0.02,0.4);if(t>22.0)break;}return saturate(res);}\n"
+    "float march(float3 ro,float3 rd,out float mid){float t=0.0;mid=-1.0;\n"
+    "  [loop]for(int i=0;i<100;i++){float2 r=mapS(ro+rd*t);if(r.x<0.001){mid=r.y;return t;}t+=r.x;if(t>50.0)break;}return -1.0;}\n"
+    "float3 matc(float mid,float3 p){if(mid<0.5){float c=fmod(floor(p.x)+floor(p.z),2.0);return lerp(float3(0.18,0.18,0.20),float3(0.55,0.55,0.58),c);}\n"
+    "  if(mid<1.5)return float3(0.90,0.25,0.18);if(mid<2.5)return float3(0.20,0.55,0.92);return float3(0.95,0.78,0.20);}\n"
+    "float3 sky(float3 rd){return lerp(float3(0.5,0.62,0.85),float3(0.12,0.16,0.30),saturate(rd.y*1.2+0.1));}\n"
+    "float3 shade(float3 p,float3 rd,float mid){float3 n=nrm(p);float3 L=normalize(float3(4.0,6.5,3.0)-p);\n"
+    "  float dif=saturate(dot(n,L));float sh=shadow(p+n*0.02,L);float3 base=matc(mid,p);\n"
+    "  float3 H=normalize(L-rd);float spec=pow(saturate(dot(n,H)),48.0)*sh;\n"
+    "  float3 amb=base*0.18*(0.5+0.5*n.y);return base*dif*sh+amb+spec*0.6;}\n"
+    "float4 PSMain(VSOut inp):SV_TARGET{float2 uv=inp.ndc;uv.x*=iAspect;\n"
+    "  float a=iTime*0.18;float3 ro=float3(sin(a)*5.0,2.6,cos(a)*5.0);float3 ta=float3(0,0.2,0);\n"
+    "  float3 fw=normalize(ta-ro),rt=normalize(cross(float3(0,1,0),fw)),up=cross(fw,rt);\n"
+    "  float3 rd=normalize(uv.x*rt+uv.y*up+1.8*fw);\n"
+    "  float mid;float t=march(ro,rd,mid);float3 col;\n"
+    "  if(t>0.0){float3 p=ro+rd*t;col=shade(p,rd,mid);\n"
+    "    if(mid<0.5){float3 n=nrm(p);float3 r=reflect(rd,n);float mid2;float t2=march(p+n*0.03,r,mid2);\n"
+    "      float3 refl=(t2>0.0)?shade(p+r*t2,r,mid2):sky(r);\n"
+    "      float fres=0.04+0.5*pow(1.0-saturate(dot(n,-rd)),5.0);col=lerp(col,refl,saturate(fres*1.4));}\n"
+    "    col=lerp(col,sky(rd),1.0-exp(-0.0009*t*t*t));\n"
+    "  }else col=sky(rd);\n"
+    "  col=pow(saturate(col),1.0/2.2);return float4(col,1.0);}\n";
+
+static StoyState g_show;
+static int show_init(ID3D11Device *d, ID3D11DeviceContext *c, int w, int h) {
+    (void)c; (void)w; (void)h; return stoy_init(d, &g_show, kShowcaseHLSL);
+}
+static void show_frame(ID3D11DeviceContext *c, double t, float a) { stoy_frame(c, &g_show, t, a); }
+static void show_cleanup(void) { stoy_cleanup(&g_show); }
+
 // ========================= GEOMETRY-SHADER scene ===========================
 // A mesh exploder: the geometry shader receives each triangle, computes its face
 // normal, pushes the whole triangle outward along that normal by a time-varying
@@ -2320,6 +2373,7 @@ static const D3D11Scene kScenes[] = {
     {"ocean", "D3D11 Ocean", ocean_init, ocean_frame, ocean_cleanup},
     {"mandelbulb", "D3D11 Mandelbulb", bulb_init, bulb_frame, bulb_cleanup},
     {"nebula", "D3D11 Nebula", nebula_init, nebula_frame, nebula_cleanup},
+    {"showcase", "D3D11 Showcase", show_init, show_frame, show_cleanup},
     {"gsexplode", "D3D11 GS Exploder", gs_init, gs_frame, gs_cleanup},
     {"cel", "D3D11 Cel Shading", cel_init, cel_frame, cel_cleanup},
     {"matcap", "D3D11 Matcap", mat_init, mat_frame, mat_cleanup},
