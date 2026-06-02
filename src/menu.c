@@ -57,7 +57,7 @@ static HWND g_edit_gl;   // GPU Info: OpenGL tab text
 static HWND g_placeholder;
 
 #define ID_CB_FIRST 3000  // content-area buttons (Benchmark + scene-picker views)
-#define MAX_CB 24
+#define MAX_CB 28
 static HWND g_cbtn[MAX_CB];
 static HWND g_cbtn_avg[MAX_CB];      // bold "Avg N" label next to each benchmark button
 static HWND g_cbtn_result[MAX_CB];   // "Min N   Max N" label next to each benchmark button
@@ -347,6 +347,7 @@ typedef struct {
 } BenchRow;
 static const BenchRow kBenchRows[] = {
     {"Vulkan", "vk", "Vulkan", 0},
+    {"VK: Phong", "vk --scene phong", "Vulkan Phong", 0},
     {"OpenGL", "gl", "OpenGL", 0},
     {"DDraw: D3D7", "dx7", "Direct3D 7 (DirectDraw)", 0},
     {"DDraw: 2D Blit", "ddraw2d", "DirectDraw 2D", 0},
@@ -674,6 +675,39 @@ static void show_dx11_scenes(HWND frame) {
     }
 }
 
+// Vulkan scene picker: native-Vulkan tests (no DXVK). Launch-only buttons.
+static void show_vk_scenes(HWND frame) {
+    destroy_content();
+    g_cb_bench = 0;
+    SetWindowTextA(g_header, "Cube - Vulkan (native)");
+    RECT cr;
+    get_content_rect(frame, &cr);
+
+    g_placeholder = CreateWindowA(
+        "STATIC",
+        "Native Vulkan tests (no DXVK). Each opens in a new window; the menu stays\n"
+        "here. Press Esc in a test window to close it.",
+        WS_CHILD | WS_VISIBLE | SS_LEFT, cr.left, cr.top, cr.right - cr.left, 56, frame, NULL, g_hinst,
+        NULL);
+    if (g_ui_font) SendMessage(g_placeholder, WM_SETFONT, (WPARAM)g_ui_font, TRUE);
+
+    static const char *labels[] = {"Spinning cube (textured)", "Phong-lit cube"};
+    static const char *args[] = {"vk", "vk --scene phong"};
+    g_cbtn_n = (int)(sizeof(args) / sizeof(args[0]));
+    int y = cr.top + 70;
+    for (int i = 0; i < g_cbtn_n; i++) {
+        g_cbtn_arg[i] = args[i];
+        g_cbtn_label[i] = NULL;
+        g_cbtn_proc[i] = NULL;
+        g_cbtn_result[i] = NULL;
+        g_cbtn_avg[i] = NULL;
+        g_cbtn[i] = CreateWindowA("BUTTON", labels[i], WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, cr.left,
+                                  y, 240, 34, frame, (HMENU)(INT_PTR)(ID_CB_FIRST + i), g_hinst, NULL);
+        if (g_ui_font) SendMessage(g_cbtn[i], WM_SETFONT, (WPARAM)g_ui_font, TRUE);
+        y += 44;
+    }
+}
+
 // DirectDraw picker: the legacy ddraw path DXVK does NOT implement (ddraw ->
 // wined3d -> GL). Two launch-only buttons: the Direct3D 7 immediate-mode cube
 // and a pure-2D DirectDraw blit test.
@@ -869,14 +903,9 @@ static void on_select(HWND frame, int action) {
         case AIO_MODE_GPUINFO:
             show_gpuinfo(frame);
             break;
-        case AIO_MODE_CUBE_VK: {
-            HANDLE h = launch_cube_window("vk");
-            if (h) CloseHandle(h);
-            show_placeholder(frame, "Cube - Vulkan",
-                             "Launched the Vulkan cube in a new window.\n\n"
-                             "The menu stays here - switch back any time, or launch another test.");
+        case AIO_MODE_CUBE_VK:
+            show_vk_scenes(frame);  // pick the textured cube or the Phong-lit cube
             break;
-        }
         case AIO_MODE_CUBE_GL: {
             HANDLE h = launch_cube_window("gl");
             if (h) CloseHandle(h);

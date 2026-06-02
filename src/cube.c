@@ -2083,7 +2083,20 @@ static void demo_prepare_vs(struct demo *demo) {
     demo->vert_shader_module = demo_prepare_shader_module("cube.vert", demo, vs_code, sizeof(vs_code));
 }
 
+// AIO Graphics Test: optional Vulkan scene selector (--scene phong|meshshader).
+// Empty string = the default textured cube. Set from the command line before
+// demo_prepare runs.
+char g_aio_vk_scene[32] = "";
+
 static void demo_prepare_fs(struct demo *demo) {
+    if (strcmp(g_aio_vk_scene, "phong") == 0) {  // native-VK Phong-lit material
+        const uint32_t fs_code[] = {
+#include "cube_phong.frag.inc"
+        };
+        demo->frag_shader_module =
+            demo_prepare_shader_module("cube_phong.frag", demo, fs_code, sizeof(fs_code));
+        return;
+    }
     const uint32_t fs_code[] = {
 #include "cube.frag.inc"
     };
@@ -4348,6 +4361,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR pCmdLine,
             AIO_FREE_ARGV();
             return 0;
         }
+        // Vulkan scene selector (--scene phong | meshshader); empty = textured cube.
+        for (int iii = 0; iii < argc - 1; iii++)
+            if (argv && argv[iii] && strcmp(argv[iii], "--scene") == 0 && argv[iii + 1]) {
+                strncpy(g_aio_vk_scene, argv[iii + 1], sizeof(g_aio_vk_scene) - 1);
+                g_aio_vk_scene[sizeof(g_aio_vk_scene) - 1] = '\0';
+            }
         // fall through to the Vulkan cube below
     } else {
         // Default: the app shell (persistent menu + in-frame GPU Info).
@@ -4371,8 +4390,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR pCmdLine,
     }
 
     demo.connection = hInstance;
+    // Active API label (also the benchmark result key): plain Vulkan, or a scene variant.
+    const char *aio_vk_label = (strcmp(g_aio_vk_scene, "phong") == 0) ? "Vulkan Phong" : "Vulkan";
     // Title shows the active API layer; live FPS is appended each second in the run loop.
-    strncpy(demo.name, "AIO Graphics Test  -  Vulkan", APP_NAME_STR_LEN);
+    snprintf(demo.name, APP_NAME_STR_LEN, "AIO Graphics Test  -  %s", aio_vk_label);
     demo_create_window(&demo);
     // Vsync = FIFO; uncapped = IMMEDIATE (swapchain falls back to FIFO if absent).
     demo.presentMode = aio_vsync ? VK_PRESENT_MODE_FIFO_KHR : VK_PRESENT_MODE_IMMEDIATE_KHR;
@@ -4383,7 +4404,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR pCmdLine,
     done = false;  // initialize loop condition variable
 
     // AIO Graphics Test: live FPS HUD (title bar + in-window overlay).
-    const char *aio_api = "Vulkan";  // active API label (per backend)
+    const char *aio_api = aio_vk_label;  // active API label (per backend / scene)
     char aio_hud_init[64];
     ULONGLONG aio_last_ms = GetTickCount64();
     uint64_t aio_last_frame = 0;

@@ -51,6 +51,7 @@ jobs:
         run: |
           glslangValidator -V -x -o src/cube.vert.inc src/cube.vert
           glslangValidator -V -x -o src/cube.frag.inc src/cube.frag
+          glslangValidator -V -x -o src/cube_phong.frag.inc src/cube_phong.frag
 
       - name: Compile resources (app icon)
         run: ${{ matrix.prefix }}-windres -I src src/app.rc -o app_res.o
