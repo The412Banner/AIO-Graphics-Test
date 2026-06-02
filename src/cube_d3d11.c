@@ -1659,6 +1659,54 @@ static int show_init(ID3D11Device *d, ID3D11DeviceContext *c, int w, int h) {
 static void show_frame(ID3D11DeviceContext *c, double t, float a) { stoy_frame(c, &g_show, t, a); }
 static void show_cleanup(void) { stoy_cleanup(&g_show); }
 
+// ------------------------------- SPACE scene --------------------------------
+// A procedural planet (ocean/land/snow + a fresnel atmosphere rim-glow), three
+// orbiting noise-displaced asteroids, and a chrome sphere that reflects the
+// scene, sun-lit with soft shadows over a starfield + faint nebula. Reflections,
+// shadows, lighting and moving (orbiting) objects, space-themed.
+static const char *kSpaceHLSL =
+    AIO_STOY_HEADER
+    "float h31(float3 p){p=frac(p*0.3183099+0.1);p*=17.0;return frac(p.x*p.y*p.z*(p.x+p.y+p.z));}\n"
+    "float n3(float3 p){float3 i=floor(p),f=frac(p);f=f*f*(3.0-2.0*f);\n"
+    "  return lerp(lerp(lerp(h31(i),h31(i+float3(1,0,0)),f.x),lerp(h31(i+float3(0,1,0)),h31(i+float3(1,1,0)),f.x),f.y),\n"
+    "              lerp(lerp(h31(i+float3(0,0,1)),h31(i+float3(1,0,1)),f.x),lerp(h31(i+float3(0,1,1)),h31(i+float3(1,1,1)),f.x),f.y),f.z);}\n"
+    "float fbm3(float3 p){float s=0.0,a=0.5;[unroll]for(int i=0;i<5;i++){s+=a*n3(p);p=p*2.02+0.1;a*=0.5;}return s;}\n"
+    "float3 astP(int i){float t=iTime*0.3+i*2.094;float rad=3.4+i*0.6;return float3(cos(t)*rad,sin(t*0.7+i)*0.8,sin(t)*rad);}\n"
+    "float2 mapSp(float3 p){\n"
+    "  float planet=length(p)-(2.0+(fbm3(normalize(p)*3.0)-0.5)*0.25);float2 res=float2(planet,0.0);\n"
+    "  [unroll]for(int i=0;i<3;i++){float3 ap=astP(i);float d=length(p-ap)-(0.35+(fbm3(p*2.0-ap)-0.5)*0.12);if(d<res.x)res=float2(d,1.0);}\n"
+    "  float3 cp=float3(cos(iTime*0.5)*2.9,1.2,sin(iTime*0.5)*2.9);float d=length(p-cp)-0.5;if(d<res.x)res=float2(d,2.0);\n"
+    "  return res;}\n"
+    "float3 nrmSp(float3 p){float2 e=float2(0.002,0.0);return normalize(float3(mapSp(p+e.xyy).x-mapSp(p-e.xyy).x,mapSp(p+e.yxy).x-mapSp(p-e.yxy).x,mapSp(p+e.yyx).x-mapSp(p-e.yyx).x));}\n"
+    "float shSp(float3 ro,float3 rd){float res=1.0,t=0.06;[loop]for(int i=0;i<26;i++){float h=mapSp(ro+rd*t).x;if(h<0.001)return 0.0;res=min(res,10.0*h/t);t+=clamp(h,0.05,0.6);if(t>14.0)break;}return saturate(res);}\n"
+    "float marchSp(float3 ro,float3 rd,out float mid){float t=0.0;mid=-1.0;[loop]for(int i=0;i<110;i++){float2 r=mapSp(ro+rd*t);if(r.x<0.001){mid=r.y;return t;}t+=r.x*0.7;if(t>40.0)break;}return -1.0;}\n"
+    "float3 stars(float3 rd){float3 g=floor(rd*140.0);float hh=h31(g);float s=0.0;if(hh>0.986)s=pow((hh-0.986)/0.014,3.0);\n"
+    "  float3 neb=float3(0.03,0.02,0.06)+float3(0.06,0.02,0.10)*fbm3(rd*2.5+5.0);return neb+s*float3(0.9,0.95,1.0);}\n"
+    "float3 planetCol(float3 p){float3 dir=normalize(p);float h=fbm3(dir*3.0);\n"
+    "  float3 c=lerp(float3(0.04,0.18,0.40),float3(0.25,0.42,0.18),smoothstep(0.45,0.55,h));return lerp(c,float3(0.85,0.88,0.92),smoothstep(0.72,0.8,h));}\n"
+    "float3 shadeSp(float3 p,float3 rd,float mid){float3 n=nrmSp(p);float3 L=normalize(float3(0.7,0.5,-0.4));\n"
+    "  float dif=saturate(dot(n,L));float sh=shSp(p+n*0.03,L);\n"
+    "  if(mid<0.5){float3 base=planetCol(p);float3 col=base*(0.05+dif*sh);float fres=pow(1.0-saturate(dot(n,-rd)),3.0);return col+float3(0.2,0.45,0.9)*fres*0.7;}\n"
+    "  if(mid<1.5){float3 base=float3(0.32,0.30,0.28)*(0.7+0.3*fbm3(p*4.0));return base*(0.06+dif*sh);}\n"
+    "  return float3(0.0,0.0,0.0);}\n"
+    "float4 PSMain(VSOut inp):SV_TARGET{float2 uv=inp.ndc;uv.x*=iAspect;\n"
+    "  float a=iTime*0.12;float3 ro=float3(sin(a)*6.5,2.0,cos(a)*6.5);float3 ta=float3(0,0,0);\n"
+    "  float3 fw=normalize(ta-ro),rt=normalize(cross(float3(0,1,0),fw)),up=cross(fw,rt);float3 rd=normalize(uv.x*rt+uv.y*up+1.7*fw);\n"
+    "  float mid;float t=marchSp(ro,rd,mid);float3 col;\n"
+    "  if(t>0.0){float3 p=ro+rd*t;\n"
+    "    if(mid>1.5){float3 n=nrmSp(p);float3 r=reflect(rd,n);float m2;float t2=marchSp(p+n*0.03,r,m2);\n"
+    "      col=(t2>0.0)?shadeSp(p+r*t2,r,m2):stars(r);float fres=0.1+0.9*pow(1.0-saturate(dot(n,-rd)),4.0);col=lerp(float3(0.05,0.05,0.06),col,fres);}\n"
+    "    else col=shadeSp(p,rd,mid);\n"
+    "  }else col=stars(rd);\n"
+    "  col=pow(saturate(col),1.0/2.2);return float4(col,1.0);}\n";
+
+static StoyState g_space;
+static int space_init(ID3D11Device *d, ID3D11DeviceContext *c, int w, int h) {
+    (void)c; (void)w; (void)h; return stoy_init(d, &g_space, kSpaceHLSL);
+}
+static void space_frame(ID3D11DeviceContext *c, double t, float a) { stoy_frame(c, &g_space, t, a); }
+static void space_cleanup(void) { stoy_cleanup(&g_space); }
+
 // ========================= GEOMETRY-SHADER scene ===========================
 // A mesh exploder: the geometry shader receives each triangle, computes its face
 // normal, pushes the whole triangle outward along that normal by a time-varying
@@ -2374,6 +2422,7 @@ static const D3D11Scene kScenes[] = {
     {"mandelbulb", "D3D11 Mandelbulb", bulb_init, bulb_frame, bulb_cleanup},
     {"nebula", "D3D11 Nebula", nebula_init, nebula_frame, nebula_cleanup},
     {"showcase", "D3D11 Showcase", show_init, show_frame, show_cleanup},
+    {"space", "D3D11 Space", space_init, space_frame, space_cleanup},
     {"gsexplode", "D3D11 GS Exploder", gs_init, gs_frame, gs_cleanup},
     {"cel", "D3D11 Cel Shading", cel_init, cel_frame, cel_cleanup},
     {"matcap", "D3D11 Matcap", mat_init, mat_frame, mat_cleanup},
