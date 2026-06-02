@@ -235,6 +235,66 @@ static void build_color_cube(ColVertex *out) {
         }
 }
 
+// Position + normal vertex + procedural mesh builders, shared by the lit scenes
+// (cel shading, matcap). Both produce a flat (non-indexed) triangle list.
+typedef struct {
+    float pos[3];
+    float nrm[3];
+} PNVertex;
+
+// UV sphere of radius 1 (normal == position). Returns vertex count = rings*sectors*6.
+static int build_sphere_pn(PNVertex *out, int rings, int sectors) {
+    int n = 0;
+    for (int i = 0; i < rings; i++) {
+        float t0 = (float)i / rings * 3.14159265f, t1 = (float)(i + 1) / rings * 3.14159265f;
+        for (int j = 0; j < sectors; j++) {
+            float p0 = (float)j / sectors * 6.2831853f, p1 = (float)(j + 1) / sectors * 6.2831853f;
+#define AIO_SPN(t, p, dst)                                                  \
+    do {                                                                    \
+        float st = sinf(t), ct = cosf(t), cp = cosf(p), sp = sinf(p);       \
+        (dst).pos[0] = st * cp; (dst).pos[1] = ct; (dst).pos[2] = st * sp;  \
+        (dst).nrm[0] = (dst).pos[0]; (dst).nrm[1] = (dst).pos[1]; (dst).nrm[2] = (dst).pos[2]; \
+    } while (0)
+            PNVertex a, b, c, d;
+            AIO_SPN(t0, p0, a);
+            AIO_SPN(t1, p0, b);
+            AIO_SPN(t1, p1, c);
+            AIO_SPN(t0, p1, d);
+#undef AIO_SPN
+            out[n++] = a; out[n++] = b; out[n++] = c;
+            out[n++] = a; out[n++] = c; out[n++] = d;
+        }
+    }
+    return n;
+}
+
+// Torus with analytic normals. Returns vertex count = nring*nside*6.
+static int build_torus_pn(PNVertex *out, int nring, int nside, float R, float r) {
+    int n = 0;
+    for (int i = 0; i < nring; i++) {
+        float u0 = (float)i / nring * 6.2831853f, u1 = (float)(i + 1) / nring * 6.2831853f;
+        for (int j = 0; j < nside; j++) {
+            float v0 = (float)j / nside * 6.2831853f, v1 = (float)(j + 1) / nside * 6.2831853f;
+#define AIO_TPN(u, v, dst)                                                       \
+    do {                                                                         \
+        float cu = cosf(u), su = sinf(u), cv = cosf(v), sv = sinf(v);            \
+        (dst).pos[0] = (R + r * cv) * cu; (dst).pos[1] = (R + r * cv) * su;      \
+        (dst).pos[2] = r * sv;                                                   \
+        (dst).nrm[0] = cv * cu; (dst).nrm[1] = cv * su; (dst).nrm[2] = sv;       \
+    } while (0)
+            PNVertex a, b, c, d;
+            AIO_TPN(u0, v0, a);
+            AIO_TPN(u1, v0, b);
+            AIO_TPN(u1, v1, c);
+            AIO_TPN(u0, v1, d);
+#undef AIO_TPN
+            out[n++] = a; out[n++] = b; out[n++] = c;
+            out[n++] = a; out[n++] = c; out[n++] = d;
+        }
+    }
+    return n;
+}
+
 // ================================ SPIN scene =================================
 static const char *kSpinHLSL =
     "cbuffer CB : register(b0) { row_major float4x4 mvp; };\n"
@@ -1538,6 +1598,251 @@ static void gs_cleanup(void) {
     memset(&g_gs, 0, sizeof(g_gs));
 }
 
+// Shared 144-byte constant buffer for the lit PN scenes: an MVP matrix, a second
+// matrix (world for cel, world-view for matcap), and a spare float4.
+typedef struct {
+    float mvp[16];
+    float m2[16];
+    float v4[4];
+} PNCB;
+
+// Creates the POSITION+NORMAL input layout from a VS blob (offsets 0 and 12).
+static void make_pn_layout(ID3D11Device *dev, ID3DBlob *vsb, ID3D11InputLayout **out) {
+    D3D11_INPUT_ELEMENT_DESC il[] = {
+        {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
+        {"NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0},
+    };
+    ID3D11Device_CreateInputLayout(dev, il, 2, ID3D10Blob_GetBufferPointer(vsb),
+                                   ID3D10Blob_GetBufferSize(vsb), out);
+}
+
+// Creates a CULL_NONE solid rasterizer state (shared default for the lit scenes).
+static void make_cullnone_rs(ID3D11Device *dev, ID3D11RasterizerState **out) {
+    D3D11_RASTERIZER_DESC rd;
+    memset(&rd, 0, sizeof(rd));
+    rd.FillMode = D3D11_FILL_SOLID;
+    rd.CullMode = D3D11_CULL_NONE;
+    rd.DepthClipEnable = TRUE;
+    ID3D11Device_CreateRasterizerState(dev, &rd, out);
+}
+
+// ============================== CEL-SHADING scene ===========================
+// Toon shading: the diffuse term dot(N,L) is quantised into a few flat bands and
+// a dark silhouette outline is drawn where the surface turns away from the camera.
+// A classic non-photoreal look; tests banded lighting + a rim/outline test. Mesh
+// = a torus (the bands read clearly on its curvature).
+static const char *kCelHLSL =
+    "cbuffer CB : register(b0){ row_major float4x4 mvp; row_major float4x4 world; float4 eye; };\n"
+    "struct VSIn{ float3 pos:POSITION; float3 nrm:NORMAL; };\n"
+    "struct VSOut{ float4 pos:SV_POSITION; float3 wn:TEXCOORD0; float3 wp:TEXCOORD1; };\n"
+    "VSOut VSMain(VSIn i){ VSOut o; o.pos=mul(float4(i.pos,1.0),mvp);\n"
+    "  o.wn=mul(float4(i.nrm,0.0),world).xyz; o.wp=mul(float4(i.pos,1.0),world).xyz; return o; }\n"
+    "float4 PSMain(VSOut i):SV_TARGET{\n"
+    "  float3 N=normalize(i.wn); float3 L=normalize(float3(0.6,0.8,0.5));\n"
+    "  float d=saturate(dot(N,L));\n"
+    "  float3 c1=float3(0.10,0.16,0.40), c2=float3(0.16,0.42,0.80);\n"
+    "  float3 c3=float3(0.45,0.72,0.95), c4=float3(0.92,0.97,1.0);\n"
+    "  float3 col = d<0.25?c1 : (d<0.5?c2 : (d<0.78?c3 : c4));\n"
+    "  float3 V=normalize(eye.xyz - i.wp);\n"
+    "  if (dot(N,V) < 0.3) col=float3(0.02,0.02,0.05);\n"
+    "  return float4(col,1.0);\n"
+    "}\n";
+
+static struct {
+    ID3D11VertexShader *vs;
+    ID3D11PixelShader *ps;
+    ID3D11InputLayout *layout;
+    ID3D11Buffer *vbo, *cbo;
+    ID3D11RasterizerState *rs;
+    int vcount;
+} g_cel;
+
+static int cel_init(ID3D11Device *dev, ID3D11DeviceContext *ctx, int w, int h) {
+    (void)ctx;
+    (void)w;
+    (void)h;
+    ID3DBlob *vsb = compile_hlsl(kCelHLSL, "VSMain", "vs_4_0");
+    ID3DBlob *psb = compile_hlsl(kCelHLSL, "PSMain", "ps_4_0");
+    if (!vsb || !psb) return 1;
+    ID3D11Device_CreateVertexShader(dev, ID3D10Blob_GetBufferPointer(vsb),
+                                    ID3D10Blob_GetBufferSize(vsb), NULL, &g_cel.vs);
+    ID3D11Device_CreatePixelShader(dev, ID3D10Blob_GetBufferPointer(psb),
+                                   ID3D10Blob_GetBufferSize(psb), NULL, &g_cel.ps);
+    make_pn_layout(dev, vsb, &g_cel.layout);
+    ID3D10Blob_Release(vsb);
+    ID3D10Blob_Release(psb);
+
+    const int nring = 48, nside = 24;
+    int vc = nring * nside * 6;
+    PNVertex *verts = (PNVertex *)malloc((size_t)vc * sizeof(PNVertex));
+    if (!verts) return 1;
+    g_cel.vcount = build_torus_pn(verts, nring, nside, 1.15f, 0.45f);
+    D3D11_BUFFER_DESC vbd;
+    memset(&vbd, 0, sizeof(vbd));
+    vbd.ByteWidth = (UINT)(g_cel.vcount * sizeof(PNVertex));
+    vbd.Usage = D3D11_USAGE_IMMUTABLE;
+    vbd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+    D3D11_SUBRESOURCE_DATA sr;
+    memset(&sr, 0, sizeof(sr));
+    sr.pSysMem = verts;
+    ID3D11Device_CreateBuffer(dev, &vbd, &sr, &g_cel.vbo);
+    free(verts);
+
+    D3D11_BUFFER_DESC cbd;
+    memset(&cbd, 0, sizeof(cbd));
+    cbd.ByteWidth = sizeof(PNCB);
+    cbd.Usage = D3D11_USAGE_DYNAMIC;
+    cbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    cbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    ID3D11Device_CreateBuffer(dev, &cbd, NULL, &g_cel.cbo);
+    make_cullnone_rs(dev, &g_cel.rs);
+    return (g_cel.vs && g_cel.ps && g_cel.layout && g_cel.vbo && g_cel.cbo && g_cel.rs) ? 0 : 1;
+}
+
+static void cel_frame(ID3D11DeviceContext *ctx, double t, float aspect) {
+    Mat4 world = mat_rotate(0.4f, 1.0f, 0.25f, (float)t * 0.6f);
+    Mat4 mvp = mat_mul(mat_mul(world, mat_translate(0.0f, 0.0f, -4.0f)),
+                       mat_perspective(0.7f, aspect, 0.1f, 100.0f));
+    D3D11_MAPPED_SUBRESOURCE m;
+    if (SUCCEEDED(ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)g_cel.cbo, 0,
+                                          D3D11_MAP_WRITE_DISCARD, 0, &m))) {
+        PNCB *cb = (PNCB *)m.pData;
+        memcpy(cb->mvp, mvp.m, sizeof(mvp.m));
+        memcpy(cb->m2, world.m, sizeof(world.m));
+        cb->v4[0] = 0.0f;
+        cb->v4[1] = 0.0f;
+        cb->v4[2] = 4.0f;  // eye at +z (camera pulled back via -z translate)
+        cb->v4[3] = 0.0f;
+        ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)g_cel.cbo, 0);
+    }
+    UINT stride = sizeof(PNVertex), offset = 0;
+    ID3D11DeviceContext_RSSetState(ctx, g_cel.rs);
+    ID3D11DeviceContext_IASetInputLayout(ctx, g_cel.layout);
+    ID3D11DeviceContext_IASetPrimitiveTopology(ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ID3D11DeviceContext_IASetVertexBuffers(ctx, 0, 1, &g_cel.vbo, &stride, &offset);
+    ID3D11DeviceContext_VSSetShader(ctx, g_cel.vs, NULL, 0);
+    ID3D11DeviceContext_VSSetConstantBuffers(ctx, 0, 1, &g_cel.cbo);
+    ID3D11DeviceContext_PSSetShader(ctx, g_cel.ps, NULL, 0);
+    ID3D11DeviceContext_PSSetConstantBuffers(ctx, 0, 1, &g_cel.cbo);
+    ID3D11DeviceContext_Draw(ctx, (UINT)g_cel.vcount, 0);
+}
+
+static void cel_cleanup(void) {
+    if (g_cel.rs) ID3D11RasterizerState_Release(g_cel.rs);
+    if (g_cel.cbo) ID3D11Buffer_Release(g_cel.cbo);
+    if (g_cel.vbo) ID3D11Buffer_Release(g_cel.vbo);
+    if (g_cel.layout) ID3D11InputLayout_Release(g_cel.layout);
+    if (g_cel.ps) ID3D11PixelShader_Release(g_cel.ps);
+    if (g_cel.vs) ID3D11VertexShader_Release(g_cel.vs);
+    memset(&g_cel, 0, sizeof(g_cel));
+}
+
+// ============================ MATCAP / ENV-MAP scene ========================
+// Material-capture (matcap) shading: the view-space surface normal indexes a
+// lit-sphere image to fake reflections/lighting that stay locked to the camera.
+// Here the matcap is generated PROCEDURALLY in the shader (a chrome-ball look:
+// bright centre, an offset specular hotspot, a rim) so there is NO texture asset.
+// Mesh = a sphere; as it spins the matcap gives a reflective-metal illusion.
+static const char *kMatcapHLSL =
+    "cbuffer CB : register(b0){ row_major float4x4 mvp; row_major float4x4 worldView; float4 pad; };\n"
+    "struct VSIn{ float3 pos:POSITION; float3 nrm:NORMAL; };\n"
+    "struct VSOut{ float4 pos:SV_POSITION; float3 vn:TEXCOORD0; };\n"
+    "VSOut VSMain(VSIn i){ VSOut o; o.pos=mul(float4(i.pos,1.0),mvp);\n"
+    "  o.vn=normalize(mul(float4(i.nrm,0.0),worldView).xyz); return o; }\n"
+    "float3 matcap(float2 n){ float r=length(n);\n"
+    "  float3 base=lerp(float3(0.75,0.82,0.95), float3(0.12,0.16,0.26), saturate(r));\n"
+    "  float2 hp=n-float2(0.32,0.42); float spec=exp(-dot(hp,hp)*7.0);\n"
+    "  float rim=smoothstep(0.7,1.0,r);\n"
+    "  return base + spec*1.3 + rim*float3(0.10,0.16,0.30); }\n"
+    "float4 PSMain(VSOut i):SV_TARGET{ float3 n=normalize(i.vn); return float4(matcap(n.xy),1.0); }\n";
+
+static struct {
+    ID3D11VertexShader *vs;
+    ID3D11PixelShader *ps;
+    ID3D11InputLayout *layout;
+    ID3D11Buffer *vbo, *cbo;
+    ID3D11RasterizerState *rs;
+    int vcount;
+} g_mat;
+
+static int mat_init(ID3D11Device *dev, ID3D11DeviceContext *ctx, int w, int h) {
+    (void)ctx;
+    (void)w;
+    (void)h;
+    ID3DBlob *vsb = compile_hlsl(kMatcapHLSL, "VSMain", "vs_4_0");
+    ID3DBlob *psb = compile_hlsl(kMatcapHLSL, "PSMain", "ps_4_0");
+    if (!vsb || !psb) return 1;
+    ID3D11Device_CreateVertexShader(dev, ID3D10Blob_GetBufferPointer(vsb),
+                                    ID3D10Blob_GetBufferSize(vsb), NULL, &g_mat.vs);
+    ID3D11Device_CreatePixelShader(dev, ID3D10Blob_GetBufferPointer(psb),
+                                   ID3D10Blob_GetBufferSize(psb), NULL, &g_mat.ps);
+    make_pn_layout(dev, vsb, &g_mat.layout);
+    ID3D10Blob_Release(vsb);
+    ID3D10Blob_Release(psb);
+
+    const int rings = 32, sectors = 64;
+    int vc = rings * sectors * 6;
+    PNVertex *verts = (PNVertex *)malloc((size_t)vc * sizeof(PNVertex));
+    if (!verts) return 1;
+    g_mat.vcount = build_sphere_pn(verts, rings, sectors);
+    D3D11_BUFFER_DESC vbd;
+    memset(&vbd, 0, sizeof(vbd));
+    vbd.ByteWidth = (UINT)(g_mat.vcount * sizeof(PNVertex));
+    vbd.Usage = D3D11_USAGE_IMMUTABLE;
+    vbd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+    D3D11_SUBRESOURCE_DATA sr;
+    memset(&sr, 0, sizeof(sr));
+    sr.pSysMem = verts;
+    ID3D11Device_CreateBuffer(dev, &vbd, &sr, &g_mat.vbo);
+    free(verts);
+
+    D3D11_BUFFER_DESC cbd;
+    memset(&cbd, 0, sizeof(cbd));
+    cbd.ByteWidth = sizeof(PNCB);
+    cbd.Usage = D3D11_USAGE_DYNAMIC;
+    cbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    cbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    ID3D11Device_CreateBuffer(dev, &cbd, NULL, &g_mat.cbo);
+    make_cullnone_rs(dev, &g_mat.rs);
+    return (g_mat.vs && g_mat.ps && g_mat.layout && g_mat.vbo && g_mat.cbo && g_mat.rs) ? 0 : 1;
+}
+
+static void mat_frame(ID3D11DeviceContext *ctx, double t, float aspect) {
+    Mat4 world = mat_rotate(0.3f, 1.0f, 0.15f, (float)t * 0.5f);
+    Mat4 view = mat_translate(0.0f, 0.0f, -3.2f);
+    Mat4 worldView = mat_mul(world, view);
+    Mat4 mvp = mat_mul(worldView, mat_perspective(0.7f, aspect, 0.1f, 100.0f));
+    D3D11_MAPPED_SUBRESOURCE m;
+    if (SUCCEEDED(ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)g_mat.cbo, 0,
+                                          D3D11_MAP_WRITE_DISCARD, 0, &m))) {
+        PNCB *cb = (PNCB *)m.pData;
+        memcpy(cb->mvp, mvp.m, sizeof(mvp.m));
+        memcpy(cb->m2, worldView.m, sizeof(worldView.m));
+        cb->v4[0] = cb->v4[1] = cb->v4[2] = cb->v4[3] = 0.0f;
+        ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)g_mat.cbo, 0);
+    }
+    UINT stride = sizeof(PNVertex), offset = 0;
+    ID3D11DeviceContext_RSSetState(ctx, g_mat.rs);
+    ID3D11DeviceContext_IASetInputLayout(ctx, g_mat.layout);
+    ID3D11DeviceContext_IASetPrimitiveTopology(ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ID3D11DeviceContext_IASetVertexBuffers(ctx, 0, 1, &g_mat.vbo, &stride, &offset);
+    ID3D11DeviceContext_VSSetShader(ctx, g_mat.vs, NULL, 0);
+    ID3D11DeviceContext_VSSetConstantBuffers(ctx, 0, 1, &g_mat.cbo);
+    ID3D11DeviceContext_PSSetShader(ctx, g_mat.ps, NULL, 0);
+    ID3D11DeviceContext_PSSetConstantBuffers(ctx, 0, 1, &g_mat.cbo);
+    ID3D11DeviceContext_Draw(ctx, (UINT)g_mat.vcount, 0);
+}
+
+static void mat_cleanup(void) {
+    if (g_mat.rs) ID3D11RasterizerState_Release(g_mat.rs);
+    if (g_mat.cbo) ID3D11Buffer_Release(g_mat.cbo);
+    if (g_mat.vbo) ID3D11Buffer_Release(g_mat.vbo);
+    if (g_mat.layout) ID3D11InputLayout_Release(g_mat.layout);
+    if (g_mat.ps) ID3D11PixelShader_Release(g_mat.ps);
+    if (g_mat.vs) ID3D11VertexShader_Release(g_mat.vs);
+    memset(&g_mat, 0, sizeof(g_mat));
+}
+
 // ============================== scene registry ==============================
 static const D3D11Scene kScenes[] = {
     {"spin", "D3D11 Cube", spin_init, spin_frame, spin_cleanup},
@@ -1548,6 +1853,8 @@ static const D3D11Scene kScenes[] = {
     {"dolphin", "D3D11 Dolphin", dol_init, dol_frame, dol_cleanup},
     {"raymarch", "D3D11 Raymarch SDF", ray_init, ray_frame, ray_cleanup},
     {"gsexplode", "D3D11 GS Exploder", gs_init, gs_frame, gs_cleanup},
+    {"cel", "D3D11 Cel Shading", cel_init, cel_frame, cel_cleanup},
+    {"matcap", "D3D11 Matcap", mat_init, mat_frame, mat_cleanup},
 };
 
 static const D3D11Scene *pick_scene(const char *name) {

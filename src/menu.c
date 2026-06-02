@@ -57,7 +57,7 @@ static HWND g_edit_gl;   // GPU Info: OpenGL tab text
 static HWND g_placeholder;
 
 #define ID_CB_FIRST 3000  // content-area buttons (Benchmark + scene-picker views)
-#define MAX_CB 16
+#define MAX_CB 20
 static HWND g_cbtn[MAX_CB];
 static HWND g_cbtn_avg[MAX_CB];      // bold "Avg N" label next to each benchmark button
 static HWND g_cbtn_result[MAX_CB];   // "Min N   Max N" label next to each benchmark button
@@ -289,18 +289,21 @@ static void show_benchmark(HWND frame) {
         "Vulkan",            "OpenGL",         "DDraw: D3D7",    "DDraw: 2D Blit",
         "D3D8: Cube",        "D3D9: Cube",     "D3D10: Cube",
         "D3D11: Cube",       "D3D11: Instanced", "D3D11: Tessellate", "D3D11: Compute",
-        "D3D11: Dolphin",    "D3D11: Raymarch", "D3D11: GS Explode", "D3D12: Cube",
+        "D3D11: Dolphin",    "D3D11: Raymarch", "D3D11: GS Explode", "D3D11: Cel",
+        "D3D11: Matcap",     "D3D12: Cube",
     };
     static const char *args[] = {
         "vk", "gl", "dx7", "ddraw2d", "dx8", "dx9", "dx10", "dx11 --scene spin",
         "dx11 --scene instanced", "dx11 --scene tess", "dx11 --scene compute",
-        "dx11 --scene dolphin", "dx11 --scene raymarch", "dx11 --scene gsexplode", "dx12",
+        "dx11 --scene dolphin", "dx11 --scene raymarch", "dx11 --scene gsexplode",
+        "dx11 --scene cel", "dx11 --scene matcap", "dx12",
     };
     static const char *apilabels[] = {
         "Vulkan",          "OpenGL",         "Direct3D 7 (DirectDraw)", "DirectDraw 2D",
         "Direct3D 8",      "Direct3D 9",     "Direct3D 10",
         "D3D11 Cube",      "D3D11 Instanced", "D3D11 Tessellation", "D3D11 Compute Particles",
-        "D3D11 Dolphin",   "D3D11 Raymarch SDF", "D3D11 GS Exploder", "Direct3D 12",
+        "D3D11 Dolphin",   "D3D11 Raymarch SDF", "D3D11 GS Exploder", "D3D11 Cel Shading",
+        "D3D11 Matcap",    "Direct3D 12",
     };
     g_cbtn_n = (int)(sizeof(args) / sizeof(args[0]));
     int y = cr.top + 86;
@@ -345,11 +348,13 @@ static void show_dx11_scenes(HWND frame) {
     static const char *labels[] = {"Spinning cube",        "Textured cube",
                                    "Instanced (512 cubes)", "Tessellation (sphere)",
                                    "Compute particles",     "Dolphin (swim)",
-                                   "Raymarch SDF (shader)", "GS mesh exploder"};
+                                   "Raymarch SDF (shader)", "GS mesh exploder",
+                                   "Cel shading (torus)",   "Matcap (chrome ball)"};
     static const char *args[] = {"dx11 --scene spin",      "dx11 --scene textured",
                                  "dx11 --scene instanced", "dx11 --scene tess",
                                  "dx11 --scene compute",   "dx11 --scene dolphin",
-                                 "dx11 --scene raymarch",  "dx11 --scene gsexplode"};
+                                 "dx11 --scene raymarch",  "dx11 --scene gsexplode",
+                                 "dx11 --scene cel",       "dx11 --scene matcap"};
     g_cbtn_n = (int)(sizeof(args) / sizeof(args[0]));
     int y = cr.top + 70;
     for (int i = 0; i < g_cbtn_n; i++) {
@@ -809,7 +814,7 @@ int aio_run_shell(HINSTANCE hInstance) {
     wc.lpszClassName = cls;
     RegisterClassA(&wc);
 
-    int w = 840, h = 730;  // tall enough for the full benchmark list (15 rows)
+    int w = 840, h = 800;  // tall enough for the full benchmark list (17 rows)
     int sx = (GetSystemMetrics(SM_CXSCREEN) - w) / 2;
     int sy = (GetSystemMetrics(SM_CYSCREEN) - h) / 2;
     if (sx < 0) sx = 0;
