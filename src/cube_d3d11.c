@@ -1780,18 +1780,33 @@ static const char *kCityHLSL =
     "  float atten=1.0/(1.0+0.12*dist+0.035*dist*dist);\n"
     "  float ndl=saturate(dot(n,L));float sh=shad(p+n*0.04,L,dist-0.4);\n"
     "  float3 lit=float3(1.0,0.74,0.42)*10.0*atten*ndl*sh;\n"
-    "  if(mid<0.5){float cx=abs(p.x);float3 base=float3(0.022,0.022,0.028);\n"  // ROAD + markings
+    "  if(mid<0.5){float cx=abs(p.x);float3 base=float3(0.022,0.022,0.028);\n"  // ROAD + markings + litter
     "    float center=(cx<0.14)?step(0.55,frac(p.z*0.3)):0.0;float side=smoothstep(0.07,0.0,abs(cx-3.6));\n"
-    "    base+=float3(0.7,0.62,0.32)*saturate(center+side)*0.4;base*=(0.8+0.2*n2(p.xz*3.0));return base*(amb+lit);}\n"
+    "    base+=float3(0.7,0.62,0.32)*saturate(center+side)*0.4;base*=(0.8+0.2*n2(p.xz*3.0));\n"
+    "    float2 lc=floor(p.xz*0.7);if(h21(lc+7.3)>0.9){float2 lf=frac(p.xz*0.7)-0.5;\n"  // scattered paper litter
+    "      float pap=smoothstep(0.34,0.12,length(lf*float2(1.0,1.7))+0.18*(n2(p.xz*9.0)-0.5));\n"
+    "      base=lerp(base,float3(0.55,0.53,0.46)*(0.55+0.45*n2(p.xz*22.0)),pap*0.85);}\n"
+    "    return base*(amb+lit);}\n"
     "  if(mid<1.5){float3 base=float3(0.085,0.085,0.095);\n"  // SIDEWALK + paving cracks
     "    float2 g=p.xz*1.1;float cr=smoothstep(0.05,0.0,abs(frac(g.x)-0.5))+smoothstep(0.05,0.0,abs(frac(g.y)-0.5));\n"
     "    base*=(1.0-0.55*saturate(cr));base*=(0.8+0.2*n2(p.xz*7.0));return base*(amb+lit);}\n"
-    "  if(mid<2.5){float fx=(p.x>0.0?p.z:-p.z);float3 base=float3(0.05,0.045,0.05);float3 emit=float3(0,0,0);\n"  // BUILDING
+    "  if(mid<2.5){float fx=(p.x>0.0?p.z:-p.z);float3 base=float3(0.06,0.054,0.056);float3 emit=float3(0,0,0);\n"  // BUILDING
     "    float seam=smoothstep(0.05,0.0,abs(frac(fx*0.05)-0.5));base*=(1.0-0.5*seam);\n"  // building divisions
+    "    float2 wuv=float2(fx,p.y);\n"
+    "    base*=(0.55+0.55*n2(wuv*1.4)+0.22*n2(wuv*6.5));\n"  // concrete mottle/grime
+    "    float streak=n2(float2(fx*3.0,5.0))*saturate(1.0-p.y/26.0)*0.45;base*=(1.0-streak);\n"  // weather streaks from above
+    "    float cr=smoothstep(0.045,0.0,abs(n2(wuv*4.0)*2.0-1.0))+smoothstep(0.03,0.0,abs(n2(wuv*9.0+3.0)*2.0-1.0))*0.6;base*=(1.0-0.55*saturate(cr));\n"  // random cracks
+    "    if(p.y<8.0){float2 gc=floor(wuv*float2(0.16,0.22));float gh=h11(dot(gc,float2(5.0,9.0)));\n"  // graffiti tags
+    "      if(gh>0.83){float2 gf=frac(wuv*float2(0.16,0.22))-0.5;float blob=smoothstep(0.42,0.16,length(gf)+0.32*(n2(wuv*5.0)-0.5));\n"
+    "        float3 gcol=0.5+0.5*cos(float3(0.0,2.1,4.2)+gh*34.0);base=lerp(base,gcol*0.55,blob*0.8);}}\n"
     "    if(p.y>3.0){float2 g=floor(float2(fx*0.5,p.y*0.42));float2 f=frac(float2(fx*0.5,p.y*0.42));\n"
     "      float win=step(0.12,f.x)*step(f.x,0.88)*step(0.14,f.y)*step(f.y,0.86);\n"
     "      float onw=step(0.62,h11(dot(g,float2(11.0,7.0))));emit=lerp(float3(1.0,0.7,0.32),float3(0.4,0.8,1.0),h11(dot(g,float2(3.0,9.0))))*win*onw*1.6;}\n"
-    "    else{float door=step(0.74,frac(fx*0.22))*step(0.15,p.y)*step(p.y,2.1);base=lerp(base,float3(0.06,0.04,0.03),door);\n"
+    "    else{float dx=frac(fx*0.22);\n"  // DOOR + frame
+    "      float door=smoothstep(0.76,0.78,dx)*smoothstep(0.96,0.94,dx)*smoothstep(0.16,0.19,p.y)*smoothstep(2.08,2.04,p.y);\n"
+    "      float outer=smoothstep(0.73,0.75,dx)*smoothstep(0.99,0.97,dx)*smoothstep(0.12,0.15,p.y)*smoothstep(2.16,2.12,p.y);\n"
+    "      float frame=saturate(outer-door);\n"
+    "      base=lerp(base,float3(0.022,0.016,0.012),door);base=lerp(base,float3(0.14,0.10,0.07),frame);\n"  // doorway + wood frame
     "      float sgn=step(0.87,frac(fx*0.12+0.3))*step(2.25,p.y)*step(p.y,2.85);emit+=lerp(float3(1.0,0.25,0.2),float3(0.25,0.6,1.0),h11(floor(fx*0.12)))*sgn*2.2;}\n"
     "    return base*(amb+lit)+emit;}\n"
     "  return float3(0.04,0.04,0.045)*(amb+lit*0.6);}\n"  // lamp pole (dark metal)
@@ -1802,11 +1817,11 @@ static const char *kCityHLSL =
     "  float3 fw=normalize(ta-ro),rt=normalize(cross(float3(0,1,0),fw)),up=cross(fw,rt);float3 rd=normalize(uv.x*rt+uv.y*up+1.7*fw);\n"
     "  float mid;float t=marchCity(ro,rd,mid);float3 col;\n"
     "  if(t>0.0){float3 p=ro+rd*t;float3 n=nrmCity(p);col=cityShade(p,n,rd,mid);\n"
-    "    if(mid<0.5){float wet=smoothstep(0.45,0.62,n2(p.xz*0.35));\n"  // wet road / puddles + ripple reflection
-    "      float3 rn=n;rn.xz+=0.05*(float2(n2(p.xz*8.0+iTime*0.6),n2(p.xz*8.0+5.0+iTime*0.6))-0.5);rn=normalize(rn);\n"
+    "    if(mid<0.5){float pud=n2(p.xz*0.45)*0.6+n2(p.xz*1.1+9.0)*0.4;float wet=smoothstep(0.52,0.66,pud);\n"  // distinct random puddles
+    "      float3 rn=n;rn.xz+=0.045*wet*(float2(n2(p.xz*8.0+iTime*0.6),n2(p.xz*8.0+5.0+iTime*0.6))-0.5);rn=normalize(rn);\n"  // ripples only in water
     "      float3 r=reflect(rd,rn);float m2;float t2=marchCity(p+n*0.03,r,m2);\n"
     "      float3 refl=(t2>0.0)?cityShade(p+r*t2,nrmCity(p+r*t2),r,m2):sky(r);\n"
-    "      float fres=0.03+0.97*pow(1.0-saturate(dot(n,-rd)),4.0);col=lerp(col,refl,fres*(0.25+0.65*wet));}\n"
+    "      float fres=0.02+0.98*pow(1.0-saturate(dot(n,-rd)),4.0);col=lerp(col,refl,fres*wet*0.95);}\n"  // only puddles mirror; dry asphalt matte
     "    col=lerp(col,sky(rd)*0.7,1.0-exp(-0.014*t));}\n"
     "  else col=sky(rd);\n"
     "  col=col/(col+0.7);col=pow(saturate(col),1.0/2.2);return float4(col,1.0);}\n";
