@@ -129,20 +129,25 @@ char *aio_bench_finish(const char *api_label, double total_seconds) {
     // kept frame time. Using the kept-frame sum rather than the full wall-clock
     // duration keeps the average unbiased when warm-up frames are trimmed.
     double avg_fps = (sum > 0.0) ? (1000.0 * (double)g_n / sum) : 0.0;
-    double max_fps = (minft > 0.0) ? 1000.0 / minft : 0.0;
-    double min_fps = (maxft > 0.0) ? 1000.0 / maxft : 0.0;
+    double max_fps = (minft > 0.0) ? 1000.0 / minft : 0.0;  // fallback: single fastest frame
+    double min_fps = (maxft > 0.0) ? 1000.0 / maxft : 0.0;  // slowest frame = real worst case
 
-    // 1% low: average FPS over the slowest 1% of frames.
+    // 1% low: average FPS over the slowest 1% of frames. Also use the sorted
+    // frametimes to make Max robust.
     double *sorted = (double *)malloc(g_n * sizeof(double));
     double low1_fps = 0.0;
     if (sorted) {
         memcpy(sorted, g_ft, g_n * sizeof(double));
-        qsort(sorted, g_n, sizeof(double), cmp_double);  // ascending
+        qsort(sorted, g_n, sizeof(double), cmp_double);  // ascending (fastest first)
         size_t k = g_n / 100;
         if (k < 1) k = 1;
         double s2 = 0.0;
         for (size_t i = 0; i < k; i++) s2 += sorted[g_n - 1 - i];  // slowest k frametimes
         low1_fps = (s2 > 0.0) ? 1000.0 * (double)k / s2 : 0.0;
+        // Robust Max FPS: report the 1%-fastest frametime, not the single fastest -
+        // a stray sub-frame timing glitch otherwise yields an absurd "Max" (tens of
+        // thousands of FPS). Mirrors the 1%-low on the slow end.
+        if (k < g_n && sorted[k] > 0.0) max_fps = 1000.0 / sorted[k];
         free(sorted);
     }
 

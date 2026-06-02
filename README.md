@@ -17,7 +17,7 @@ Forked from Khronos [Vulkan-Tools `vkcube`](https://github.com/KhronosGroup/Vulk
 
 ## Download
 
-Grab the latest `AIO-Graphics-Test.exe` from the
+Grab the latest `AIO-Graphics-Test-64bit.exe` (or `-32bit.exe`) from the
 [**Releases**](https://github.com/The412Banner/AIO-Graphics-Test/releases) page, drop it
 into a Winlator container, and run it — it opens a menu, no install. See it in action in the
 [**showcase video**](https://youtu.be/gKhwjwjGvWI). The container already
@@ -47,14 +47,15 @@ with optional CLI shortcuts:
   | **Direct3D 11**| **DXVK** d3d11 → Vulkan |
   | **Direct3D 12**| **VKD3D-Proton** d3d12 → Vulkan |
 
-  > **Two builds, two bitnesses.** Each release ships `AIO-Graphics-Test.exe` (**64-bit**)
-  > and `AIO-Graphics-Test-x86.exe` (**32-bit**). A 64-bit process can only load the
+  > **Two builds, two bitnesses.** Each release ships `AIO-Graphics-Test-64bit.exe` (**64-bit**)
+  > and `AIO-Graphics-Test-32bit.exe` (**32-bit**). A 64-bit process can only load the
   > container's *x64* DXVK / VKD3D / ddraw DLLs; a 32-bit process loads the separate *x32*
   > set. Since almost every legacy DirectX game (and all DX5/6/7 titles) runs as 32-bit, the
   > x86 build tests DLLs the x64 build physically can't reach. Use whichever matches the game
   > you're debugging — or run both to compare the two DLL sets.
 
-- **DX11 test suite** — Direct3D 11 is six scenes, each stressing a different part of DXVK:
+- **DX11 test suite** — Direct3D 11 is a dozen scenes, each stressing a different part of
+  the pipeline / DXVK:
 
   | Scene | Exercises |
   |---|---|
@@ -64,15 +65,30 @@ with optional CLI shortcuts:
   | Tessellation | hull/domain shaders (feature level 11) |
   | Compute particles | the D3D11 compute path (UAV/SRV) |
   | **Dolphin** | the classic **DolphinVS** underwater scene — the real mesh tweened across 3 keyframes, seafloor + 32-frame animated caustics (see [Credits](#credits)) |
+  | Raymarch SDF | a signed-distance field marched in the pixel shader over a fullscreen triangle — a heavy **fragment-ALU** workload (a different bottleneck from the geometry scenes) |
+  | GS exploder | the **geometry-shader** stage — each triangle pushed out along its face normal (the only scene that exercises GS; emulated on Turnip) |
+  | Cel shading | quantised toon bands + a silhouette outline |
+  | Matcap | a procedural matcap (no texture) — view-space normal → chrome-ball lighting |
+  | Atomics | a histogram built with **`InterlockedAdd`** atomics + clear-UAV + a structured-buffer SRV-in-VS (a correctness probe for the translation layer) |
+  | Draw stress (128–2048) | thousands of **individual draw calls** (not instanced) → **CPU/submit-bound**, a different axis from every GPU-bound scene; pick the draw count to map the scaling curve |
+
+- **Native-Vulkan scenes** — beyond the textured cube, the Vulkan backend has a **Phong-lit**
+  cube (full ambient + diffuse + specular on the *native* VK path, no DXVK) and a
+  **mesh-shader probe** that reports whether the device/driver exposes `VK_EXT_mesh_shader`
+  (Turnip on Adreno currently does not — the probe is the diagnostic).
 
 - **Benchmark** — a view (or `--bench <sec>`) that times a run and reports **Avg / Min / Max**
-  FPS next to each row (full avg/min/max/1%-low in a popup + a per-frame **CSV**):
-  - **Selectable length** — 15 / 30 / 45 / 60 s.
-  - **Vsync toggle** — off (uncapped, for true throughput) or on.
-  - **Run All** — one tap sweeps every API/scene **sequentially and hands-free**: each
-    result popup auto-closes after 3 s so it proceeds without clicking (a single manual
-    benchmark keeps its popup until you dismiss it). No GPU contention between tests.
-  - Results are **cached for the session**, so they stay visible when you switch views.
+  + **1%-low** FPS (with a per-frame **CSV**). Min/Max use the 1st/99th percentile so a stray
+  sub-frame timing glitch can't produce an absurd reading; a short **warm-up window** is
+  excluded so first-frame shader compilation doesn't skew the result.
+  - **Tick what to run** — every test is a checkbox; the dozen D3D11 scenes collapse under one
+    **Direct3D 11** group (and the draw-stress counts under one **Draw Stress** sub-row).
+  - **Run Selected** sweeps the ticked tests **sequentially and hands-free** (no GPU
+    contention between tests).
+  - **Selectable length** — 15 / 30 / 45 / 60 s — and a **Vsync toggle**.
+  - **Benchmark Results** screen — the full Avg/Min/Max for every test, with a **run picker**:
+    each sweep is saved to disk with a **timestamp**, so you can review previous runs (they
+    survive app restarts).
 - **Semaphore Probe** — benchmarks the instanced D3D11 cube with **timeline vs binary**
   semaphores to measure the Turnip-kgsl timeline-semaphore regression, and prints a plain
   verdict (e.g. *"binary is 1.7× faster"*). (The binary path only differs on a DXVK build
@@ -94,7 +110,9 @@ The menu is the primary interface, but every mode has a flag too:
 | `--gpuinfo` / `--report` | Dump GL + VK adapter info to console + `AIO-Graphics-Test_report.txt`, then exit |
 | `--cube vk\|gl\|dx7\|dx8\|dx9\|dx10\|dx11\|dx12` | Launch a backend directly in its own window |
 | `--cube ddraw2d` | Launch the pure-2D DirectDraw blit test (`dx7` = the DirectDraw 3D cube) |
-| `--cube dx11 --scene spin\|textured\|instanced\|tess\|compute\|dolphin` | Pick a DX11 scene |
+| `--cube vk --scene phong\|meshshader` | Native-VK Phong-lit cube, or the mesh-shader probe |
+| `--cube dx11 --scene spin\|textured\|instanced\|tess\|compute\|dolphin\|raymarch\|gsexplode\|cel\|matcap\|atomics\|drawstress` | Pick a DX11 scene |
+| `--cube dx11 --scene drawstress --draws <n>` | Draw-stress with N draws (128 / 256 / 512 / 1024 / 2048) |
 | `--bench <sec>` | Run the launched cube as a timed benchmark (avg/min/max/1%-low + CSV) |
 | `--vsync` | Present with vsync (default is uncapped) |
 | `--autoclose <sec>` | Auto-dismiss the benchmark result popup after N s (Run All uses 3) |
@@ -105,8 +123,8 @@ The menu is the primary interface, but every mode has a flag too:
 
 CI only (no local builds). Cross-compiled Linux → Windows PE on GitHub Actions
 (`.github/workflows/build-windows.yml`) as a **two-arch matrix**: mingw-w64 + Vulkan-Headers
-+ a cross-built Vulkan-Loader import lib + glslang + `windres` (icon) → `AIO-Graphics-Test.exe`
-(**x86_64**) and `AIO-Graphics-Test-x86.exe` (**i686**). Releases are the exact CI-built
++ a cross-built Vulkan-Loader import lib + glslang + `windres` (icon) → `AIO-Graphics-Test-64bit.exe`
+(**x86_64**) and `AIO-Graphics-Test-32bit.exe` (**i686**). Releases are the exact CI-built
 artifacts. Only `vulkan-1` is statically imported (always present in a container);
 `ddraw`/d3d8/9/10/11/12, `dxgi`, and `d3dcompiler` are loaded at runtime.
 
@@ -120,7 +138,8 @@ src/cube_ddraw.c      DirectDraw / legacy Direct3D backend (DX7 cube + 2D blit)
 src/cube_d3d8.c       Direct3D 8 backend (DXVK d3d8 wrapper)
 src/cube_d3d9.c       Direct3D 9 backend (DXVK)
 src/cube_d3d10.c      Direct3D 10 backend (DXVK)
-src/cube_d3d11.c      Direct3D 11 scene framework + 6 scenes
+src/cube_d3d11.c      Direct3D 11 scene framework + 12 scenes
+src/cube_phong.frag   native-Vulkan Phong fragment shader (--scene phong)
 src/cube_d3d12.c      Direct3D 12 backend (VKD3D-Proton)
 src/gpuinfo.c         GL + VK adapter report
 src/bench.c           benchmark instrumentation (avg/min/max/1%-low + CSV, vsync flag)

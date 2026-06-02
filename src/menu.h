@@ -6,7 +6,7 @@
 #include <windows.h>
 
 // Current release version, shown in the bottom-right of the shell. Bump on release.
-#define AIO_VERSION "v1.3.0"
+#define AIO_VERSION "v1.4.0"
 
 enum AioMode {
     AIO_MODE_EXIT = 0,
