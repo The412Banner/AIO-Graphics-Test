@@ -1843,6 +1843,97 @@ static void mat_cleanup(void) {
     memset(&g_mat, 0, sizeof(g_mat));
 }
 
+// ============================= DRAW-STRESS scene ============================
+// An NxN grid of small cubes, each issued as its OWN draw call (NOT instanced)
+// with its own per-object constant-buffer update. The bottleneck is CPU/driver
+// submission overhead, not the GPU - a different axis from every other scene
+// (which are GPU-bound). DRAWSTRESS_N^2 cbuffer updates + draws per frame. Reuses
+// the spin shader (POSITION+COLOR cube).
+#define DRAWSTRESS_N 32  // 32x32 = 1024 draws/frame
+
+static struct {
+    ID3D11VertexShader *vs;
+    ID3D11PixelShader *ps;
+    ID3D11InputLayout *layout;
+    ID3D11Buffer *vbo, *cbo;
+} g_ds;
+
+static int ds_init(ID3D11Device *dev, ID3D11DeviceContext *ctx, int w, int h) {
+    (void)ctx;
+    (void)w;
+    (void)h;
+    ID3DBlob *vsb = compile_hlsl(kSpinHLSL, "VSMain", "vs_4_0");
+    ID3DBlob *psb = compile_hlsl(kSpinHLSL, "PSMain", "ps_4_0");
+    if (!vsb || !psb) return 1;
+    ID3D11Device_CreateVertexShader(dev, ID3D10Blob_GetBufferPointer(vsb),
+                                    ID3D10Blob_GetBufferSize(vsb), NULL, &g_ds.vs);
+    ID3D11Device_CreatePixelShader(dev, ID3D10Blob_GetBufferPointer(psb),
+                                   ID3D10Blob_GetBufferSize(psb), NULL, &g_ds.ps);
+    D3D11_INPUT_ELEMENT_DESC il[] = {
+        {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
+        {"COLOR", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0},
+    };
+    ID3D11Device_CreateInputLayout(dev, il, 2, ID3D10Blob_GetBufferPointer(vsb),
+                                   ID3D10Blob_GetBufferSize(vsb), &g_ds.layout);
+    ID3D10Blob_Release(vsb);
+    ID3D10Blob_Release(psb);
+
+    ColVertex verts[36];
+    build_color_cube(verts);
+    D3D11_BUFFER_DESC vbd;
+    memset(&vbd, 0, sizeof(vbd));
+    vbd.ByteWidth = sizeof(verts);
+    vbd.Usage = D3D11_USAGE_IMMUTABLE;
+    vbd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+    D3D11_SUBRESOURCE_DATA sr;
+    memset(&sr, 0, sizeof(sr));
+    sr.pSysMem = verts;
+    ID3D11Device_CreateBuffer(dev, &vbd, &sr, &g_ds.vbo);
+
+    D3D11_BUFFER_DESC cbd;
+    memset(&cbd, 0, sizeof(cbd));
+    cbd.ByteWidth = sizeof(Mat4);
+    cbd.Usage = D3D11_USAGE_DYNAMIC;
+    cbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    cbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    ID3D11Device_CreateBuffer(dev, &cbd, NULL, &g_ds.cbo);
+    return (g_ds.vs && g_ds.ps && g_ds.layout && g_ds.vbo && g_ds.cbo) ? 0 : 1;
+}
+
+static void ds_frame(ID3D11DeviceContext *ctx, double t, float aspect) {
+    Mat4 vp = mat_mul(mat_translate(0.0f, 0.0f, -18.0f), mat_perspective(1.0f, aspect, 0.1f, 100.0f));
+    UINT stride = sizeof(ColVertex), offset = 0;
+    ID3D11DeviceContext_IASetInputLayout(ctx, g_ds.layout);
+    ID3D11DeviceContext_IASetPrimitiveTopology(ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ID3D11DeviceContext_IASetVertexBuffers(ctx, 0, 1, &g_ds.vbo, &stride, &offset);
+    ID3D11DeviceContext_VSSetShader(ctx, g_ds.vs, NULL, 0);
+    ID3D11DeviceContext_VSSetConstantBuffers(ctx, 0, 1, &g_ds.cbo);
+    ID3D11DeviceContext_PSSetShader(ctx, g_ds.ps, NULL, 0);
+
+    const float step = 0.52f;
+    const float origin = -((DRAWSTRESS_N - 1) * step) * 0.5f;
+    for (int gy = 0; gy < DRAWSTRESS_N; gy++) {
+        for (int gx = 0; gx < DRAWSTRESS_N; gx++) {
+            float fx = origin + gx * step, fy = origin + gy * step;
+            float ang = (float)t * 0.8f + (gx + gy) * 0.20f;
+            Mat4 model = mat_mul(mat_mul(mat_scale(0.18f), mat_rotate(0.5f, 1.0f, 0.3f, ang)),
+                                 mat_translate(fx, fy, 0.0f));
+            Mat4 mvp = mat_mul(model, vp);
+            upload_mat(ctx, g_ds.cbo, mvp);            // one cbuffer update per object
+            ID3D11DeviceContext_Draw(ctx, 36, 0);      // ...and one draw call per object
+        }
+    }
+}
+
+static void ds_cleanup(void) {
+    if (g_ds.cbo) ID3D11Buffer_Release(g_ds.cbo);
+    if (g_ds.vbo) ID3D11Buffer_Release(g_ds.vbo);
+    if (g_ds.layout) ID3D11InputLayout_Release(g_ds.layout);
+    if (g_ds.ps) ID3D11PixelShader_Release(g_ds.ps);
+    if (g_ds.vs) ID3D11VertexShader_Release(g_ds.vs);
+    memset(&g_ds, 0, sizeof(g_ds));
+}
+
 // ============================== scene registry ==============================
 static const D3D11Scene kScenes[] = {
     {"spin", "D3D11 Cube", spin_init, spin_frame, spin_cleanup},
@@ -1855,6 +1946,7 @@ static const D3D11Scene kScenes[] = {
     {"gsexplode", "D3D11 GS Exploder", gs_init, gs_frame, gs_cleanup},
     {"cel", "D3D11 Cel Shading", cel_init, cel_frame, cel_cleanup},
     {"matcap", "D3D11 Matcap", mat_init, mat_frame, mat_cleanup},
+    {"drawstress", "D3D11 Draw Stress", ds_init, ds_frame, ds_cleanup},
 };
 
 static const D3D11Scene *pick_scene(const char *name) {

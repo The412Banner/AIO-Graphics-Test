@@ -360,6 +360,7 @@ static const BenchRow kBenchRows[] = {
     {"GS Explode", "dx11 --scene gsexplode", "D3D11 GS Exploder", 1},
     {"Cel", "dx11 --scene cel", "D3D11 Cel Shading", 1},
     {"Matcap", "dx11 --scene matcap", "D3D11 Matcap", 1},
+    {"Draw Stress", "dx11 --scene drawstress", "D3D11 Draw Stress", 1},
     {"D3D12: Cube", "dx12", "Direct3D 12", 0},
 };
 #define N_BENCH_ROWS ((int)(sizeof(kBenchRows) / sizeof(kBenchRows[0])))
@@ -586,12 +587,14 @@ static void show_dx11_scenes(HWND frame) {
                                    "Instanced (512 cubes)", "Tessellation (sphere)",
                                    "Compute particles",     "Dolphin (swim)",
                                    "Raymarch SDF (shader)", "GS mesh exploder",
-                                   "Cel shading (torus)",   "Matcap (chrome ball)"};
+                                   "Cel shading (torus)",   "Matcap (chrome ball)",
+                                   "Draw stress (1024 draws)"};
     static const char *args[] = {"dx11 --scene spin",      "dx11 --scene textured",
                                  "dx11 --scene instanced", "dx11 --scene tess",
                                  "dx11 --scene compute",   "dx11 --scene dolphin",
                                  "dx11 --scene raymarch",  "dx11 --scene gsexplode",
-                                 "dx11 --scene cel",       "dx11 --scene matcap"};
+                                 "dx11 --scene cel",       "dx11 --scene matcap",
+                                 "dx11 --scene drawstress"};
     g_cbtn_n = (int)(sizeof(args) / sizeof(args[0]));
     int y = cr.top + 70;
     for (int i = 0; i < g_cbtn_n; i++) {
