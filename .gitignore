@@ -8,3 +8,5 @@ build/
 vk/
 vh/
 vl/
+__pycache__/
+*.pyc
