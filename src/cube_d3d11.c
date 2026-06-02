@@ -1790,27 +1790,49 @@ static const char *kCityHLSL =
     "  if(mid<1.5){float3 base=float3(0.085,0.085,0.095);\n"  // SIDEWALK + paving cracks
     "    float2 g=p.xz*1.1;float cr=smoothstep(0.05,0.0,abs(frac(g.x)-0.5))+smoothstep(0.05,0.0,abs(frac(g.y)-0.5));\n"
     "    base*=(1.0-0.55*saturate(cr));base*=(0.8+0.2*n2(p.xz*7.0));return base*(amb+lit);}\n"
-    "  if(mid<2.5){float fx=(p.x>0.0?p.z:-p.z);float3 base=float3(0.06,0.054,0.056);float3 emit=float3(0,0,0);\n"  // BUILDING
-    "    float seam=smoothstep(0.05,0.0,abs(frac(fx*0.05)-0.5));base*=(1.0-0.5*seam);\n"  // building divisions
-    "    float2 wuv=float2(fx,p.y);\n"
-    "    base*=(0.55+0.55*n2(wuv*1.4)+0.22*n2(wuv*6.5));\n"  // concrete mottle/grime
-    "    float streak=n2(float2(fx*3.0,5.0))*saturate(1.0-p.y/26.0)*0.45;base*=(1.0-streak);\n"  // weather streaks from above
-    "    float cr=smoothstep(0.045,0.0,abs(n2(wuv*4.0)*2.0-1.0))+smoothstep(0.03,0.0,abs(n2(wuv*9.0+3.0)*2.0-1.0))*0.6;base*=(1.0-0.55*saturate(cr));\n"  // random cracks
-    "    if(p.y<8.0){float2 gc=floor(wuv*float2(0.16,0.22));float gh=h11(dot(gc,float2(5.0,9.0)));\n"  // graffiti tags
-    "      if(gh>0.83){float2 gf=frac(wuv*float2(0.16,0.22))-0.5;float blob=smoothstep(0.42,0.16,length(gf)+0.32*(n2(wuv*5.0)-0.5));\n"
-    "        float3 gcol=0.5+0.5*cos(float3(0.0,2.1,4.2)+gh*34.0);base=lerp(base,gcol*0.55,blob*0.8);}}\n"
-    "    if(p.y>3.0){float2 g=floor(float2(fx*0.5,p.y*0.42));float2 f=frac(float2(fx*0.5,p.y*0.42));\n"
+    "  if(mid<2.5){float fx=(p.x>0.0?p.z:-p.z);float2 wuv=float2(fx,p.y);float3 emit=float3(0,0,0);\n"  // BUILDING (per-segment style)
+    "    float bid=floor(fx*0.11);float bh=h11(bid);float bh2=h11(bid+0.5);float bh3=h11(bid+1.7);\n"
+    "    float seam=smoothstep(0.04,0.0,abs(frac(fx*0.11)-0.5));float3 base;\n"
+    "    if(bh<0.4){float3 bc=lerp(float3(0.34,0.13,0.10),float3(0.47,0.23,0.16),bh2);\n"  // BRICK (mortar lattice)
+    "      float2 bp=wuv*float2(2.2,4.2);float row=floor(bp.y);bp.x+=0.5*step(1.0,fmod(row,2.0));\n"
+    "      float2 cell=floor(bp);float2 bf=frac(bp);\n"
+    "      float mortar=smoothstep(0.0,0.08,bf.x)*smoothstep(1.0,0.92,bf.x)*smoothstep(0.0,0.14,bf.y)*smoothstep(1.0,0.86,bf.y);\n"
+    "      base=lerp(float3(0.11,0.10,0.09),bc*(0.75+0.45*h21(cell)),mortar);}\n"
+    "    else if(bh<0.72){float3 cc=lerp(float3(0.12,0.12,0.13),float3(0.23,0.22,0.21),bh2);\n"  // CONCRETE (panels)
+    "      base=cc*(0.7+0.4*n2(wuv*1.4)+0.18*n2(wuv*6.0));\n"
+    "      base*=(1.0-0.22*smoothstep(0.04,0.0,abs(frac(p.y*0.33)-0.5)));}\n"
+    "    else{float3 pc=0.22+0.4*frac(float3(bh*7.0,bh*13.0,bh*19.0));base=pc*(0.8+0.22*n2(wuv*2.2));}\n"  // PAINTED
+    "    base*=(1.0-0.5*seam);\n"
+    "    base*=(1.0-n2(float2(fx*3.0,5.0))*saturate(1.0-p.y/26.0)*0.4);\n"  // weather streaks
+    "    base*=(1.0-0.4*smoothstep(0.04,0.0,abs(n2(wuv*4.0+bid)*2.0-1.0)));\n"  // random cracks
+    "    if(p.y<7.0&&bh3>0.5){float2 gc=floor(wuv*float2(0.2,0.28)+bid);float gg=h11(dot(gc,float2(5.0,9.0)));\n"  // graffiti tag (strokes+drips)
+    "      if(gg>0.72){float2 gf=frac(wuv*float2(0.2,0.28)+bid)-float2(0.5,0.4);\n"
+    "        float s1=smoothstep(0.09,0.035,abs(gf.x+0.18*sin(gf.y*9.0+gg*20.0)));\n"
+    "        float s2=smoothstep(0.09,0.035,abs(gf.x-0.22+0.15*cos(gf.y*7.0+gg*8.0)));\n"
+    "        float tag=(s1+s2)*step(abs(gf.y),0.3);\n"
+    "        float drip=smoothstep(0.04,0.0,abs(gf.x-0.2+0.4))*step(gf.y,0.0)*smoothstep(-0.4,0.0,gf.y)*0.5;\n"
+    "        float3 gcol=0.55+0.45*cos(float3(0.0,2.1,4.2)+gg*40.0);base=lerp(base,gcol*0.7,saturate(tag+drip));}}\n"
+    "    if(p.y>2.8){float wd=0.42+0.22*bh;float2 g=floor(float2(fx*wd,p.y*0.42));float2 f=frac(float2(fx*wd,p.y*0.42));\n"  // windows (per-building density)
     "      float win=step(0.12,f.x)*step(f.x,0.88)*step(0.14,f.y)*step(f.y,0.86);\n"
-    "      float onw=step(0.62,h11(dot(g,float2(11.0,7.0))));emit=lerp(float3(1.0,0.7,0.32),float3(0.4,0.8,1.0),h11(dot(g,float2(3.0,9.0))))*win*onw*1.6;}\n"
-    "    else{float dx=frac(fx*0.22);\n"  // DOOR + frame
-    "      float door=smoothstep(0.76,0.78,dx)*smoothstep(0.96,0.94,dx)*smoothstep(0.16,0.19,p.y)*smoothstep(2.08,2.04,p.y);\n"
-    "      float outer=smoothstep(0.73,0.75,dx)*smoothstep(0.99,0.97,dx)*smoothstep(0.12,0.15,p.y)*smoothstep(2.16,2.12,p.y);\n"
-    "      float frame=saturate(outer-door);\n"
-    "      base=lerp(base,float3(0.022,0.016,0.012),door);base=lerp(base,float3(0.14,0.10,0.07),frame);\n"  // doorway + wood frame
-    "      float sgn=step(0.87,frac(fx*0.12+0.3))*step(2.25,p.y)*step(p.y,2.85);emit+=lerp(float3(1.0,0.25,0.2),float3(0.25,0.6,1.0),h11(floor(fx*0.12)))*sgn*2.2;}\n"
+    "      float onw=step(0.6,h11(dot(g,float2(11.0,7.0))));emit=lerp(float3(1.0,0.7,0.32),float3(0.4,0.8,1.0),h11(dot(g,float2(3.0,9.0))))*win*onw*1.6;}\n"
+    "    else{float lx=frac(fx*0.11);float dw=0.10+0.05*bh2;\n"  // DOOR per building (centered, unique color, optional window)
+    "      float door=smoothstep(0.5-dw,0.5-dw+0.02,lx)*smoothstep(0.5+dw,0.5+dw-0.02,lx)*smoothstep(0.12,0.15,p.y)*smoothstep(2.1,2.05,p.y);\n"
+    "      float outer=smoothstep(0.5-dw-0.03,0.5-dw-0.01,lx)*smoothstep(0.5+dw+0.03,0.5+dw+0.01,lx)*smoothstep(0.08,0.11,p.y)*smoothstep(2.2,2.16,p.y);\n"
+    "      float3 dcol=0.10+0.20*frac(float3(bh2*5.0,bh2*11.0,bh2*17.0));\n"
+    "      base=lerp(base,dcol,door);base=lerp(base,float3(0.14,0.10,0.07),saturate(outer-door));\n"
+    "      float dwin=step(1.55,p.y)*step(p.y,1.95)*step(0.5-dw*0.6,lx)*step(lx,0.5+dw*0.6)*step(0.5,bh3);emit+=float3(0.95,0.88,0.62)*dwin*0.5;\n"  // lit transom on some doors
+    "      float sgn=step(0.87,frac(fx*0.12+bid))*step(2.3,p.y)*step(p.y,2.85);emit+=lerp(float3(1.0,0.25,0.2),float3(0.25,0.6,1.0),bh)*sgn*2.2;}\n"
     "    return base*(amb+lit)+emit;}\n"
     "  return float3(0.04,0.04,0.045)*(amb+lit*0.6);}\n"  // lamp pole (dark metal)
-    "float3 sky(float3 rd){return float3(0.015,0.02,0.04)+float3(0.04,0.03,0.06)*pow(saturate(rd.y+0.2),2.0);}\n"
+    "float3 sky(float3 rd){float3 col=float3(0.012,0.016,0.034)+float3(0.02,0.02,0.05)*pow(saturate(rd.y+0.2),2.0);\n"
+    "  float2 su=rd.xz/(abs(rd.y)+0.55);float2 sc=floor(su*55.0);float sh=h21(sc);\n"  // stars
+    "  float star=step(0.984,sh)*pow(h21(sc+3.1),16.0)*saturate(rd.y*4.0);col+=star*float3(0.9,0.95,1.0)*2.2;\n"
+    "  float3 mdir=normalize(float3(0.4,0.55,1.0));float md=distance(normalize(rd),mdir);\n"  // moon + craters + glow
+    "  float crat=0.65+0.35*n2(rd.xy*38.0+5.0);col+=smoothstep(0.075,0.06,md)*float3(0.92,0.92,0.84)*crat;\n"
+    "  col+=smoothstep(0.3,0.06,md)*float3(0.12,0.14,0.2)*0.6;\n"
+    "  float prof=0.015+h21(floor(su*7.0))*0.05+h21(floor(su*23.0))*0.02;\n"  // distant skyline silhouette
+    "  float sil=smoothstep(prof+0.004,prof-0.004,rd.y)*step(0.0,rd.y);col=lerp(col,float3(0.018,0.022,0.045),sil*0.9);\n"
+    "  return col;}\n"
     "float4 PSMain(VSOut inp):SV_TARGET{float2 uv=inp.ndc;uv.x*=iAspect;\n"
     "  float3 ro=float3(sin(iTime*0.4)*0.4,1.7+sin(iTime*1.7)*0.04,iTime*1.7);\n"  // walk down the street (eye height + bob)
     "  float3 ta=ro+float3(sin(iTime*0.2)*0.25,-0.04,1.0);\n"
