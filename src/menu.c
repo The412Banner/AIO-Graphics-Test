@@ -691,8 +691,9 @@ static void show_vk_scenes(HWND frame) {
         NULL);
     if (g_ui_font) SendMessage(g_placeholder, WM_SETFONT, (WPARAM)g_ui_font, TRUE);
 
-    static const char *labels[] = {"Spinning cube (textured)", "Phong-lit cube"};
-    static const char *args[] = {"vk", "vk --scene phong"};
+    static const char *labels[] = {"Spinning cube (textured)", "Phong-lit cube",
+                                   "Mesh shader probe"};
+    static const char *args[] = {"vk", "vk --scene phong", "vk --scene meshshader"};
     g_cbtn_n = (int)(sizeof(args) / sizeof(args[0]));
     int y = cr.top + 70;
     for (int i = 0; i < g_cbtn_n; i++) {

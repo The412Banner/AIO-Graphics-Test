@@ -2087,6 +2087,9 @@ static void demo_prepare_vs(struct demo *demo) {
 // Empty string = the default textured cube. Set from the command line before
 // demo_prepare runs.
 char g_aio_vk_scene[32] = "";
+// Mesh-shader capability, filled during device-extension enumeration: the name of
+// the supported mesh-shader extension, or "" if neither EXT nor NV is present.
+char g_aio_mesh_ext[40] = "";
 
 static void demo_prepare_fs(struct demo *demo) {
     if (strcmp(g_aio_vk_scene, "phong") == 0) {  // native-VK Phong-lit material
@@ -3560,6 +3563,12 @@ static void demo_init_vk(struct demo *demo) {
             if (!strcmp("VK_KHR_portability_subset", device_extensions[i].extensionName)) {
                 demo->extension_names[demo->enabled_extension_count++] = "VK_KHR_portability_subset";
             }
+            // Mesh-shader capability probe (--scene meshshader reports the result).
+            if (!strcmp("VK_EXT_mesh_shader", device_extensions[i].extensionName))
+                strcpy(g_aio_mesh_ext, "VK_EXT_mesh_shader");
+            else if (g_aio_mesh_ext[0] == '\0' &&
+                     !strcmp("VK_NV_mesh_shader", device_extensions[i].extensionName))
+                strcpy(g_aio_mesh_ext, "VK_NV_mesh_shader");
             assert(demo->enabled_extension_count < 64);
         }
 
@@ -4391,7 +4400,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR pCmdLine,
 
     demo.connection = hInstance;
     // Active API label (also the benchmark result key): plain Vulkan, or a scene variant.
-    const char *aio_vk_label = (strcmp(g_aio_vk_scene, "phong") == 0) ? "Vulkan Phong" : "Vulkan";
+    const char *aio_vk_label = (strcmp(g_aio_vk_scene, "phong") == 0)        ? "Vulkan Phong"
+                               : (strcmp(g_aio_vk_scene, "meshshader") == 0) ? "Vulkan Mesh Probe"
+                                                                             : "Vulkan";
     // Title shows the active API layer; live FPS is appended each second in the run loop.
     snprintf(demo.name, APP_NAME_STR_LEN, "AIO Graphics Test  -  %s", aio_vk_label);
     demo_create_window(&demo);
@@ -4400,6 +4411,25 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR pCmdLine,
     demo_init_vk_swapchain(&demo);
 
     demo_prepare(&demo);
+
+    // Mesh-shader probe: report whether the device/driver exposes mesh shaders,
+    // then render the cube so the window confirms Vulkan itself is alive.
+    if (strcmp(g_aio_vk_scene, "meshshader") == 0) {
+        char msg[320];
+        if (g_aio_mesh_ext[0] != '\0')
+            snprintf(msg, sizeof(msg),
+                     "Mesh shaders: SUPPORTED\n\nThis device/driver exposes %s.\n\nThe spinning "
+                     "cube confirms the device is live (a full mesh-shader render is not "
+                     "implemented in this probe).",
+                     g_aio_mesh_ext);
+        else
+            snprintf(msg, sizeof(msg),
+                     "Mesh shaders: NOT SUPPORTED\n\nThis device/driver (e.g. Turnip on Adreno) "
+                     "exposes neither VK_EXT_mesh_shader nor VK_NV_mesh_shader.\n\nThe spinning "
+                     "cube confirms Vulkan itself is working.");
+        MessageBoxA(demo.window, msg, "AIO Graphics Test  -  Mesh Shader Probe",
+                    MB_OK | MB_ICONINFORMATION);
+    }
 
     done = false;  // initialize loop condition variable
 
