@@ -1424,6 +1424,188 @@ static void ray_cleanup(void) {
     memset(&g_ray, 0, sizeof(g_ray));
 }
 
+// ===================== procedural "shader scene" framework ==================
+// Original Shadertoy-style fragment scenes: a fullscreen triangle (no vertex
+// buffer) + a heavy pixel shader. All scenes share the same VS (builds the
+// triangle from SV_VertexID) and a {iTime, iAspect} constant buffer; each scene
+// supplies only its PS. CULL_NONE so the CCW triangle is never culled. 100%
+// original / standard-math content (clean-room; nothing from any third party).
+#define AIO_STOY_HEADER                                                        \
+    "cbuffer CB:register(b0){float iTime;float iAspect;float2 pad;}\n"         \
+    "struct VSOut{float4 pos:SV_POSITION;float2 ndc:TEXCOORD0;};\n"            \
+    "VSOut VSMain(uint vid:SV_VertexID){VSOut o;float2 p=float2((vid<<1)&2,vid&2);" \
+    "o.pos=float4(p*2.0-1.0,0.0,1.0);o.ndc=o.pos.xy;return o;}\n"
+
+typedef struct {
+    ID3D11VertexShader *vs;
+    ID3D11PixelShader *ps;
+    ID3D11Buffer *cbo;
+    ID3D11RasterizerState *rs;
+} StoyState;
+
+static int stoy_init(ID3D11Device *dev, StoyState *s, const char *hlsl) {
+    ID3DBlob *vsb = compile_hlsl(hlsl, "VSMain", "vs_4_0");
+    ID3DBlob *psb = compile_hlsl(hlsl, "PSMain", "ps_4_0");
+    if (!vsb || !psb) return 1;
+    ID3D11Device_CreateVertexShader(dev, ID3D10Blob_GetBufferPointer(vsb),
+                                    ID3D10Blob_GetBufferSize(vsb), NULL, &s->vs);
+    ID3D11Device_CreatePixelShader(dev, ID3D10Blob_GetBufferPointer(psb),
+                                   ID3D10Blob_GetBufferSize(psb), NULL, &s->ps);
+    ID3D10Blob_Release(vsb);
+    ID3D10Blob_Release(psb);
+    D3D11_BUFFER_DESC cbd;
+    memset(&cbd, 0, sizeof(cbd));
+    cbd.ByteWidth = sizeof(RayCB);
+    cbd.Usage = D3D11_USAGE_DYNAMIC;
+    cbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    cbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    ID3D11Device_CreateBuffer(dev, &cbd, NULL, &s->cbo);
+    D3D11_RASTERIZER_DESC rd;
+    memset(&rd, 0, sizeof(rd));
+    rd.FillMode = D3D11_FILL_SOLID;
+    rd.CullMode = D3D11_CULL_NONE;
+    rd.DepthClipEnable = TRUE;
+    ID3D11Device_CreateRasterizerState(dev, &rd, &s->rs);
+    return (s->vs && s->ps && s->cbo && s->rs) ? 0 : 1;
+}
+
+static void stoy_frame(ID3D11DeviceContext *ctx, StoyState *s, double t, float aspect) {
+    D3D11_MAPPED_SUBRESOURCE m;
+    if (SUCCEEDED(ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)s->cbo, 0, D3D11_MAP_WRITE_DISCARD, 0,
+                                          &m))) {
+        RayCB *cb = (RayCB *)m.pData;
+        cb->iTime = (float)t;
+        cb->iAspect = aspect;
+        cb->pad0 = cb->pad1 = 0.0f;
+        ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)s->cbo, 0);
+    }
+    ID3D11DeviceContext_RSSetState(ctx, s->rs);
+    ID3D11DeviceContext_IASetInputLayout(ctx, NULL);
+    ID3D11DeviceContext_IASetPrimitiveTopology(ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ID3D11DeviceContext_VSSetShader(ctx, s->vs, NULL, 0);
+    ID3D11DeviceContext_PSSetShader(ctx, s->ps, NULL, 0);
+    ID3D11DeviceContext_PSSetConstantBuffers(ctx, 0, 1, &s->cbo);
+    ID3D11DeviceContext_Draw(ctx, 3, 0);
+}
+
+static void stoy_cleanup(StoyState *s) {
+    if (s->rs) ID3D11RasterizerState_Release(s->rs);
+    if (s->cbo) ID3D11Buffer_Release(s->cbo);
+    if (s->ps) ID3D11PixelShader_Release(s->ps);
+    if (s->vs) ID3D11VertexShader_Release(s->vs);
+    memset(s, 0, sizeof(*s));
+}
+
+// ------------------------------- OCEAN scene --------------------------------
+// A procedural sea: directional swell waves + fbm chop, ray-marched as a height
+// field, with sky reflection (fresnel), a sharp sun glint, and horizon fog.
+static const char *kOceanHLSL =
+    AIO_STOY_HEADER
+    "float h11(float2 p){p=frac(p*float2(123.34,456.21));p+=dot(p,p+45.32);return frac(p.x*p.y);}\n"
+    "float vn(float2 p){float2 i=floor(p),f=frac(p);f=f*f*(3.0-2.0*f);\n"
+    "  float a=h11(i),b=h11(i+float2(1,0)),c=h11(i+float2(0,1)),d=h11(i+float2(1,1));\n"
+    "  return lerp(lerp(a,b,f.x),lerp(c,d,f.x),f.y);}\n"
+    "float fbm(float2 p){float s=0.0,a=0.5;[unroll]for(int i=0;i<5;i++){s+=a*vn(p);p*=2.02;a*=0.5;}return s;}\n"
+    "float wave(float2 xz){float t=iTime;\n"
+    "  float h=sin(xz.x*0.6+t*1.1)*0.22+sin(xz.y*0.5-t*0.9)*0.18+sin((xz.x+xz.y)*0.35+t*0.7)*0.15;\n"
+    "  h+=(fbm(xz*0.7+t*0.15)-0.5)*0.4; return h;}\n"
+    "float3 wnormal(float3 p){float e=0.10;float h=wave(p.xz);\n"
+    "  return normalize(float3(h-wave(p.xz+float2(e,0)), e, h-wave(p.xz+float2(0,e))));}\n"
+    "float4 PSMain(VSOut inp):SV_TARGET{\n"
+    "  float2 uv=inp.ndc; uv.x*=iAspect;\n"
+    "  float3 ro=float3(0.0,2.4,4.0-iTime*0.7);\n"
+    "  float3 ta=ro+float3(0.0,-0.55,-1.0);\n"
+    "  float3 fw=normalize(ta-ro),rt=normalize(cross(float3(0,1,0),fw)),up=cross(fw,rt);\n"
+    "  float3 rd=normalize(uv.x*rt+uv.y*up+1.5*fw);\n"
+    "  float3 sun=normalize(float3(0.4,0.5,-0.75));\n"
+    "  float t=0.0; bool hit=false; float3 p=ro;\n"
+    "  [loop]for(int i=0;i<80;i++){p=ro+rd*t;float hh=wave(p.xz);if(p.y<hh+0.02){hit=true;break;}t+=max(0.12,(p.y-hh)*0.45);if(t>70.0)break;}\n"
+    "  float3 col;\n"
+    "  if(hit){float3 n=wnormal(p);\n"
+    "    float fres=pow(1.0-saturate(dot(n,-rd)),4.0);\n"
+    "    float3 water=lerp(float3(0.02,0.10,0.18),float3(0.10,0.36,0.42),saturate(n.y));\n"
+    "    float3 sky=lerp(float3(0.55,0.72,0.95),float3(0.85,0.9,1.0),saturate(rd.y*0.5+0.5));\n"
+    "    float dif=saturate(dot(n,sun));\n"
+    "    float3 hv=normalize(sun-rd);float spec=pow(saturate(dot(n,hv)),120.0);\n"
+    "    col=lerp(water*(0.3+0.7*dif),sky,fres*0.6)+spec*2.0;\n"
+    "    col=lerp(col,float3(0.72,0.82,0.96),1.0-exp(-0.00009*t*t*t));\n"
+    "  }else{float sd=pow(saturate(dot(rd,sun)),500.0);\n"
+    "    col=lerp(float3(0.5,0.68,0.95),float3(0.86,0.91,1.0),saturate(rd.y*1.2));\n"
+    "    col+=sd*float3(1.0,0.9,0.7)*2.0;}\n"
+    "  col=pow(saturate(col),1.0/2.2); return float4(col,1.0);}\n";
+
+static StoyState g_ocean;
+static int ocean_init(ID3D11Device *d, ID3D11DeviceContext *c, int w, int h) {
+    (void)c; (void)w; (void)h; return stoy_init(d, &g_ocean, kOceanHLSL);
+}
+static void ocean_frame(ID3D11DeviceContext *c, double t, float a) { stoy_frame(c, &g_ocean, t, a); }
+static void ocean_cleanup(void) { stoy_cleanup(&g_ocean); }
+
+// ----------------------------- MANDELBULB scene -----------------------------
+// The power-8 Mandelbulb (standard distance estimator) ray-marched, with
+// orbit-trap coloring + AO. A heavy fragment-ALU workload.
+static const char *kBulbHLSL =
+    AIO_STOY_HEADER
+    "float demb(float3 pos,out float trap){float3 z=pos;float dr=1.0,r=0.0;trap=1e10;\n"
+    "  [loop]for(int i=0;i<7;i++){r=length(z);if(r>2.0)break;\n"
+    "    float th=acos(clamp(z.z/r,-1.0,1.0)),ph=atan2(z.y,z.x);float pw=8.0;\n"
+    "    dr=pow(r,pw-1.0)*pw*dr+1.0;float zr=pow(r,pw);th*=pw;ph*=pw;\n"
+    "    z=zr*float3(sin(th)*cos(ph),sin(ph)*sin(th),cos(th))+pos;trap=min(trap,r);}\n"
+    "  return 0.5*log(max(r,1e-6))*r/max(dr,1e-6);}\n"
+    "float3 calcN(float3 p){float2 e=float2(0.0009,0.0);float tr;\n"
+    "  return normalize(float3(demb(p+e.xyy,tr)-demb(p-e.xyy,tr),demb(p+e.yxy,tr)-demb(p-e.yxy,tr),demb(p+e.yyx,tr)-demb(p-e.yyx,tr)));}\n"
+    "float4 PSMain(VSOut inp):SV_TARGET{\n"
+    "  float2 uv=inp.ndc; uv.x*=iAspect;\n"
+    "  float a=iTime*0.25;float3 ro=float3(sin(a)*2.6,0.55,cos(a)*2.6);\n"
+    "  float3 fw=normalize(-ro),rt=normalize(cross(float3(0,1,0),fw)),up=cross(fw,rt);\n"
+    "  float3 rd=normalize(uv.x*rt+uv.y*up+1.9*fw);\n"
+    "  float t=0.0,trap=0.0;bool hit=false;int steps=0;\n"
+    "  [loop]for(int i=0;i<96;i++){steps=i;float tr;float d=demb(ro+rd*t,tr);trap=tr;if(d<0.0008){hit=true;break;}t+=d;if(t>6.0)break;}\n"
+    "  float3 col;\n"
+    "  if(hit){float3 p=ro+rd*t;float3 n=calcN(p);float3 L=normalize(float3(0.6,0.7,0.4));\n"
+    "    float dif=saturate(dot(n,L));float ao=1.0-(float)steps/96.0;\n"
+    "    float3 base=0.5+0.5*cos(float3(0.0,1.0,2.0)*2.0+trap*9.0+iTime*0.2);\n"
+    "    col=base*(0.2+0.8*dif)*ao;float3 hv=normalize(L-rd);col+=pow(saturate(dot(n,hv)),32.0)*0.5;\n"
+    "  }else{col=float3(0.02,0.02,0.05)+max(0.0,rd.y)*0.03;}\n"
+    "  col=pow(saturate(col),1.0/2.2); return float4(col,1.0);}\n";
+
+static StoyState g_bulb;
+static int bulb_init(ID3D11Device *d, ID3D11DeviceContext *c, int w, int h) {
+    (void)c; (void)w; (void)h; return stoy_init(d, &g_bulb, kBulbHLSL);
+}
+static void bulb_frame(ID3D11DeviceContext *c, double t, float a) { stoy_frame(c, &g_bulb, t, a); }
+static void bulb_cleanup(void) { stoy_cleanup(&g_bulb); }
+
+// ------------------------------ NEBULA scene --------------------------------
+// A volumetric nebula: ray-marched 3D fbm noise accumulated with emission +
+// absorption, a slowly rotating colorful cloud. Heavy (volume march x 3D fbm).
+static const char *kNebulaHLSL =
+    AIO_STOY_HEADER
+    "float h13(float3 p){p=frac(p*0.3183099+0.1);p*=17.0;return frac(p.x*p.y*p.z*(p.x+p.y+p.z));}\n"
+    "float vn3(float3 p){float3 i=floor(p),f=frac(p);f=f*f*(3.0-2.0*f);\n"
+    "  return lerp(lerp(lerp(h13(i+float3(0,0,0)),h13(i+float3(1,0,0)),f.x),lerp(h13(i+float3(0,1,0)),h13(i+float3(1,1,0)),f.x),f.y),\n"
+    "              lerp(lerp(h13(i+float3(0,0,1)),h13(i+float3(1,0,1)),f.x),lerp(h13(i+float3(0,1,1)),h13(i+float3(1,1,1)),f.x),f.y),f.z);}\n"
+    "float fbm3(float3 p){float s=0.0,a=0.5;[unroll]for(int i=0;i<5;i++){s+=a*vn3(p);p=p*2.03+0.13;a*=0.5;}return s;}\n"
+    "float4 PSMain(VSOut inp):SV_TARGET{\n"
+    "  float2 uv=inp.ndc; uv.x*=iAspect;\n"
+    "  float a=iTime*0.06;float3 ro=float3(0,0,-3.0);float3 rd=normalize(float3(uv,1.6));\n"
+    "  float c=cos(a),s=sin(a);rd.xz=mul(rd.xz,float2x2(c,-s,s,c));\n"
+    "  float3 acc=float3(0,0,0);float trans=1.0;float t=0.5;\n"
+    "  [loop]for(int i=0;i<48;i++){float3 p=ro+rd*t;\n"
+    "    float den=fbm3(p*0.9+float3(0,0,iTime*0.1))-0.52;den=saturate(den)*1.5;\n"
+    "    if(den>0.001){float3 emit=0.5+0.5*cos(float3(0.0,1.5,2.5)+length(p)*0.6+iTime*0.1);\n"
+    "      acc+=trans*emit*den*0.5;trans*=exp(-den*0.4);}\n"
+    "    t+=0.16;if(trans<0.02||t>9.0)break;}\n"
+    "  float3 col=acc+float3(0.02,0.01,0.04)*(1.0-trans);\n"
+    "  col=pow(saturate(col),1.0/2.2); return float4(col,1.0);}\n";
+
+static StoyState g_nebula;
+static int nebula_init(ID3D11Device *d, ID3D11DeviceContext *c, int w, int h) {
+    (void)c; (void)w; (void)h; return stoy_init(d, &g_nebula, kNebulaHLSL);
+}
+static void nebula_frame(ID3D11DeviceContext *c, double t, float a) { stoy_frame(c, &g_nebula, t, a); }
+static void nebula_cleanup(void) { stoy_cleanup(&g_nebula); }
+
 // ========================= GEOMETRY-SHADER scene ===========================
 // A mesh exploder: the geometry shader receives each triangle, computes its face
 // normal, pushes the whole triangle outward along that normal by a time-varying
@@ -2135,6 +2317,9 @@ static const D3D11Scene kScenes[] = {
     {"compute", "D3D11 Compute Particles", comp_init, comp_frame, comp_cleanup},
     {"dolphin", "D3D11 Dolphin", dol_init, dol_frame, dol_cleanup},
     {"raymarch", "D3D11 Raymarch SDF", ray_init, ray_frame, ray_cleanup},
+    {"ocean", "D3D11 Ocean", ocean_init, ocean_frame, ocean_cleanup},
+    {"mandelbulb", "D3D11 Mandelbulb", bulb_init, bulb_frame, bulb_cleanup},
+    {"nebula", "D3D11 Nebula", nebula_init, nebula_frame, nebula_cleanup},
     {"gsexplode", "D3D11 GS Exploder", gs_init, gs_frame, gs_cleanup},
     {"cel", "D3D11 Cel Shading", cel_init, cel_frame, cel_cleanup},
     {"matcap", "D3D11 Matcap", mat_init, mat_frame, mat_cleanup},

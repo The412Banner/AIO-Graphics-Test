@@ -360,6 +360,9 @@ static const BenchRow kBenchRows[] = {
     {"Compute", "dx11 --scene compute", "D3D11 Compute Particles", 1},
     {"Dolphin", "dx11 --scene dolphin", "D3D11 Dolphin", 1},
     {"Raymarch", "dx11 --scene raymarch", "D3D11 Raymarch SDF", 1},
+    {"Ocean", "dx11 --scene ocean", "D3D11 Ocean", 1},
+    {"Mandelbulb", "dx11 --scene mandelbulb", "D3D11 Mandelbulb", 1},
+    {"Nebula", "dx11 --scene nebula", "D3D11 Nebula", 1},
     {"GS Explode", "dx11 --scene gsexplode", "D3D11 GS Exploder", 1},
     {"Cel", "dx11 --scene cel", "D3D11 Cel Shading", 1},
     {"Matcap", "dx11 --scene matcap", "D3D11 Matcap", 1},
@@ -622,18 +625,20 @@ static void show_dx11_scenes(HWND frame) {
     static const char *labels[] = {"Spinning cube",        "Textured cube",
                                    "Instanced (512 cubes)", "Tessellation (sphere)",
                                    "Compute particles",     "Dolphin (swim)",
-                                   "Raymarch SDF (shader)", "GS mesh exploder",
-                                   "Cel shading (torus)",   "Matcap (chrome ball)",
-                                   "Atomics (histogram)",
+                                   "Raymarch SDF (shader)", "Ocean (raymarched)",
+                                   "Mandelbulb fractal",    "Volumetric nebula",
+                                   "GS mesh exploder",      "Cel shading (torus)",
+                                   "Matcap (chrome ball)",  "Atomics (histogram)",
                                    "Draw stress 128",       "Draw stress 256",
                                    "Draw stress 512",       "Draw stress 1024",
                                    "Draw stress 2048"};
     static const char *args[] = {"dx11 --scene spin",      "dx11 --scene textured",
                                  "dx11 --scene instanced", "dx11 --scene tess",
                                  "dx11 --scene compute",   "dx11 --scene dolphin",
-                                 "dx11 --scene raymarch",  "dx11 --scene gsexplode",
-                                 "dx11 --scene cel",       "dx11 --scene matcap",
-                                 "dx11 --scene atomics",
+                                 "dx11 --scene raymarch",  "dx11 --scene ocean",
+                                 "dx11 --scene mandelbulb", "dx11 --scene nebula",
+                                 "dx11 --scene gsexplode", "dx11 --scene cel",
+                                 "dx11 --scene matcap",    "dx11 --scene atomics",
                                  "dx11 --scene drawstress --draws 128",
                                  "dx11 --scene drawstress --draws 256",
                                  "dx11 --scene drawstress --draws 512",
@@ -642,20 +647,22 @@ static void show_dx11_scenes(HWND frame) {
     static const char *counts[] = {"128", "256", "512", "1024", "2048"};
     g_cbtn_n = (int)(sizeof(args) / sizeof(args[0]));
     int y = cr.top + 70;
-    const int n_full = g_cbtn_n - 5;  // scenes shown as full rows; last 5 = draw counts
+    const int n_full = g_cbtn_n - 5;  // scenes shown as buttons; last 5 = draw counts
+    const int colw = 220, rowh = 38;
     int i = 0;
-    for (; i < n_full; i++) {  // the scenes as full-width launch buttons
+    for (; i < n_full; i++) {  // the scenes as launch buttons in a 2-column grid
+        int col = i % 2, row = i / 2;
         g_cbtn_arg[i] = args[i];
         g_cbtn_label[i] = NULL;
         g_cbtn_proc[i] = NULL;
         g_cbtn_result[i] = NULL;
         g_cbtn_avg[i] = NULL;
         g_cbtn[i] = CreateWindowA("BUTTON", labels[i], WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                  cr.left, y, 240, 34, frame, (HMENU)(INT_PTR)(ID_CB_FIRST + i),
-                                  g_hinst, NULL);
+                                  cr.left + col * (colw + 12), y + row * rowh, colw, 30, frame,
+                                  (HMENU)(INT_PTR)(ID_CB_FIRST + i), g_hinst, NULL);
         if (g_ui_font) SendMessage(g_cbtn[i], WM_SETFONT, (WPARAM)g_ui_font, TRUE);
-        y += 44;
     }
+    y += ((n_full + 1) / 2) * rowh + 12;
     // Draw stress: one "Draw stress:" label + the five draw counts on a single row.
     g_draw_label = CreateWindowA("STATIC", "Draw stress:", WS_CHILD | WS_VISIBLE | SS_LEFT, cr.left,
                                  y + 8, 96, 22, frame, NULL, g_hinst, NULL);
