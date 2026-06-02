@@ -92,7 +92,28 @@ static HWND g_d3d11_chk, g_d3d11_btn;     // D3D11 group select-all checkbox + e
 static HWND g_results_btn;                 // "Benchmark Results" button (Benchmark view)
 #define ID_SHOW_RESULTS 3762
 #define ID_RESULTS_BACK 3763
+#define ID_RESULTS_COMBO 3764
+static HWND g_results_combo;               // run picker on the Results screen
+static int g_results_sel = 0;              // selected run: 0 = current session, 1.. = history
+static char g_run_ts[24];                  // timestamp of the in-progress Run-Selected sweep
 static int g_d3d11_expanded = 1;          // is the D3D11 grid shown?
+
+// Persisted benchmark run history (survives app restarts).
+#define AIO_HIST_FILE "AIO-Graphics-Test_history.txt"
+#define MAX_HIST_RUNS 40
+#define MAX_HIST_ROWS 24
+typedef struct {
+    char label[40];
+    float avg, mn, mx;
+} HistRow;
+typedef struct {
+    char ts[24];
+    int secs;
+    HistRow rows[MAX_HIST_ROWS];
+    int nrows;
+} HistRun;
+static HistRun g_hist[MAX_HIST_RUNS];  // loaded oldest..newest
+static int g_hist_n;
 static int g_sel_inited = 0;              // selections seeded (all-on) once per session
 static int g_run_list[MAX_CB], g_run_n, g_run_pos;  // "Run Selected" sweep list
 
@@ -117,6 +138,7 @@ static void destroy_content(void) {
     if (g_d3d11_chk) { DestroyWindow(g_d3d11_chk); g_d3d11_chk = NULL; }
     if (g_d3d11_btn) { DestroyWindow(g_d3d11_btn); g_d3d11_btn = NULL; }
     if (g_results_btn) { DestroyWindow(g_results_btn); g_results_btn = NULL; }
+    if (g_results_combo) { DestroyWindow(g_results_combo); g_results_combo = NULL; }
     for (int i = 0; i < 4; i++)
         if (g_dur_btn[i]) { DestroyWindow(g_dur_btn[i]); g_dur_btn[i] = NULL; }
     g_is_probe = 0;
@@ -168,6 +190,61 @@ static void cache_store(const char *label, float avgF, const char *avg, const ch
     snprintf(g_cache[i].label, sizeof(g_cache[i].label), "%s", label);
     snprintf(g_cache[i].avg, sizeof(g_cache[i].avg), "%s", avg);
     snprintf(g_cache[i].mm, sizeof(g_cache[i].mm), "%s", mm);
+}
+
+// --- persisted run history ---
+// Append a "RUN <timestamp> <secs>" header at the start of a Run-Selected sweep,
+// then one "<label> <avg> <min> <max>" line per result as it completes. Tab-sep.
+static void hist_append_run_header(const char *ts, int secs) {
+    FILE *f = fopen(AIO_HIST_FILE, "a");
+    if (f) {
+        fprintf(f, "RUN\t%s\t%d\n", ts, secs);
+        fclose(f);
+    }
+}
+static void hist_append_row(const char *label, float a, float mn, float mx) {
+    FILE *f = fopen(AIO_HIST_FILE, "a");
+    if (f) {
+        fprintf(f, "%s\t%.1f\t%.1f\t%.1f\n", label, a, mn, mx);
+        fclose(f);
+    }
+}
+// Load the history file into g_hist[] (keeps the newest MAX_HIST_RUNS runs).
+static void hist_load(void) {
+    g_hist_n = 0;
+    FILE *f = fopen(AIO_HIST_FILE, "r");
+    if (!f) return;
+    char line[256];
+    HistRun *cur = NULL;
+    while (fgets(line, sizeof(line), f)) {
+        if (strncmp(line, "RUN\t", 4) == 0) {
+            if (g_hist_n >= MAX_HIST_RUNS) {  // drop the oldest, keep the newest
+                memmove(&g_hist[0], &g_hist[1], (MAX_HIST_RUNS - 1) * sizeof(HistRun));
+                g_hist_n = MAX_HIST_RUNS - 1;
+            }
+            cur = &g_hist[g_hist_n++];
+            memset(cur, 0, sizeof(*cur));
+            char *ts = line + 4, *tab = strchr(ts, '\t');
+            if (tab) {
+                *tab = '\0';
+                cur->secs = atoi(tab + 1);
+            }
+            snprintf(cur->ts, sizeof(cur->ts), "%s", ts);
+        } else if (cur && cur->nrows < MAX_HIST_ROWS) {
+            char *t1 = strchr(line, '\t');
+            if (!t1) continue;
+            *t1 = '\0';
+            float a = 0, mn = 0, mx = 0;
+            if (sscanf(t1 + 1, "%f\t%f\t%f", &a, &mn, &mx) == 3) {
+                HistRow *r = &cur->rows[cur->nrows++];
+                snprintf(r->label, sizeof(r->label), "%s", line);
+                r->avg = a;
+                r->mn = mn;
+                r->mx = mx;
+            }
+        }
+    }
+    fclose(f);
 }
 
 // Build the timeline-vs-binary probe verdict text.
@@ -407,15 +484,32 @@ static void show_benchmark(HWND frame) {
     restore_cached_results();  // re-show results already run this session
 }
 
-// Benchmark Results screen: the full Avg/Min/Max for every test run this session
-// (read from the in-memory cache, in canonical row order). Reached from the
-// Benchmark view's "Benchmark Results" button.
+// One result line on the Results screen: label + bold "Avg N" + "Min N  Max N".
+static void make_result_row(HWND frame, RECT *cr, int *py, int i, const char *label,
+                            const char *avg, const char *mm) {
+    int y = *py;
+    g_cbtn_label[i] = label;
+    g_cbtn[i] = CreateWindowA("STATIC", label, WS_CHILD | WS_VISIBLE | SS_LEFT, cr->left, y, 220, 22,
+                              frame, NULL, g_hinst, NULL);
+    if (g_ui_font) SendMessage(g_cbtn[i], WM_SETFONT, (WPARAM)g_ui_font, TRUE);
+    g_cbtn_avg[i] = CreateWindowA("STATIC", avg, WS_CHILD | WS_VISIBLE | SS_LEFT, cr->left + 230, y, 90,
+                                  22, frame, NULL, g_hinst, NULL);
+    if (g_ui_font_bold) SendMessage(g_cbtn_avg[i], WM_SETFONT, (WPARAM)g_ui_font_bold, TRUE);
+    g_cbtn_result[i] = CreateWindowA("STATIC", mm, WS_CHILD | WS_VISIBLE | SS_LEFT, cr->left + 326, y,
+                                     cr->right - (cr->left + 326), 22, frame, NULL, g_hinst, NULL);
+    if (g_ui_font) SendMessage(g_cbtn_result[i], WM_SETFONT, (WPARAM)g_ui_font, TRUE);
+    *py = y + 28;
+}
+
+// Benchmark Results screen: a run picker (current session + timestamped previous
+// runs loaded from disk) and the selected run's full Avg/Min/Max per test.
 static void show_bench_results(HWND frame) {
     destroy_content();
     g_cb_bench = 0;  // static results: no checkbox/sweep/poll logic
     SetWindowTextA(g_header, "Benchmark Results");
     RECT cr;
     get_content_rect(frame, &cr);
+    hist_load();
 
     g_run_all = CreateWindowA("BUTTON", "< Back to Benchmark", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                               cr.right - 190, cr.top, 190, 32, frame, (HMENU)(INT_PTR)ID_RESULTS_BACK,
@@ -423,34 +517,51 @@ static void show_bench_results(HWND frame) {
     if (g_ui_font) SendMessage(g_run_all, WM_SETFONT, (WPARAM)g_ui_font, TRUE);
 
     g_placeholder = CreateWindowA(
-        "STATIC", "Results from this session. Full per-frame data is in AIO-Graphics-Test_bench.csv.",
+        "STATIC", "Pick a run to view. Per-frame data is in AIO-Graphics-Test_bench.csv.",
         WS_CHILD | WS_VISIBLE | SS_LEFT, cr.left, cr.top, cr.right - cr.left - 200, 22, frame, NULL,
         g_hinst, NULL);
     if (g_ui_font) SendMessage(g_placeholder, WM_SETFONT, (WPARAM)g_ui_font, TRUE);
 
-    int y = cr.top + 48;
+    // Run picker: "Current session" + each saved run, newest first.
+    g_results_combo =
+        CreateWindowA("COMBOBOX", "", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL, cr.left,
+                      cr.top + 30, 340, 260, frame, (HMENU)(INT_PTR)ID_RESULTS_COMBO, g_hinst, NULL);
+    if (g_ui_font) SendMessage(g_results_combo, WM_SETFONT, (WPARAM)g_ui_font, TRUE);
+    SendMessageA(g_results_combo, CB_ADDSTRING, 0, (LPARAM) "Current session (live)");
+    for (int r = g_hist_n - 1; r >= 0; r--) {
+        char it[80];
+        snprintf(it, sizeof(it), "%s   (%ds, %d tests)", g_hist[r].ts, g_hist[r].secs, g_hist[r].nrows);
+        SendMessageA(g_results_combo, CB_ADDSTRING, 0, (LPARAM)it);
+    }
+    if (g_results_sel < 0 || g_results_sel > g_hist_n) g_results_sel = 0;
+    SendMessage(g_results_combo, CB_SETCURSEL, g_results_sel, 0);
+
+    int y = cr.top + 72;
     g_cbtn_n = 0;
-    for (int r = 0; r < N_BENCH_ROWS && g_cbtn_n < MAX_CB; r++) {
-        int ci = cache_find(kBenchRows[r].apilabel);
-        if (ci < 0) continue;  // not run this session
-        int i = g_cbtn_n++;
-        g_cbtn_label[i] = kBenchRows[r].apilabel;
-        g_cbtn[i] = CreateWindowA("STATIC", kBenchRows[r].apilabel, WS_CHILD | WS_VISIBLE | SS_LEFT,
-                                  cr.left, y, 220, 22, frame, NULL, g_hinst, NULL);
-        if (g_ui_font) SendMessage(g_cbtn[i], WM_SETFONT, (WPARAM)g_ui_font, TRUE);
-        g_cbtn_avg[i] = CreateWindowA("STATIC", g_cache[ci].avg, WS_CHILD | WS_VISIBLE | SS_LEFT,
-                                      cr.left + 230, y, 90, 22, frame, NULL, g_hinst, NULL);
-        if (g_ui_font_bold) SendMessage(g_cbtn_avg[i], WM_SETFONT, (WPARAM)g_ui_font_bold, TRUE);
-        g_cbtn_result[i] = CreateWindowA("STATIC", g_cache[ci].mm, WS_CHILD | WS_VISIBLE | SS_LEFT,
-                                         cr.left + 326, y, cr.right - (cr.left + 326), 22, frame, NULL,
-                                         g_hinst, NULL);
-        if (g_ui_font) SendMessage(g_cbtn_result[i], WM_SETFONT, (WPARAM)g_ui_font, TRUE);
-        y += 28;
+    if (g_results_sel == 0) {  // current session, from the in-memory cache (canonical order)
+        for (int r = 0; r < N_BENCH_ROWS && g_cbtn_n < MAX_CB; r++) {
+            int ci = cache_find(kBenchRows[r].apilabel);
+            if (ci < 0) continue;
+            make_result_row(frame, &cr, &y, g_cbtn_n, kBenchRows[r].apilabel, g_cache[ci].avg,
+                            g_cache[ci].mm);
+            g_cbtn_n++;
+        }
+    } else {  // a saved run (sel 1 = newest = g_hist[g_hist_n-1])
+        HistRun *run = &g_hist[g_hist_n - g_results_sel];
+        for (int r = 0; r < run->nrows && g_cbtn_n < MAX_CB; r++) {
+            char avg[32], mm[48];
+            snprintf(avg, sizeof(avg), "Avg %.0f", run->rows[r].avg);
+            snprintf(mm, sizeof(mm), "Min %.0f   Max %.0f", run->rows[r].mn, run->rows[r].mx);
+            make_result_row(frame, &cr, &y, g_cbtn_n, run->rows[r].label, avg, mm);
+            g_cbtn_n++;
+        }
     }
     if (g_cbtn_n == 0) {
-        g_verdict = CreateWindowA("STATIC", "No benchmarks have been run yet this session.",
-                                  WS_CHILD | WS_VISIBLE | SS_LEFT, cr.left, y, cr.right - cr.left, 22,
-                                  frame, NULL, g_hinst, NULL);
+        g_verdict = CreateWindowA(
+            "STATIC",
+            g_results_sel == 0 ? "No benchmarks have been run yet this session." : "(empty run)",
+            WS_CHILD | WS_VISIBLE | SS_LEFT, cr.left, y, cr.right - cr.left, 22, frame, NULL, g_hinst,
+            NULL);
         if (g_ui_font) SendMessage(g_verdict, WM_SETFONT, (WPARAM)g_ui_font, TRUE);
     }
 }
@@ -785,11 +896,21 @@ static LRESULT CALLBACK shell_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         }
         case WM_COMMAND: {
             int id = LOWORD(wParam);
+            if (HIWORD(wParam) == CBN_SELCHANGE && id == ID_RESULTS_COMBO) {  // run picker changed
+                g_results_sel = (int)SendMessage(g_results_combo, CB_GETCURSEL, 0, 0);
+                show_bench_results(hwnd);
+                return 0;
+            }
             if (id == ID_RUN_ALL && g_cb_bench && g_cbtn_n > 0) {  // run selected rows in sequence
                 g_run_n = 0;
                 for (int k = 0; k < g_cbtn_n; k++)
                     if (g_cbtn_sel[k]) g_run_list[g_run_n++] = k;
                 if (g_run_n > 0) {
+                    SYSTEMTIME st;
+                    GetLocalTime(&st);
+                    snprintf(g_run_ts, sizeof(g_run_ts), "%04d-%02d-%02d %02d:%02d:%02d", st.wYear,
+                             st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+                    hist_append_run_header(g_run_ts, g_bench_secs);  // new timestamped run record
                     g_sweep_active = 1;
                     g_run_pos = 0;
                     launch_bench_row(hwnd, g_run_list[0]);
@@ -841,6 +962,7 @@ static LRESULT CALLBACK shell_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
                 return 0;
             }
             if (id == ID_SHOW_RESULTS) {
+                g_results_sel = 0;  // default to the current-session view
                 show_bench_results(hwnd);
                 return 0;
             }
@@ -899,6 +1021,8 @@ static LRESULT CALLBACK shell_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
                         if (g_cbtn_result[i]) SetWindowTextA(g_cbtn_result[i], mmtxt);
                         // Cache the result so it survives switching content views.
                         if (a > 0.0f) cache_store(g_cbtn_label[i], a, avgtxt, mmtxt);
+                        // During a Run-Selected sweep, log to the persisted history record.
+                        if (g_sweep_active && a > 0.0f) hist_append_row(g_cbtn_label[i], a, mn, mx);
                         // Semaphore probe: record avg, and once both runs are in,
                         // judge the timeline-vs-binary result.
                         if (g_is_probe && i < 2 && a > 0.0f) {
