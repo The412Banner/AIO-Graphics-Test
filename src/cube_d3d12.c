@@ -43,6 +43,10 @@
 
 static int g_w = 640, g_h = 480;
 static int g_quit;
+// Pending window resize -> refresh g_w/g_h (which feed the projection aspect each
+// frame), so the cube isn't stretched when the window is maximized/resized.
+static volatile int g_resize_pending = 0;
+static int g_resize_w = 0, g_resize_h = 0;
 
 static LRESULT CALLBACK d3d12_wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
     switch (m) {
@@ -50,6 +54,12 @@ static LRESULT CALLBACK d3d12_wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
             if (w == VK_ESCAPE) {
                 g_quit = 1;
                 PostQuitMessage(0);
+            }
+            return 0;
+        case WM_SIZE:
+            if (w != SIZE_MINIMIZED) {
+                int nw = LOWORD(l), nh = HIWORD(l);
+                if (nw > 0 && nh > 0) { g_resize_w = nw; g_resize_h = nh; g_resize_pending = 1; }
             }
             return 0;
         case WM_CLOSE:
@@ -500,6 +510,10 @@ int aio_run_d3d12_cube(HINSTANCE hinst) {
             DispatchMessage(&msg);
         }
         if (g_quit) break;
+        if (g_resize_pending) {  // keep the cube round when the window is resized
+            g_resize_pending = 0;
+            if (g_resize_w > 0 && g_resize_h > 0) { g_w = g_resize_w; g_h = g_resize_h; }
+        }
 
         // Throttle the CPU to FRAME_COUNT frames ahead: wait only for the slot
         // we are about to reuse (allocator + CB), not the frame just submitted.
