@@ -4298,9 +4298,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR pCmdLine,
             return rc;
         }
         if (strcmp(api, "dx11") == 0) {
-            const char *scene = NULL;  // optional: --scene <name>
-            for (int iii = 0; iii < argc - 1; iii++)
+            const char *scene = NULL;  // optional: --scene <name>, --draws <n>
+            for (int iii = 0; iii < argc - 1; iii++) {
                 if (argv && argv[iii] && strcmp(argv[iii], "--scene") == 0) scene = argv[iii + 1];
+                if (argv && argv[iii] && strcmp(argv[iii], "--draws") == 0)
+                    aio_d3d11_set_draws(atoi(argv[iii + 1]));
+            }
             int rc = aio_run_d3d11_cube(hInstance, scene);
             AIO_FREE_ARGV();
             return rc;

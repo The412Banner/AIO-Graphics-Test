@@ -57,7 +57,7 @@ static HWND g_edit_gl;   // GPU Info: OpenGL tab text
 static HWND g_placeholder;
 
 #define ID_CB_FIRST 3000  // content-area buttons (Benchmark + scene-picker views)
-#define MAX_CB 20
+#define MAX_CB 24
 static HWND g_cbtn[MAX_CB];
 static HWND g_cbtn_avg[MAX_CB];      // bold "Avg N" label next to each benchmark button
 static HWND g_cbtn_result[MAX_CB];   // "Min N   Max N" label next to each benchmark button
@@ -162,7 +162,7 @@ static void destroy_content(void) {
 // In-memory result cache (this session only; empty at launch, gone on close), so
 // already-run results reappear when you switch content views. Keyed by the test
 // label; NOT read from the on-disk files (those would leak last session's runs).
-#define MAX_CACHE 24
+#define MAX_CACHE 32
 static struct {
     char label[40];
     float avgF;
@@ -360,7 +360,11 @@ static const BenchRow kBenchRows[] = {
     {"GS Explode", "dx11 --scene gsexplode", "D3D11 GS Exploder", 1},
     {"Cel", "dx11 --scene cel", "D3D11 Cel Shading", 1},
     {"Matcap", "dx11 --scene matcap", "D3D11 Matcap", 1},
-    {"Draw Stress", "dx11 --scene drawstress", "D3D11 Draw Stress", 1},
+    {"Draw 128", "dx11 --scene drawstress --draws 128", "D3D11 Draw 128", 1},
+    {"Draw 256", "dx11 --scene drawstress --draws 256", "D3D11 Draw 256", 1},
+    {"Draw 512", "dx11 --scene drawstress --draws 512", "D3D11 Draw 512", 1},
+    {"Draw 1024", "dx11 --scene drawstress --draws 1024", "D3D11 Draw 1024", 1},
+    {"Draw 2048", "dx11 --scene drawstress --draws 2048", "D3D11 Draw 2048", 1},
     {"D3D12: Cube", "dx12", "Direct3D 12", 0},
 };
 #define N_BENCH_ROWS ((int)(sizeof(kBenchRows) / sizeof(kBenchRows[0])))
@@ -588,13 +592,19 @@ static void show_dx11_scenes(HWND frame) {
                                    "Compute particles",     "Dolphin (swim)",
                                    "Raymarch SDF (shader)", "GS mesh exploder",
                                    "Cel shading (torus)",   "Matcap (chrome ball)",
-                                   "Draw stress (1024 draws)"};
+                                   "Draw stress 128",       "Draw stress 256",
+                                   "Draw stress 512",       "Draw stress 1024",
+                                   "Draw stress 2048"};
     static const char *args[] = {"dx11 --scene spin",      "dx11 --scene textured",
                                  "dx11 --scene instanced", "dx11 --scene tess",
                                  "dx11 --scene compute",   "dx11 --scene dolphin",
                                  "dx11 --scene raymarch",  "dx11 --scene gsexplode",
                                  "dx11 --scene cel",       "dx11 --scene matcap",
-                                 "dx11 --scene drawstress"};
+                                 "dx11 --scene drawstress --draws 128",
+                                 "dx11 --scene drawstress --draws 256",
+                                 "dx11 --scene drawstress --draws 512",
+                                 "dx11 --scene drawstress --draws 1024",
+                                 "dx11 --scene drawstress --draws 2048"};
     g_cbtn_n = (int)(sizeof(args) / sizeof(args[0]));
     int y = cr.top + 70;
     for (int i = 0; i < g_cbtn_n; i++) {

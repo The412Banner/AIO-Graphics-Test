@@ -1847,9 +1847,16 @@ static void mat_cleanup(void) {
 // An NxN grid of small cubes, each issued as its OWN draw call (NOT instanced)
 // with its own per-object constant-buffer update. The bottleneck is CPU/driver
 // submission overhead, not the GPU - a different axis from every other scene
-// (which are GPU-bound). DRAWSTRESS_N^2 cbuffer updates + draws per frame. Reuses
+// (which are GPU-bound). N cbuffer updates + N draws per frame (N = --draws, the
+// grid is sized to fill the view at any count). Reuses
 // the spin shader (POSITION+COLOR cube).
-#define DRAWSTRESS_N 32  // 32x32 = 1024 draws/frame
+static int g_ds_draws = 1024;  // draw count for the draw-stress scene (--draws N)
+
+void aio_d3d11_set_draws(int n) {
+    if (n < 1) n = 1;
+    if (n > 8192) n = 8192;
+    g_ds_draws = n;
+}
 
 static struct {
     ID3D11VertexShader *vs;
@@ -1862,6 +1869,10 @@ static int ds_init(ID3D11Device *dev, ID3D11DeviceContext *ctx, int w, int h) {
     (void)ctx;
     (void)w;
     (void)h;
+    // Per-count benchmark label so each draw count records its own result.
+    char lbl[40];
+    snprintf(lbl, sizeof(lbl), "D3D11 Draw %d", g_ds_draws);
+    aio_bench_set_label(lbl);
     ID3DBlob *vsb = compile_hlsl(kSpinHLSL, "VSMain", "vs_4_0");
     ID3DBlob *psb = compile_hlsl(kSpinHLSL, "PSMain", "ps_4_0");
     if (!vsb || !psb) return 1;
@@ -1901,7 +1912,19 @@ static int ds_init(ID3D11Device *dev, ID3D11DeviceContext *ctx, int w, int h) {
 }
 
 static void ds_frame(ID3D11DeviceContext *ctx, double t, float aspect) {
+    int count = g_ds_draws;
+    int cols = (int)ceilf(sqrtf((float)count));
+    if (cols < 1) cols = 1;
+    int rows = (count + cols - 1) / cols;
+    // Keep the grid filling the view at any count: spacing shrinks as count grows.
+    const float spread = 9.0f;
+    float sx = (cols > 1) ? (2.0f * spread) / (cols - 1) : 2.0f * spread;
+    float sy = (rows > 1) ? (2.0f * spread) / (rows - 1) : 2.0f * spread;
+    float step = (sx < sy) ? sx : sy;
+    float scale = step * 0.42f;
+    float ox = -((cols - 1) * step) * 0.5f, oy = -((rows - 1) * step) * 0.5f;
     Mat4 vp = mat_mul(mat_translate(0.0f, 0.0f, -18.0f), mat_perspective(1.0f, aspect, 0.1f, 100.0f));
+
     UINT stride = sizeof(ColVertex), offset = 0;
     ID3D11DeviceContext_IASetInputLayout(ctx, g_ds.layout);
     ID3D11DeviceContext_IASetPrimitiveTopology(ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -1910,18 +1933,15 @@ static void ds_frame(ID3D11DeviceContext *ctx, double t, float aspect) {
     ID3D11DeviceContext_VSSetConstantBuffers(ctx, 0, 1, &g_ds.cbo);
     ID3D11DeviceContext_PSSetShader(ctx, g_ds.ps, NULL, 0);
 
-    const float step = 0.52f;
-    const float origin = -((DRAWSTRESS_N - 1) * step) * 0.5f;
-    for (int gy = 0; gy < DRAWSTRESS_N; gy++) {
-        for (int gx = 0; gx < DRAWSTRESS_N; gx++) {
-            float fx = origin + gx * step, fy = origin + gy * step;
-            float ang = (float)t * 0.8f + (gx + gy) * 0.20f;
-            Mat4 model = mat_mul(mat_mul(mat_scale(0.18f), mat_rotate(0.5f, 1.0f, 0.3f, ang)),
-                                 mat_translate(fx, fy, 0.0f));
-            Mat4 mvp = mat_mul(model, vp);
-            upload_mat(ctx, g_ds.cbo, mvp);            // one cbuffer update per object
-            ID3D11DeviceContext_Draw(ctx, 36, 0);      // ...and one draw call per object
-        }
+    for (int i = 0; i < count; i++) {
+        int gx = i % cols, gy = i / cols;
+        float fx = ox + gx * step, fy = oy + gy * step;
+        float ang = (float)t * 0.8f + (gx + gy) * 0.20f;
+        Mat4 model = mat_mul(mat_mul(mat_scale(scale), mat_rotate(0.5f, 1.0f, 0.3f, ang)),
+                             mat_translate(fx, fy, 0.0f));
+        Mat4 mvp = mat_mul(model, vp);
+        upload_mat(ctx, g_ds.cbo, mvp);            // one cbuffer update per object
+        ID3D11DeviceContext_Draw(ctx, 36, 0);      // ...and one draw call per object
     }
 }
 
