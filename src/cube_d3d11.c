@@ -2835,19 +2835,23 @@ typedef struct {
     float iTime;  float pad3[3];
 } FreeCB;  // 5 x float4 = 80 bytes, std cbuffer layout
 
-// Free Look is a true *curved planet*: terrain is a height field displaced onto a
-// sphere of radius PR centred at the origin, so flying straight up curves the
-// horizon and eventually shows the whole globe from orbit (seamless, one world --
-// no flat-plane / skybox swap). Sea level == PR; land rises above, ocean below.
+// Free Look is a true *curved planet* system: terrain is a height field displaced onto
+// a sphere, so flying straight up curves the horizon and shows the whole globe from
+// orbit (seamless, one world). TWO planets: Earth (home, origin, blue/ocean) and Mars
+// (offset, rusty/dry, CO2 ice caps, thin atmosphere). Fly off one, cross space, land on
+// the other. Kind 0 = Earth (sea level == radius), kind 1 = Mars (no ocean).
 static const char kFreeLookHLSL[] =
     "cbuffer CB:register(b0){float3 eye;float pad0;float3 fwd;float pad1;float3 rgt;float pad2;float3 upv;float aspect;float iTime;float3 pad3;}\n"
     "struct VSOut{float4 pos:SV_POSITION;float2 ndc:TEXCOORD0;};\n"
     "VSOut VSMain(uint vid:SV_VertexID){VSOut o;float2 p=float2((vid<<1)&2,vid&2);"
     "o.pos=float4(p*2.0-1.0,0.0,1.0);o.ndc=o.pos.xy;return o;}\n"
-    "#define PR 200.0\n"   // planet radius == sea level
-    "#define PMAX 60.0\n"  // bounding-shell margin above sea (>= max terrain height)
-    "#define CL0 16.0\n"   // cloud shell base altitude above sea
-    "#define CL1 30.0\n"   // cloud shell top altitude above sea
+    "static const float3 CA=float3(0.0,0.0,0.0);\n"     // Earth centre
+    "static const float RA=200.0;\n"                    // Earth radius (sea level)
+    "static const float3 CB=float3(700.0,0.0,0.0);\n"   // Mars centre
+    "static const float RB=150.0;\n"                    // Mars radius
+    "#define PMAX 60.0\n"  // bounding-shell margin (>= max terrain height on either)
+    "#define CL0 16.0\n"   // Earth cloud shell base altitude
+    "#define CL1 30.0\n"   // Earth cloud shell top altitude
     "float h21(float2 p){p=frac(p*float2(123.34,456.21));p+=dot(p,p+45.32);return frac(p.x*p.y);}\n"
     "float h31(float3 p){p=frac(p*0.1031);p+=dot(p,p.yzx+33.33);return frac((p.x+p.y)*p.z);}\n"
     "float n3(float3 p){float3 i=floor(p),f=frac(p);f=f*f*(3.0-2.0*f);float2 e=float2(0,1);\n"
@@ -2858,23 +2862,27 @@ static const char kFreeLookHLSL[] =
     "  [loop] for(int i=0;i<oct;i++){s+=a*n3(p);p*=2.03;a*=0.5;}return s;}\n"
     "float rdg3(float3 p,int oct){float s=0.0,a=0.5;\n"
     "  [loop] for(int i=0;i<oct;i++){float v=1.0-abs(n3(p)*2.0-1.0);s+=a*v*v;p*=2.04;a*=0.5;}return s;}\n"
-    // terrain height (in world units) as a function of a unit direction on the sphere.
-    // continents from low-freq fbm; ridged mountains added only on land. fo/ro = octave
-    // counts (LOD): full detail near the surface, coarser when far (saves marching cost).
-    "float terrH(float3 d,int fo,int ro){float cont=fbm3(d*2.1,fo);\n"
-    "  float land=smoothstep(0.59,0.66,cont);\n"
-    "  float base=(cont-0.60)*70.0;\n"
-    "  float m=rdg3(d*4.6+9.0,ro);float mt=m*m*30.0*land;\n"
-    "  return clamp(base+mt,-44.0,58.0);}\n"
-    // SDF: distance to the displaced surface (water fills to sea level PR). Octave LOD
-    // keyed off the radial gap above sea -> far steps drop sub-pixel mountain detail.
-    "float mapP(float3 p){float r=length(p);float3 d=p/max(r,1e-4);float gap=r-PR;\n"
+    // terrain height for a unit direction; kind 0 = Earth (fbm continents + ridged
+    // mountains on land), kind 1 = Mars (rolling relief + ridges, no ocean). fo/ro =
+    // octave-count LOD: full near the surface, coarser when far.
+    "float terrH(int kind,float3 d,int fo,int ro){\n"
+    "  if(kind==0){float cont=fbm3(d*2.1,fo);\n"
+    "    float land=smoothstep(0.59,0.66,cont);float base=(cont-0.60)*70.0;\n"
+    "    float m=rdg3(d*4.6+9.0,ro);float mt=m*m*30.0*land;\n"
+    "    return clamp(base+mt,-44.0,58.0);}\n"
+    "  float cont=fbm3(d*2.6+41.0,fo);float roll=(cont-0.5)*40.0;\n"
+    "  float r1=rdg3(d*5.4+13.0,ro);float ridge=(r1*r1-0.25)*16.0;\n"
+    "  return clamp(roll+ridge,-38.0,46.0);}\n"
+    // per-planet SDF with gap-based octave LOD; Earth fills water to RA, Mars is dry.
+    "float mapPl(int kind,float3 C,float R,float3 p){float3 q=p-C;float r=length(q);\n"
+    "  float3 d=q/max(r,1e-4);float gap=r-R;\n"
     "  int fo=gap<10.0?5:(gap<60.0?4:3);int ro=gap<10.0?4:(gap<60.0?3:2);\n"
-    "  float h=max(terrH(d,fo,ro),0.0);return r-(PR+h);}\n"
+    "  float h=terrH(kind,d,fo,ro);if(kind==0)h=max(h,0.0);return r-(R+h);}\n"
+    "float mapP(float3 p){return min(mapPl(0,CA,RA,p),mapPl(1,CB,RB,p));}\n"
     "float3 nrm(float3 p){float2 k=float2(1.0,-1.0);float e=0.06;\n"
     "  return normalize(k.xyy*mapP(p+k.xyy*e)+k.yyx*mapP(p+k.yyx*e)+\n"
     "                   k.yxy*mapP(p+k.yxy*e)+k.xxx*mapP(p+k.xxx*e));}\n"
-    // ray vs sphere centred at origin -> (tnear,tfar); miss returns y<0.
+    // ray vs sphere (pass ro already relative to the centre); miss returns y<0.
     "float2 iSph(float3 ro,float3 rd,float ra){float b=dot(ro,rd);float c=dot(ro,ro)-ra*ra;\n"
     "  float h=b*b-c;if(h<0.0)return float2(1.0,-1.0);h=sqrt(h);return float2(-b-h,-b+h);}\n"
     "float starf(float3 rd){\n"
@@ -2885,26 +2893,29 @@ static const char kFreeLookHLSL[] =
     "  float d=length(f-c);float s=smoothstep(0.16,0.0,d);\n"
     "  float tw=0.65+0.35*sin(iTime*2.5+pr*43.0);\n"
     "  return s*(0.55+0.6*pr)*tw;}\n"
-    // sky uses the *local* up (radial) so the horizon gradient stays correct anywhere
-    // on the globe; sp = spaceness (0 in atmosphere, 1 in orbit).
-    "float3 skyc(float3 ro,float3 rd,float3 sun,float sp){\n"
-    "  float3 up=normalize(ro);float upd=dot(rd,up);\n"
-    "  float3 day=lerp(float3(0.55,0.72,0.97),float3(0.10,0.26,0.60),saturate(upd));\n"
-    "  day=lerp(day,float3(0.85,0.89,0.96),pow(1.0-saturate(abs(upd)),8.0)*(1.0-sp));\n"
+    // sky tint depends on which planet we're near (kind) + spaceness; up is radial to
+    // that planet's centre. Earth = blue, Mars = butterscotch.
+    "float3 skyc(int kind,float3 cen,float3 ro,float3 rd,float3 sun,float sp){\n"
+    "  float3 up=normalize(ro-cen);float upd=dot(rd,up);\n"
+    "  float3 hor=(kind==0)?float3(0.55,0.72,0.97):float3(0.80,0.55,0.40);\n"
+    "  float3 zen=(kind==0)?float3(0.10,0.26,0.60):float3(0.42,0.27,0.21);\n"
+    "  float3 day=lerp(hor,zen,saturate(upd));\n"
+    "  float3 haze=(kind==0)?float3(0.85,0.89,0.96):float3(0.86,0.66,0.50);\n"
+    "  day=lerp(day,haze,pow(1.0-saturate(abs(upd)),8.0)*(1.0-sp));\n"
     "  float3 col=lerp(day,float3(0.006,0.008,0.02),sp);\n"
     "  col+=starf(rd)*sp*1.3;\n"
     "  float s=saturate(dot(rd,sun));\n"
     "  col+=pow(s,3000.0)*float3(1.0,0.97,0.9)*5.0;\n"
     "  col+=pow(s,120.0)*float3(1.0,0.8,0.55)*(1.0-sp*0.7);\n"
     "  return col;}\n"
-    // volumetric cloud shell (radial band CL0..CL1 above sea); fly into and through it.
-    "float cden(float3 p,float tm){float r=length(p);float alt=r-PR;float3 d=p/max(r,1e-4);\n"
-    "  float3 q=d*7.0+float3(tm*0.012,tm*0.008,0.0);float dd=fbm3(q,3);\n"
+    // Earth volumetric cloud shell (centred at CA); fly into and through it.
+    "float cden(float3 p,float tm){float3 q0=p-CA;float r=length(q0);float alt=r-RA;\n"
+    "  float3 d=q0/max(r,1e-4);float3 q=d*7.0+float3(tm*0.012,tm*0.008,0.0);float dd=fbm3(q,3);\n"
     "  float hb=saturate((alt-CL0)/(CL1-CL0));\n"
     "  float shp=smoothstep(0.0,0.3,hb)*smoothstep(1.0,0.6,hb);\n"
     "  return saturate(dd-0.52)*shp*2.4;}\n"
     "float3 clouds(float3 ro,float3 rd,float tmax,float3 sun,float3 bg,float sp,float tm){\n"
-    "  float2 so=iSph(ro,rd,PR+CL1+2.0);\n"
+    "  float2 so=iSph(ro-CA,rd,RA+CL1+2.0);\n"
     "  if(so.y<0.0) return bg;\n"
     "  float t0=max(so.x,0.0),t1=min(so.y,tmax);t1=min(t1,t0+800.0);\n"
     "  if(t1<=t0) return bg;\n"
@@ -2915,43 +2926,65 @@ static const char kFreeLookHLSL[] =
     "      float3 c=lerp(float3(0.42,0.47,0.58),float3(1.0,1.0,1.02),lit)*(1.0-sp*0.4);\n"
     "      float a=saturate(den*dt*0.25);acc+=T*a*c;T*=(1.0-a);if(T<0.02)break;}}\n"
     "  return bg*T+acc;}\n"
+    // thin glowing atmosphere rim around a planet's limb (for rays that miss it).
+    "float3 rimGlow(float3 ro,float3 rd,float3 C,float R,float3 sun,float3 tint,float w,float amp,float sp){\n"
+    "  float tc=dot(C-ro,rd);float3 cp=ro+rd*max(tc,0.0);float cd=length(cp-C);\n"
+    "  float rim=smoothstep(R+w,R+2.0,cd)*smoothstep(R-4.0,R+6.0,cd);\n"
+    "  float lit=saturate(dot(normalize(cp-C),sun)*0.6+0.45);\n"
+    "  return tint*rim*lit*amp*saturate(sp+0.2);}\n"
     "float4 PSMain(VSOut i):SV_Target{\n"
     "  float2 uv=i.ndc;uv.x*=aspect;\n"
     "  float3 rd=normalize(fwd+uv.x*rgt*0.72+uv.y*upv*0.72);\n"
     "  float3 ro=eye;float tm=iTime;\n"
     "  float3 sun=normalize(float3(-0.45,0.5,0.4));\n"
-    "  float alt=length(ro)-PR;\n"
-    "  float sp=smoothstep(40.0,240.0,alt);\n"
-    // march only inside the planet's bounding shell -> rays to space exit cheaply.
-    "  float2 bs=iSph(ro,rd,PR+PMAX);\n"
+    // which planet are we nearest? -> drives local up, spaceness, sky tint.
+    "  float caA=length(ro-CA)-RA,caB=length(ro-CB)-RB;\n"
+    "  int nk;float3 nC;float nR;\n"
+    "  if(caB<caA){nk=1;nC=CB;nR=RB;}else{nk=0;nC=CA;nR=RA;}\n"
+    "  float alt=length(ro-nC)-nR;float sp=smoothstep(40.0,240.0,alt);\n"
+    // march inside whichever bounding shells the ray crosses; gap between is skipped fast.
+    "  float2 bA=iSph(ro-CA,rd,RA+PMAX);float2 bB=iSph(ro-CB,rd,RB+PMAX);\n"
+    "  float t0=1e9,te=-1.0;\n"
+    "  if(bA.y>0.0){t0=min(t0,max(bA.x,0.0));te=max(te,bA.y);}\n"
+    "  if(bB.y>0.0){t0=min(t0,max(bB.x,0.0));te=max(te,bB.y);}\n"
     "  float hit=-1.0;\n"
-    "  if(bs.y>0.0){float t=max(bs.x,0.0),te=bs.y;\n"
-    "    [loop] for(int s=0;s<150;s++){float3 p=ro+rd*t;float d=mapP(p);\n"
+    "  if(te>0.0){float t=t0;\n"
+    "    [loop] for(int s=0;s<160;s++){float3 p=ro+rd*t;float d=mapP(p);\n"
     "      if(d<0.0015*t+0.02){hit=t;break;}t+=max(d*0.62,0.4);if(t>te)break;}}\n"
     "  float3 col;float tmax;\n"
-    "  if(hit>0.0){float3 p=ro+rd*hit;float3 d=normalize(p);float3 n=nrm(p);\n"
-    "    float realh=terrH(d,5,4);float3 sky=skyc(ro,rd,sun,sp);\n"
-    "    if(realh<0.05){float3 wn=d;\n"
+    "  if(hit>0.0){float3 p=ro+rd*hit;\n"
+    // which planet did we hit?
+    "    float sdA=length(p-CA)-RA,sdB=length(p-CB)-RB;\n"
+    "    int hk;float3 hC;float hR;if(sdB<sdA){hk=1;hC=CB;hR=RB;}else{hk=0;hC=CA;hR=RA;}\n"
+    "    float3 d=normalize(p-hC);float3 n=nrm(p);float realh=terrH(hk,d,5,4);\n"
+    "    float slope=saturate(1.0-dot(n,d));float lat=abs(d.y);\n"
+    "    float3 sky=skyc(hk,hC,ro,rd,sun,sp);\n"
+    "    if(hk==0 && realh<0.05){float3 wn=d;\n"          // Earth ocean
     "      float fr=pow(1.0-saturate(dot(-rd,wn)),4.0);\n"
-    "      float3 rfl=skyc(ro,reflect(rd,wn),sun,sp);\n"
+    "      float3 rfl=skyc(0,CA,ro,reflect(rd,wn),sun,sp);\n"
     "      col=lerp(float3(0.02,0.08,0.13),rfl,0.35+0.65*fr);\n"
     "      col+=pow(saturate(dot(reflect(rd,wn),sun)),250.0)*1.6;\n"
-    "    }else{float diff=saturate(dot(n,sun))*0.9+0.12;\n"
-    "      float3 amb=float3(0.35,0.45,0.6)*0.35;float slope=saturate(1.0-dot(n,d));\n"
-    "      float lat=abs(d.y);\n"
+    "    }else if(hk==0){float diff=saturate(dot(n,sun))*0.9+0.12;\n"  // Earth land
+    "      float3 amb=float3(0.35,0.45,0.6)*0.35;\n"
     "      float3 grass=float3(0.17,0.38,0.14),rock=float3(0.33,0.29,0.25),snow=float3(0.95,0.97,1.0),sand=float3(0.74,0.68,0.47);\n"
     "      float3 alb=grass;alb=lerp(alb,sand,smoothstep(2.5,0.0,realh));\n"
     "      alb=lerp(alb,rock,smoothstep(0.30,0.6,slope));\n"
     "      alb=lerp(alb,snow,smoothstep(30.0,40.0,realh)*saturate(1.0-slope*1.3));\n"
     "      alb=lerp(alb,snow,smoothstep(0.82,0.92,lat));\n"
-    "      col=alb*(diff*float3(1.0,0.96,0.9)+amb);}\n"
-    "    float fog=(1.0-sp)*saturate(hit/1600.0);col=lerp(col,sky,fog);tmax=hit;\n"
-    "  }else{col=skyc(ro,rd,sun,sp);tmax=6000.0;\n"
-    // blue atmosphere rim hugging the limb, visible from orbit.
-    "    float tc=-dot(ro,rd);float3 cp2=ro+rd*max(tc,0.0);float cd=length(cp2);\n"
-    "    float rim=smoothstep(PR+46.0,PR+2.0,cd)*smoothstep(PR-4.0,PR+8.0,cd);\n"
-    "    float lit=saturate(dot(normalize(cp2),sun)*0.6+0.45);\n"
-    "    col+=float3(0.30,0.55,1.0)*rim*lit*1.5*saturate(sp+0.2);}\n"
+    "      col=alb*(diff*float3(1.0,0.96,0.9)+amb);\n"
+    "    }else{float diff=saturate(dot(n,sun))*0.95+0.10;\n"           // Mars
+    "      float3 amb=float3(0.5,0.32,0.24)*0.30;\n"
+    "      float3 lo=float3(0.34,0.16,0.09),mid=float3(0.62,0.30,0.16),hi=float3(0.78,0.52,0.34);\n"
+    "      float3 alb=lerp(lo,mid,smoothstep(-20.0,5.0,realh));\n"
+    "      alb=lerp(alb,hi,smoothstep(10.0,30.0,realh));\n"
+    "      alb=lerp(alb,float3(0.30,0.20,0.15),smoothstep(0.42,0.7,slope)*0.6);\n"
+    "      alb=lerp(alb,float3(0.92,0.92,0.96),smoothstep(0.80,0.90,lat));\n"  // CO2 ice caps
+    "      col=alb*(diff*float3(1.0,0.92,0.82)+amb);}\n"
+    "    float fk=(hk==0)?1.0:0.45;\n"  // Mars: thinner aerial haze
+    "    float fog=(1.0-sp)*saturate(hit/1600.0)*fk;col=lerp(col,sky,fog);tmax=hit;\n"
+    "  }else{col=skyc(nk,nC,ro,rd,sun,sp);tmax=6000.0;\n"
+    "    col+=rimGlow(ro,rd,CA,RA,sun,float3(0.30,0.55,1.0),46.0,1.5,sp);\n"   // Earth rim
+    "    col+=rimGlow(ro,rd,CB,RB,sun,float3(0.75,0.42,0.26),22.0,0.7,sp);}\n" // Mars rim
     "  col=clouds(ro,rd,tmax,sun,col,sp,tm);\n"
     "  col=pow(saturate(col),1.0/2.2);\n"
     "  return float4(col,1.0);\n"
@@ -2965,9 +2998,11 @@ static struct {
 } g_free;
 
 // --- CPU mirror of the shader's terrain height, used only for camera collision so
-//     we ride just above the real ground (sea level == FL_PR). Keep in sync with
-//     terrH / mapP in kFreeLookHLSL above.
-#define FL_PR 200.0f
+//     we ride just above the real ground. Keep in sync with terrH / mapP in
+//     kFreeLookHLSL above. Two planets: Earth (kind 0) at origin, Mars (kind 1) at FL_CB.
+#define FL_RA 200.0f
+#define FL_RB 150.0f
+static const float FL_CB[3] = {700.0f, 0.0f, 0.0f};
 static float fl_fr1(float x) { return x - floorf(x); }
 static float fl_h31(float x, float y, float z) {
     float px = fl_fr1(x * 0.1031f), py = fl_fr1(y * 0.1031f), pz = fl_fr1(z * 0.1031f);
@@ -3002,16 +3037,26 @@ static float fl_rdg3(float x, float y, float z) {
     return s;
 }
 // terrain height for a unit direction (x,y,z); mirrors terrH() in the shader.
-static float fl_terrH(float x, float y, float z) {
-    float cont = fl_fbm3(x * 2.1f, y * 2.1f, z * 2.1f);
-    float land = (cont - 0.59f) / (0.66f - 0.59f);
-    land = land < 0.0f ? 0.0f : (land > 1.0f ? 1.0f : land);
-    land = land * land * (3.0f - 2.0f * land);
-    float base = (cont - 0.60f) * 70.0f;
-    float m = fl_rdg3(x * 4.6f + 9.0f, y * 4.6f + 9.0f, z * 4.6f + 9.0f);
-    float mt = m * m * 30.0f * land;
-    float h = base + mt;
-    return h < -44.0f ? -44.0f : (h > 58.0f ? 58.0f : h);
+// kind 0 = Earth, kind 1 = Mars.
+static float fl_terrH(int kind, float x, float y, float z) {
+    if (kind == 0) {
+        float cont = fl_fbm3(x * 2.1f, y * 2.1f, z * 2.1f);
+        float land = (cont - 0.59f) / (0.66f - 0.59f);
+        land = land < 0.0f ? 0.0f : (land > 1.0f ? 1.0f : land);
+        land = land * land * (3.0f - 2.0f * land);
+        float base = (cont - 0.60f) * 70.0f;
+        float m = fl_rdg3(x * 4.6f + 9.0f, y * 4.6f + 9.0f, z * 4.6f + 9.0f);
+        float mt = m * m * 30.0f * land;
+        float h = base + mt;
+        return h < -44.0f ? -44.0f : (h > 58.0f ? 58.0f : h);
+    }
+    // Mars: rolling relief + ridges, no ocean.
+    float cont = fl_fbm3(x * 2.6f + 41.0f, y * 2.6f + 41.0f, z * 2.6f + 41.0f);
+    float roll = (cont - 0.5f) * 40.0f;
+    float r1 = fl_rdg3(x * 5.4f + 13.0f, y * 5.4f + 13.0f, z * 5.4f + 13.0f);
+    float ridge = (r1 * r1 - 0.25f) * 16.0f;
+    float h = roll + ridge;
+    return h < -38.0f ? -38.0f : (h > 46.0f ? 46.0f : h);
 }
 
 static void freelook_update(double t) {
@@ -3023,11 +3068,21 @@ static void freelook_update(double t) {
     if (dt > 0.05f) dt = 0.05f;  // clamp first-frame / hitch spikes
     if (dt < 0.0f) dt = 0.0f;
 
-    // Local up = radial direction from the planet centre (origin).
-    float er = sqrtf(g_cam_eye[0] * g_cam_eye[0] + g_cam_eye[1] * g_cam_eye[1] +
-                     g_cam_eye[2] * g_cam_eye[2]);
+    // Pick the nearest planet -> local up, ground collision and ascend/descend are all
+    // relative to it (so flying off Earth and landing on Mars both feel right).
+    float dxA = g_cam_eye[0], dyA = g_cam_eye[1], dzA = g_cam_eye[2];  // Earth at origin
+    float dxB = g_cam_eye[0] - FL_CB[0], dyB = g_cam_eye[1] - FL_CB[1], dzB = g_cam_eye[2] - FL_CB[2];
+    float distA = sqrtf(dxA * dxA + dyA * dyA + dzA * dzA) - FL_RA;
+    float distB = sqrtf(dxB * dxB + dyB * dyB + dzB * dzB) - FL_RB;
+    int pkind; float Cn[3]; float Rn;
+    if (distB < distA) { pkind = 1; Cn[0] = FL_CB[0]; Cn[1] = FL_CB[1]; Cn[2] = FL_CB[2]; Rn = FL_RB; }
+    else               { pkind = 0; Cn[0] = 0.0f;     Cn[1] = 0.0f;     Cn[2] = 0.0f;     Rn = FL_RA; }
+
+    // Local up = radial direction from the nearest planet's centre.
+    float rx0 = g_cam_eye[0] - Cn[0], ry0 = g_cam_eye[1] - Cn[1], rz0 = g_cam_eye[2] - Cn[2];
+    float er = sqrtf(rx0 * rx0 + ry0 * ry0 + rz0 * rz0);
     if (er < 1e-4f) er = 1e-4f;
-    float up[3] = {g_cam_eye[0] / er, g_cam_eye[1] / er, g_cam_eye[2] / er};
+    float up[3] = {rx0 / er, ry0 / er, rz0 / er};
 
     // Re-project the heading to stay tangent to the surface: the local up rotates as
     // we fly around the curved planet, so strip the up-component and renormalize.
@@ -3132,15 +3187,18 @@ static void freelook_update(double t) {
     if (g_autofwd) {
         g_cam_eye[0] += fwd[0] * spd; g_cam_eye[1] += fwd[1] * spd; g_cam_eye[2] += fwd[2] * spd;
     }
-    // Soft floor: stay just above the actual displaced surface (sea or mountains).
-    er = sqrtf(g_cam_eye[0] * g_cam_eye[0] + g_cam_eye[1] * g_cam_eye[1] +
-               g_cam_eye[2] * g_cam_eye[2]);
-    float fux = g_cam_eye[0] / er, fuy = g_cam_eye[1] / er, fuz = g_cam_eye[2] / er;
-    float gh = fl_terrH(fux, fuy, fuz);
-    if (gh < 0.0f) gh = 0.0f;  // water surface sits at sea level
-    float minr = FL_PR + gh + 1.6f;
+    // Soft floor: stay just above the nearest planet's displaced surface.
+    float frx = g_cam_eye[0] - Cn[0], fry = g_cam_eye[1] - Cn[1], frz = g_cam_eye[2] - Cn[2];
+    er = sqrtf(frx * frx + fry * fry + frz * frz);
+    if (er < 1e-4f) er = 1e-4f;
+    float fux = frx / er, fuy = fry / er, fuz = frz / er;
+    float gh = fl_terrH(pkind, fux, fuy, fuz);
+    if (pkind == 0 && gh < 0.0f) gh = 0.0f;  // Earth water surface sits at sea level
+    float minr = Rn + gh + 1.6f;
     if (er < minr) {
-        g_cam_eye[0] = fux * minr; g_cam_eye[1] = fuy * minr; g_cam_eye[2] = fuz * minr;
+        g_cam_eye[0] = Cn[0] + fux * minr;
+        g_cam_eye[1] = Cn[1] + fuy * minr;
+        g_cam_eye[2] = Cn[2] + fuz * minr;
     }
 }
 
@@ -3180,9 +3238,9 @@ static int freelook_init(ID3D11Device *dev, ID3D11DeviceContext *ctx, int w, int
         float dx = 0.743f, dy = 0.210f, dz = 0.635f;
         float dl = sqrtf(dx * dx + dy * dy + dz * dz);
         dx /= dl; dy /= dl; dz /= dl;
-        float gh = fl_terrH(dx, dy, dz);
+        float gh = fl_terrH(0, dx, dy, dz);  // start on Earth
         if (gh < 0.0f) gh = 0.0f;
-        float sr = FL_PR + gh + 6.0f;
+        float sr = FL_RA + gh + 6.0f;
         g_cam_eye[0] = dx * sr;
         g_cam_eye[1] = dy * sr;
         g_cam_eye[2] = dz * sr;
