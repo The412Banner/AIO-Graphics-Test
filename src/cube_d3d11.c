@@ -48,42 +48,19 @@ static int g_resize_w = 0, g_resize_h = 0;
 // ---- Free Look interactive camera (only the "freelook" scene reads these) ---
 // The single wndproc serves every scene, so all camera input is gated behind
 // g_freelook (set by freelook_init, cleared by freelook_cleanup); other scenes
-// are completely unaffected.
+// are completely unaffected. SkyFly style: the scene opens already cruising and
+// steering is read from the cursor's position each frame (joystick-like) -- just
+// nudge the mouse off-centre to turn. No button-holding, no cursor capture (which
+// is the fragile path under Wine/Winlator); the cursor stays visible.
 static int   g_freelook = 0;
+static HWND  g_free_hwnd = NULL;         // current window, for cursor-position steering
 static float g_cam_eye[3] = {0.0f, 8.0f, 0.0f};
 static float g_cam_yaw    = 1.5707963f;  // facing +Z
 static float g_cam_pitch  = -0.12f;
 static float g_cam_speed  = 22.0f;       // world units / second
 static unsigned char g_keys[256];        // WM_KEYDOWN/UP state, indexed by VK code
-static int   g_mouse_look = 0;           // left button held (hold-to-look)
-static int   g_mouse_captured = 0;       // Tab toggle: mouse-look without holding
-static int   g_rmb_fwd = 0;              // right button held -> fly forward
-static int   g_autofwd = 0;              // F toggle: continuous auto-forward (SkyFly)
-static int   g_look_engaged = 0;         // current capture state (keeps ShowCursor balanced)
-static int   g_mouse_cx = 0, g_mouse_cy = 0;  // client-space recenter point for look
-
-// Engage/disengage relative mouse-look on state transitions only, so the
-// SetCapture/ShowCursor counter stays balanced no matter whether look was
-// requested by the left button (hold) or the Tab toggle.
-static void freelook_sync_capture(HWND h) {
-    int want = g_freelook && (g_mouse_look || g_mouse_captured);
-    if (want == g_look_engaged) return;
-    g_look_engaged = want;
-    if (want) {
-        RECT rc;
-        GetClientRect(h, &rc);
-        g_mouse_cx = (rc.right - rc.left) / 2;
-        g_mouse_cy = (rc.bottom - rc.top) / 2;
-        SetCapture(h);
-        ShowCursor(FALSE);
-        POINT c = {g_mouse_cx, g_mouse_cy};
-        ClientToScreen(h, &c);
-        SetCursorPos(c.x, c.y);
-    } else {
-        ReleaseCapture();
-        ShowCursor(TRUE);
-    }
-}
+static int   g_autofwd = 1;              // SkyFly cruise: auto-fly forward (F toggles)
+static int   g_mousesteer = 1;           // cursor-position steering on (M toggles)
 
 static LRESULT CALLBACK d3d11_wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
     switch (m) {
@@ -94,48 +71,13 @@ static LRESULT CALLBACK d3d11_wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
             }
             // Toggles fire once per physical press (lparam bit 30 = key was already down).
             if (g_freelook && !(l & 0x40000000)) {
-                if (w == VK_TAB) {
-                    g_mouse_captured = !g_mouse_captured;
-                    freelook_sync_capture(h);
-                } else if (w == 'F') {
-                    g_autofwd = !g_autofwd;
-                }
+                if (w == 'F') g_autofwd = !g_autofwd;
+                else if (w == 'M') g_mousesteer = !g_mousesteer;
             }
             if (w < 256) g_keys[w] = 1;
             return 0;
         case WM_KEYUP:
             if (w < 256) g_keys[w] = 0;
-            return 0;
-        case WM_LBUTTONDOWN:
-            if (g_freelook) {
-                g_mouse_look = 1;
-                freelook_sync_capture(h);
-            }
-            return 0;
-        case WM_LBUTTONUP:
-            g_mouse_look = 0;
-            freelook_sync_capture(h);
-            return 0;
-        case WM_RBUTTONDOWN:
-            if (g_freelook) g_rmb_fwd = 1;
-            return 0;
-        case WM_RBUTTONUP:
-            g_rmb_fwd = 0;
-            return 0;
-        case WM_MOUSEMOVE:
-            if (g_freelook && g_look_engaged) {
-                int dx = (int)(short)LOWORD(l) - g_mouse_cx;
-                int dy = (int)(short)HIWORD(l) - g_mouse_cy;
-                if (dx || dy) {
-                    g_cam_yaw += dx * 0.0035f;
-                    g_cam_pitch -= dy * 0.0035f;
-                    if (g_cam_pitch > 1.5f) g_cam_pitch = 1.5f;
-                    if (g_cam_pitch < -1.5f) g_cam_pitch = -1.5f;
-                    POINT c = {g_mouse_cx, g_mouse_cy};
-                    ClientToScreen(h, &c);
-                    SetCursorPos(c.x, c.y);
-                }
-            }
             return 0;
         case WM_MOUSEWHEEL:
             if (g_freelook) {
@@ -2950,6 +2892,23 @@ static void freelook_update(double t) {
     if (g_keys[VK_RIGHT]) g_cam_yaw += look;
     if (g_keys[VK_UP]) g_cam_pitch += look;
     if (g_keys[VK_DOWN]) g_cam_pitch -= look;
+
+    // Joystick steering from the cursor's offset from the window centre (only while
+    // the cursor is over the window) -- steer just by moving the mouse, no buttons.
+    if (g_mousesteer && g_free_hwnd && g_w > 0 && g_h > 0) {
+        POINT cur;
+        if (GetCursorPos(&cur) && ScreenToClient(g_free_hwnd, &cur) && cur.x >= 0 &&
+            cur.y >= 0 && cur.x < g_w && cur.y < g_h) {
+            float nx = (cur.x - g_w * 0.5f) / (g_w * 0.5f);
+            float ny = (cur.y - g_h * 0.5f) / (g_h * 0.5f);
+            const float dz = 0.10f;  // centre dead-zone so a parked cursor doesn't drift
+            nx = (nx > dz) ? (nx - dz) / (1.0f - dz) : (nx < -dz ? (nx + dz) / (1.0f - dz) : 0.0f);
+            ny = (ny > dz) ? (ny - dz) / (1.0f - dz) : (ny < -dz ? (ny + dz) / (1.0f - dz) : 0.0f);
+            float steer = 2.0f * dt;
+            g_cam_yaw += nx * steer;
+            g_cam_pitch -= ny * steer;
+        }
+    }
     if (g_cam_pitch > 1.5f) g_cam_pitch = 1.5f;
     if (g_cam_pitch < -1.5f) g_cam_pitch = -1.5f;
 
@@ -2985,8 +2944,8 @@ static void freelook_update(double t) {
     }
     if (g_keys['E'] || g_keys[VK_SPACE]) g_cam_eye[1] += spd;
     if (g_keys['Q'] || g_keys[VK_CONTROL]) g_cam_eye[1] -= spd;
-    // Right-button-hold flies forward; F toggles a continuous SkyFly-style cruise.
-    if (g_rmb_fwd || g_autofwd) {
+    // Continuous SkyFly-style forward cruise (on by default; F toggles it).
+    if (g_autofwd) {
         g_cam_eye[0] += fwd[0] * spd;
         g_cam_eye[1] += fwd[1] * spd;
         g_cam_eye[2] += fwd[2] * spd;
@@ -3030,11 +2989,8 @@ static int freelook_init(ID3D11Device *dev, ID3D11DeviceContext *ctx, int w, int
     g_cam_yaw = 1.5707963f;
     g_cam_pitch = -0.12f;
     g_cam_speed = 22.0f;
-    g_mouse_look = 0;
-    g_mouse_captured = 0;
-    g_rmb_fwd = 0;
-    g_autofwd = 0;
-    g_look_engaged = 0;
+    g_autofwd = 1;
+    g_mousesteer = 1;
     memset(g_keys, 0, sizeof(g_keys));
     g_freelook = 1;
     return (g_free.vs && g_free.ps && g_free.cbo && g_free.rs) ? 0 : 1;
@@ -3067,15 +3023,8 @@ static void freelook_frame(ID3D11DeviceContext *ctx, double t, float aspect) {
 
 static void freelook_cleanup(void) {
     g_freelook = 0;
-    g_mouse_look = 0;
-    g_mouse_captured = 0;
-    g_rmb_fwd = 0;
     g_autofwd = 0;
-    if (g_look_engaged) {
-        g_look_engaged = 0;
-        ReleaseCapture();
-        ShowCursor(TRUE);
-    }
+    g_free_hwnd = NULL;
     if (g_free.rs) ID3D11RasterizerState_Release(g_free.rs);
     if (g_free.cbo) ID3D11Buffer_Release(g_free.cbo);
     if (g_free.ps) ID3D11PixelShader_Release(g_free.ps);
@@ -3135,14 +3084,15 @@ int aio_run_d3d11_cube(HINSTANCE hinst, const char *scene_name) {
     char wtitle[160];
     if (strcmp(scene->name, "freelook") == 0)
         snprintf(wtitle, sizeof(wtitle),
-                 "AIO Graphics Test  -  %s   [WASD/arrows - drag or Tab=look - RMB/F=fly fwd - "
-                 "wheel=speed - ESC]",
+                 "AIO Graphics Test  -  %s   [move mouse to steer - WASD - F=stop/go - "
+                 "M=mouse off - wheel=speed - ESC]",
                  api);
     else
         snprintf(wtitle, sizeof(wtitle), "AIO Graphics Test  -  %s", api);
     HWND hwnd = CreateWindowA(cls, wtitle, WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT,
                               CW_USEDEFAULT, 640, 480, NULL, NULL, hinst, NULL);
     if (!hwnd) return 1;
+    g_free_hwnd = hwnd;  // for the Free Look scene's cursor-position steering
 
     RECT rc;
     GetClientRect(hwnd, &rc);
@@ -3331,7 +3281,7 @@ int aio_run_d3d11_cube(HINSTANCE hinst, const char *scene_name) {
             aio_hud_update(hwnd, hud);
             if (strcmp(scene->name, "freelook") == 0)
                 snprintf(title, sizeof(title),
-                         "AIO  -  %s  -  %.0f FPS   [WASD - drag/Tab=look - RMB/F=fly - ESC]",
+                         "AIO  -  %s  -  %.0f FPS   [mouse=steer - WASD - F=stop/go - ESC]",
                          api, fps);
             else
                 snprintf(title, sizeof(title), "AIO Graphics Test  -  %s  -  %.0f FPS", api, fps);
