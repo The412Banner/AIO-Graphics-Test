@@ -1610,6 +1610,49 @@ static int ocean2_init(ID3D11Device *d, ID3D11DeviceContext *c, int w, int h) {
 static void ocean2_frame(ID3D11DeviceContext *c, double t, float a) { stoy_frame(c, &g_ocean2, t, a); }
 static void ocean2_cleanup(void) { stoy_cleanup(&g_ocean2); }
 
+// ----------------------------- JUNGLE scene --------------------------------
+// Atmospheric god-ray forest (stylized; real foliage is millions of leaves).
+// The 'wow' is volumetric light: a canopy leaf-gap field projected along the
+// sun direction gives COHERENT sun shafts in the ground mist AND matching
+// dappled light pools where they hit the forest floor. Layered foliage + bright
+// canopy gaps overhead, green depth haze, forward-scatter phase (shafts bloom
+// toward the sun), dithered fog march, enclosing vignette. ACES.
+static const char *kJungleHLSL =
+    AIO_STOY_HEADER
+    "float h2(float2 p){p=frac(p*float2(127.1,311.7));p+=dot(p,p+34.5);return frac(p.x*p.y);}\n"
+    "float vn(float2 p){float2 i=floor(p),f=frac(p);f=f*f*(3.0-2.0*f);float a=h2(i),b=h2(i+float2(1,0)),c=h2(i+float2(0,1)),d=h2(i+float2(1,1));return lerp(lerp(a,b,f.x),lerp(c,d,f.x),f.y);}\n"
+    "float fbm(float2 p){float s=0.0,a=0.5;[unroll]for(int i=0;i<5;i++){s+=a*vn(p);p=p*2.03+0.1;a*=0.5;}return s;}\n"
+    "static const float3 SUNC=float3(1.0,0.93,0.66);\n"  // warm sun
+    "static const float CANY=9.0;\n"  // canopy height
+    "float canopy(float2 c){return fbm(c*0.32+float2(iTime*0.05,iTime*0.03));}\n"  // animated leaf-gap field
+    "float lightAt(float3 p,float3 L){float dy=max(CANY-p.y,0.0);float3 c=p+L*(dy/L.y);return smoothstep(0.52,0.78,canopy(c.xz));}\n"  // sun transmission through gaps
+    "float4 PSMain(VSOut inp):SV_TARGET{float2 uv=inp.ndc;uv.x*=iAspect;float3 L=normalize(float3(0.34,0.82,0.46));\n"
+    "  float3 ro=float3(sin(iTime*0.06)*1.0,2.2+sin(iTime*0.2)*0.1,iTime*0.8);\n"  // wander forward, gentle bob
+    "  float yaw=0.3+sin(iTime*0.05)*0.2;float3 ta=ro+float3(sin(yaw),0.26,cos(yaw));\n"  // look forward + slightly up
+    "  float3 fw=normalize(ta-ro),rt=normalize(cross(float3(0,1,0),fw)),upv=cross(fw,rt);\n"
+    "  float3 rd=normalize(uv.x*rt+uv.y*upv+1.5*fw);\n"
+    "  float3 col;float tend;\n"
+    "  if(rd.y<-0.02){float tf=-ro.y/rd.y;float3 fp=ro+rd*tf;\n"  // forest floor
+    "    float lit=lightAt(fp,L);float3 grnd=lerp(float3(0.04,0.05,0.025),float3(0.10,0.13,0.05),fbm(fp.xz*0.6));\n"
+    "    grnd*=0.7+0.5*fbm(fp.xz*3.0);col=grnd*(0.14+1.4*lit*SUNC);tend=min(tf,55.0);}\n"  // dappled light pools
+    "  else{float3 cpt=ro+rd*((CANY-ro.y)/max(rd.y,0.05));float m=canopy(cpt.xz*1.2);\n"  // canopy overhead
+    "    float gap=smoothstep(0.5,0.8,m);float3 leaf=lerp(float3(0.03,0.09,0.03),float3(0.10,0.2,0.07),fbm(cpt.xz*2.2));\n"
+    "    col=lerp(leaf,SUNC*1.8,gap*saturate(rd.y*2.0));tend=42.0;}\n"  // bright sky through gaps when looking up
+    "  col=lerp(col,float3(0.05,0.11,0.06),1.0-exp(-tend*0.025));\n"  // green depth haze
+    "  float phase=pow(saturate(dot(rd,L)),5.0)*0.85+0.15;\n"  // forward scattering
+    "  float jit=h2(uv*float2(811.0,439.0)+frac(iTime));float t=jit*0.5;float3 god=float3(0,0,0);\n"
+    "  [loop]for(int i=0;i<54;i++){if(t>tend)break;float3 p=ro+rd*t;float fogd=exp(-max(p.y,0.0)*0.18)*0.6+0.12;\n"  // ground mist denser low
+    "    god+=SUNC*lightAt(p,L)*fogd;t+=0.5;}\n"
+    "  col+=god*phase*0.05;\n"  // volumetric god rays
+    "  float vig=smoothstep(1.6,0.5,length(inp.ndc));col*=lerp(0.55,1.0,vig);\n"  // enclosing foliage vignette
+    "  col*=1.05;col=(col*(2.51*col+0.03))/(col*(2.43*col+0.59)+0.14);col=pow(saturate(col),1.0/2.2);return float4(col,1.0);}\n";  // ACES
+static StoyState g_jungle;
+static int jungle_init(ID3D11Device *d, ID3D11DeviceContext *c, int w, int h) {
+    (void)c; (void)w; (void)h; return stoy_init(d, &g_jungle, kJungleHLSL);
+}
+static void jungle_frame(ID3D11DeviceContext *c, double t, float a) { stoy_frame(c, &g_jungle, t, a); }
+static void jungle_cleanup(void) { stoy_cleanup(&g_jungle); }
+
 // ----------------------------- MANDELBULB scene -----------------------------
 // The power-8 Mandelbulb (standard distance estimator) ray-marched, with
 // orbit-trap coloring + AO. A heavy fragment-ALU workload.
@@ -2790,6 +2833,7 @@ static const D3D11Scene kScenes[] = {
     {"raymarch", "D3D11 Raymarch SDF", ray_init, ray_frame, ray_cleanup},
     {"ocean", "D3D11 Ocean", ocean_init, ocean_frame, ocean_cleanup},
     {"ocean2", "D3D11 Ocean v2", ocean2_init, ocean2_frame, ocean2_cleanup},
+    {"jungle", "D3D11 Jungle", jungle_init, jungle_frame, jungle_cleanup},
     {"mandelbulb", "D3D11 Mandelbulb", bulb_init, bulb_frame, bulb_cleanup},
     {"nebula", "D3D11 Nebula", nebula_init, nebula_frame, nebula_cleanup},
     {"nebula2", "D3D11 Nebula (detailed)", nebula2_init, nebula2_frame, nebula2_cleanup},
