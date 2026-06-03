@@ -59,6 +59,7 @@ static HBRUSH g_br_bg;
 static HBRUSH g_br_ctl;
 static WNDPROC g_btn_oldproc;  // saved system BUTTON proc (buttons are subclassed for dark paint)
 static WNDPROC g_tab_oldproc;  // saved system tab proc (tab strip subclassed for dark background)
+static WNDPROC g_edit_oldproc;  // saved system EDIT proc (report edits subclassed for a dark scrollbar)
 
 // Content views.
 static HWND g_tab;       // GPU Info tab control
@@ -296,6 +297,76 @@ static void restore_cached_results(void) {
     }
 }
 
+// Draw a filled triangle (scrollbar arrow).
+static void dark_tri(HDC dc, int cx, int cy, int d, int up, COLORREF c) {
+    POINT p[3];
+    if (up) { p[0].x = cx; p[0].y = cy - d; p[1].x = cx - d; p[1].y = cy + d; p[2].x = cx + d; p[2].y = cy + d; }
+    else    { p[0].x = cx; p[0].y = cy + d; p[1].x = cx - d; p[1].y = cy - d; p[2].x = cx + d; p[2].y = cy - d; }
+    HBRUSH b = CreateSolidBrush(c);
+    HPEN pn = CreatePen(PS_SOLID, 1, c);
+    HBRUSH ob = (HBRUSH)SelectObject(dc, b);
+    HPEN op = (HPEN)SelectObject(dc, pn);
+    Polygon(dc, p, 3);
+    SelectObject(dc, ob);
+    SelectObject(dc, op);
+    DeleteObject(b);
+    DeleteObject(pn);
+}
+
+// Overpaint the EDIT's (light, system) vertical scrollbar with a flat dark one.
+static void paint_dark_vscroll(HWND e) {
+    if (!IsWindowVisible(e)) return;
+    RECT wr;
+    GetWindowRect(e, &wr);
+    int W = wr.right - wr.left, H = wr.bottom - wr.top;
+    int sbw = GetSystemMetrics(SM_CXVSCROLL);
+    if (sbw <= 0 || H <= 2 * sbw) return;
+    HDC dc = GetWindowDC(e);
+    RECT track = {W - sbw, sbw, W, H - sbw};
+    HBRUSH tb = CreateSolidBrush(DARK_CTL);
+    FillRect(dc, &track, tb);
+    DeleteObject(tb);
+    RECT up = {W - sbw, 0, W, sbw}, dn = {W - sbw, H - sbw, W, H};
+    HBRUSH ab = CreateSolidBrush(RGB(48, 52, 60));
+    FillRect(dc, &up, ab);
+    FillRect(dc, &dn, ab);
+    DeleteObject(ab);
+    int cx = W - sbw / 2;
+    dark_tri(dc, cx, sbw / 2, sbw / 5, 1, DARK_TEXT);
+    dark_tri(dc, cx, H - sbw / 2, sbw / 5, 0, DARK_TEXT);
+    SCROLLINFO si;
+    memset(&si, 0, sizeof(si));
+    si.cbSize = sizeof(si);
+    si.fMask = SIF_ALL;
+    if (GetScrollInfo(e, SB_VERT, &si)) {
+        int trackH = H - 2 * sbw;
+        int range = si.nMax - si.nMin;
+        if (range < 1) range = 1;
+        int page = si.nPage > 0 ? (int)si.nPage : 1;
+        int thumbH = (int)((double)trackH * (double)page / (double)(range + 1));
+        if (thumbH < 18) thumbH = 18;
+        if (thumbH > trackH) thumbH = trackH;
+        int denom = range - page + 1;
+        if (denom < 1) denom = 1;
+        int thumbY = sbw + (int)((double)(trackH - thumbH) * (double)(si.nPos - si.nMin) / (double)denom);
+        RECT th = {W - sbw + 2, thumbY, W - 2, thumbY + thumbH};
+        HBRUSH hb = CreateSolidBrush(RGB(96, 102, 112));
+        FillRect(dc, &th, hb);
+        DeleteObject(hb);
+    }
+    ReleaseDC(e, dc);
+}
+
+static LRESULT CALLBACK edit_subproc(HWND e, UINT m, WPARAM w, LPARAM l) {
+    if (m == WM_NCPAINT || m == WM_VSCROLL || m == WM_MOUSEWHEEL || m == WM_KEYUP ||
+        m == WM_LBUTTONUP) {
+        LRESULT r = CallWindowProcA(g_edit_oldproc, e, m, w, l);
+        paint_dark_vscroll(e);  // overpaint the system scrollbar dark after it updates
+        return r;
+    }
+    return CallWindowProcA(g_edit_oldproc, e, m, w, l);
+}
+
 static HWND make_report_edit(HWND frame, const RECT *r, const char *text) {
     HWND e = CreateWindowA("EDIT", "",
                            WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY,
@@ -304,6 +375,9 @@ static HWND make_report_edit(HWND frame, const RECT *r, const char *text) {
     SendMessage(e, EM_SETLIMITTEXT, 0, 0);
     if (g_mono_font) SendMessage(e, WM_SETFONT, (WPARAM)g_mono_font, TRUE);
     if (text) SetWindowTextA(e, text);
+    WNDPROC old = (WNDPROC)SetWindowLongPtrA(e, GWLP_WNDPROC, (LONG_PTR)edit_subproc);
+    if (!g_edit_oldproc) g_edit_oldproc = old;
+    paint_dark_vscroll(e);  // dark scrollbar from the first frame (initial NC paint already ran light)
     return e;
 }
 
@@ -1303,6 +1377,9 @@ static LRESULT CALLBACK shell_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
                 int sel = (int)SendMessage(g_tab, TCM_GETCURSEL, 0, 0);
                 ShowWindow(g_edit_vk, sel == 0 ? SW_SHOW : SW_HIDE);
                 ShowWindow(g_edit_gl, sel == 1 ? SW_SHOW : SW_HIDE);
+                HWND vis = sel == 0 ? g_edit_vk : g_edit_gl;
+                RedrawWindow(vis, NULL, NULL, RDW_FRAME | RDW_INVALIDATE | RDW_UPDATENOW);
+                paint_dark_vscroll(vis);  // draw scrollbar now (don't wait for a hover to repaint)
             }
             return 0;
         }
