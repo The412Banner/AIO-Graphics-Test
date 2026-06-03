@@ -61,6 +61,9 @@ static float g_cam_eye[3] = {0.0f, 8.0f, 0.0f};
 // level as you fly around the globe (no apparent roll/spin).
 static float g_cam_head[3] = {1.0f, 0.0f, 0.0f};  // tangent heading (compass dir)
 static float g_cam_pitch  = -0.12f;               // angle above local horizon (rad)
+// Persistent "up": near a planet it aligns to that planet's radial up; in deep space
+// between planets it holds (free flight), so crossing the midpoint doesn't snap.
+static float g_cam_up[3]  = {0.0f, 1.0f, 0.0f};
 static float g_cam_fwd[3] = {1.0f, 0.0f, 0.0f};   // derived look dir (world)
 static float g_cam_rgt[3] = {0.0f, 0.0f, 1.0f};   // derived screen-right (world)
 static float g_cam_upv[3] = {0.0f, 1.0f, 0.0f};   // derived screen-up (world)
@@ -91,7 +94,7 @@ static LRESULT CALLBACK d3d11_wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
                 short delta = (short)HIWORD(w);
                 g_cam_speed *= (delta > 0) ? 1.15f : 0.87f;
                 if (g_cam_speed < 1.5f) g_cam_speed = 1.5f;
-                if (g_cam_speed > 400.0f) g_cam_speed = 400.0f;
+                if (g_cam_speed > 2500.0f) g_cam_speed = 2500.0f;  // headroom for interplanetary travel
             }
             return 0;
         case WM_SIZE:
@@ -2847,7 +2850,7 @@ static const char kFreeLookHLSL[] =
     "o.pos=float4(p*2.0-1.0,0.0,1.0);o.ndc=o.pos.xy;return o;}\n"
     "static const float3 CA=float3(0.0,0.0,0.0);\n"     // Earth centre
     "static const float RA=200.0;\n"                    // Earth radius (sea level)
-    "static const float3 CB=float3(700.0,0.0,0.0);\n"   // Mars centre
+    "static const float3 CB=float3(4000.0,0.0,0.0);\n"  // Mars centre (far out in space)
     "static const float RB=150.0;\n"                    // Mars radius
     "#define PMAX 60.0\n"  // bounding-shell margin (>= max terrain height on either)
     "#define CL0 16.0\n"   // Earth cloud shell base altitude
@@ -3002,7 +3005,7 @@ static struct {
 //     kFreeLookHLSL above. Two planets: Earth (kind 0) at origin, Mars (kind 1) at FL_CB.
 #define FL_RA 200.0f
 #define FL_RB 150.0f
-static const float FL_CB[3] = {700.0f, 0.0f, 0.0f};
+static const float FL_CB[3] = {4000.0f, 0.0f, 0.0f};
 static float fl_fr1(float x) { return x - floorf(x); }
 static float fl_h31(float x, float y, float z) {
     float px = fl_fr1(x * 0.1031f), py = fl_fr1(y * 0.1031f), pz = fl_fr1(z * 0.1031f);
@@ -3078,11 +3081,32 @@ static void freelook_update(double t) {
     if (distB < distA) { pkind = 1; Cn[0] = FL_CB[0]; Cn[1] = FL_CB[1]; Cn[2] = FL_CB[2]; Rn = FL_RB; }
     else               { pkind = 0; Cn[0] = 0.0f;     Cn[1] = 0.0f;     Cn[2] = 0.0f;     Rn = FL_RA; }
 
-    // Local up = radial direction from the nearest planet's centre.
+    // Radial up toward the nearest planet's centre + altitude above it.
     float rx0 = g_cam_eye[0] - Cn[0], ry0 = g_cam_eye[1] - Cn[1], rz0 = g_cam_eye[2] - Cn[2];
     float er = sqrtf(rx0 * rx0 + ry0 * ry0 + rz0 * rz0);
     if (er < 1e-4f) er = 1e-4f;
-    float up[3] = {rx0 / er, ry0 / er, rz0 / er};
+    float radUp[3] = {rx0 / er, ry0 / er, rz0 / er};
+
+    // Engage radial "gravity" only when near a planet; in deep space hold the current
+    // up so flying between planets is free 6DOF (no snap at the midpoint).
+    float alt = er - Rn;
+    float eng = (260.0f - alt) / (260.0f - 25.0f);
+    eng = eng < 0.0f ? 0.0f : (eng > 1.0f ? 1.0f : eng);
+    eng = eng * eng * (3.0f - 2.0f * eng);
+    float a = 2.5f * dt * eng;
+    if (a > 1.0f) a = 1.0f;
+    float dotur = g_cam_up[0] * radUp[0] + g_cam_up[1] * radUp[1] + g_cam_up[2] * radUp[2];
+    if (a > 0.0f && dotur < -0.9f) {  // nearly antipodal: snap (only when far/rare)
+        g_cam_up[0] = radUp[0]; g_cam_up[1] = radUp[1]; g_cam_up[2] = radUp[2];
+    } else {
+        g_cam_up[0] += (radUp[0] - g_cam_up[0]) * a;
+        g_cam_up[1] += (radUp[1] - g_cam_up[1]) * a;
+        g_cam_up[2] += (radUp[2] - g_cam_up[2]) * a;
+    }
+    float ul = sqrtf(g_cam_up[0] * g_cam_up[0] + g_cam_up[1] * g_cam_up[1] + g_cam_up[2] * g_cam_up[2]);
+    if (ul < 1e-4f) { g_cam_up[0] = radUp[0]; g_cam_up[1] = radUp[1]; g_cam_up[2] = radUp[2]; ul = 1.0f; }
+    float up[3] = {g_cam_up[0] / ul, g_cam_up[1] / ul, g_cam_up[2] / ul};
+    g_cam_up[0] = up[0]; g_cam_up[1] = up[1]; g_cam_up[2] = up[2];
 
     // Re-project the heading to stay tangent to the surface: the local up rotates as
     // we fly around the curved planet, so strip the up-component and renormalize.
@@ -3244,6 +3268,7 @@ static int freelook_init(ID3D11Device *dev, ID3D11DeviceContext *ctx, int w, int
         g_cam_eye[0] = dx * sr;
         g_cam_eye[1] = dy * sr;
         g_cam_eye[2] = dz * sr;
+        g_cam_up[0] = dx; g_cam_up[1] = dy; g_cam_up[2] = dz;  // start aligned to Earth up
         // heading = a surface tangent (perpendicular to up); start looking slightly
         // down toward the horizon via a small negative pitch.
         float tx = dz, ty = 0.0f, tz = -dx;  // cross(up,(0,1,0)) -> a tangent direction
