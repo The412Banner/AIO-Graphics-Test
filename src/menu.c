@@ -464,6 +464,7 @@ static const BenchRow kBenchRows[] = {
     {"Nebula", "dx11 --scene nebula", "D3D11 Nebula", 1},
     {"Nebula HD", "dx11 --scene nebula2", "D3D11 Nebula (detailed)", 1},
     {"Showcase", "dx11 --scene showcase", "D3D11 Showcase", 1},
+    {"Free Look", "dx11 --scene freelook", "D3D11 Free Look (interactive)", 1},
     {"Space", "dx11 --scene space", "D3D11 Space", 1},
     {"Desert", "dx11 --scene desert", "D3D11 Desert", 1},
     {"Cityscape", "dx11 --scene city", "D3D11 Cityscape", 1},
