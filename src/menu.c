@@ -810,13 +810,15 @@ static void show_dx11_demos(HWND frame) {
         NULL);
     if (g_ui_font) SendMessage(g_placeholder, WM_SETFONT, (WPARAM)g_ui_font, TRUE);
 
-    static const char *labels[] = {"Raymarch SDF",            "Ocean (raymarched)",
+    static const char *labels[] = {"Free Look (fly camera)",
+                                   "Raymarch SDF",            "Ocean (raymarched)",
                                    "Ocean v2",                "Mandelbulb fractal",
                                    "Volumetric nebula",       "Detailed Nebula",
                                    "Showcase (reflect+shadow)", "Space (planet+asteroids)",
                                    "Desert (dunes)",          "Cityscape (neon city)",
                                    "Cel shading (torus)",     "Matcap (chrome ball)"};
-    static const char *args[] = {"dx11 --scene raymarch",   "dx11 --scene ocean",
+    static const char *args[] = {"dx11 --scene freelook",
+                                 "dx11 --scene raymarch",   "dx11 --scene ocean",
                                  "dx11 --scene ocean2",      "dx11 --scene mandelbulb",
                                  "dx11 --scene nebula",      "dx11 --scene nebula2",
                                  "dx11 --scene showcase",    "dx11 --scene space",
