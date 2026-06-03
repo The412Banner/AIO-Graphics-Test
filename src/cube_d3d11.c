@@ -1556,6 +1556,60 @@ static int ocean_init(ID3D11Device *d, ID3D11DeviceContext *c, int w, int h) {
 static void ocean_frame(ID3D11DeviceContext *c, double t, float a) { stoy_frame(c, &g_ocean, t, a); }
 static void ocean_cleanup(void) { stoy_cleanup(&g_ocean); }
 
+// ----------------------------- OCEAN v2 scene ------------------------------
+// Professional sea surface (the proven "Seascape" technique): summed choppy
+// wave octaves with per-octave domain rotation, height-map BINARY-SEARCH ray
+// trace (few samples, exact surface), Fresnel sky-reflection vs deep-water
+// refraction, subsurface crest glow, sharp sun specular, sky + sun disk,
+// distance fog to the horizon. 3 wave octaves for tracing, 5 for the normal.
+static const char *kOcean2HLSL =
+    AIO_STOY_HEADER
+    "float hash(float2 p){float h=dot(p,float2(127.1,311.7));return frac(sin(h)*43758.5453123);}\n"
+    "float noise(float2 p){float2 i=floor(p),f=frac(p);float2 u=f*f*(3.0-2.0*f);\n"
+    "  return -1.0+2.0*lerp(lerp(hash(i),hash(i+float2(1,0)),u.x),lerp(hash(i+float2(0,1)),hash(i+float2(1,1)),u.x),u.y);}\n"
+    "float diffuse(float3 n,float3 l,float p){return pow(max(dot(n,l)*0.4+0.6,0.0),p);}\n"
+    "float specular(float3 n,float3 l,float3 e,float s){float nrm=(s+8.0)/(3.14159*8.0);return pow(max(dot(reflect(e,n),l),0.0),s)*nrm;}\n"
+    "float3 skyCol(float3 e){e.y=(max(e.y,0.0)*0.8+0.2)*0.8;return float3(pow(1.0-e.y,2.0),1.0-e.y,0.6+(1.0-e.y)*0.4)*1.1;}\n"
+    "float seaOct(float2 uv,float choppy){uv+=noise(uv);float2 wv=1.0-abs(sin(uv));float2 swv=abs(cos(uv));wv=lerp(wv,swv,wv);return pow(1.0-pow(wv.x*wv.y,0.65),choppy);}\n"
+    "float seaTime(){return 1.0+iTime*0.8;}\n"
+    "float mapSea(float3 p,int iter){float freq=0.16,amp=0.6,choppy=4.0;float2 uv=p.xz;uv.x*=0.75;float h=0.0;\n"
+    "  float2x2 m=float2x2(1.6,1.2,-1.2,1.6);\n"
+    "  [loop]for(int i=0;i<iter;i++){float d=seaOct((uv+seaTime())*freq,choppy)+seaOct((uv-seaTime())*freq,choppy);\n"
+    "    h+=d*amp;uv=mul(uv,m);freq*=1.9;amp*=0.22;choppy=lerp(choppy,1.0,0.2);}\n"
+    "  return p.y-h;}\n"
+    "float3 seaNormal(float3 p,float eps){float h=mapSea(p,5);float3 n;n.x=mapSea(float3(p.x+eps,p.y,p.z),5)-h;n.z=mapSea(float3(p.x,p.y,p.z+eps),5)-h;n.y=eps;return normalize(n);}\n"
+    "float3 seaColor(float3 p,float3 n,float3 l,float3 eye,float3 dist){\n"
+    "  float fres=saturate(1.0-dot(n,-eye));fres=pow(fres,3.0)*0.5;\n"
+    "  float3 reflected=skyCol(reflect(eye,n));\n"
+    "  float3 refracted=float3(0.0,0.09,0.18)+diffuse(n,l,80.0)*float3(0.48,0.54,0.36)*0.12;\n"
+    "  float3 color=lerp(refracted,reflected,fres);\n"
+    "  float atten=max(1.0-dot(dist,dist)*0.001,0.0);\n"
+    "  color+=float3(0.48,0.54,0.36)*(p.y-0.6)*0.18*atten;\n"  // subsurface crest glow
+    "  color+=specular(n,l,eye,60.0);return color;}\n"
+    "float heightTrace(float3 ro,float3 rd,out float3 p){float tm=0.0,tx=1000.0;float hx=mapSea(ro+rd*tx,3);\n"
+    "  if(hx>0.0){p=ro+rd*tx;return tx;}float hm=mapSea(ro+rd*tm,3);float tmid=0.0;\n"
+    "  [loop]for(int i=0;i<8;i++){tmid=lerp(tm,tx,hm/(hm-hx));p=ro+rd*tmid;float hmid=mapSea(p,3);if(hmid<0.0){tx=tmid;hx=hmid;}else{tm=tmid;hm=hmid;}}return tmid;}\n"
+    "float4 PSMain(VSOut inp):SV_TARGET{float2 uv=inp.ndc;uv.x*=iAspect;\n"
+    "  float3 ro=float3(0.0,3.5,iTime*0.9);\n"  // glide forward over the sea
+    "  float3 ta=ro+float3(sin(iTime*0.05)*0.3,-0.42,1.0);\n"
+    "  float3 fw=normalize(ta-ro),rt=normalize(cross(float3(0,1,0),fw)),up=cross(fw,rt);\n"
+    "  float3 rd=normalize(uv.x*rt+uv.y*up+1.5*fw);\n"
+    "  float3 l=normalize(float3(0.0,0.5,0.85));\n"  // sun ahead + up
+    "  float3 sky=skyCol(rd);sky+=float3(1.0,0.85,0.55)*pow(saturate(dot(rd,l)),900.0)*1.5;\n"  // sun disk
+    "  float3 col=sky;\n"
+    "  if(rd.y<0.0){float3 p;float dist=heightTrace(ro,rd,p);float3 distv=p-ro;\n"
+    "    float eps=0.001+0.0008*dist;float3 n=seaNormal(p,eps);\n"
+    "    float3 sea=seaColor(p,n,l,rd,distv);\n"
+    "    sea=lerp(sea,sky,saturate(pow(dist*0.012,3.0)));\n"  // aerial fog to horizon
+    "    col=lerp(sky,sea,smoothstep(0.0,-0.03,rd.y));}\n"  // smooth horizon blend
+    "  col=pow(saturate(col),0.65);return float4(col,1.0);}\n";  // seascape display curve
+static StoyState g_ocean2;
+static int ocean2_init(ID3D11Device *d, ID3D11DeviceContext *c, int w, int h) {
+    (void)c; (void)w; (void)h; return stoy_init(d, &g_ocean2, kOcean2HLSL);
+}
+static void ocean2_frame(ID3D11DeviceContext *c, double t, float a) { stoy_frame(c, &g_ocean2, t, a); }
+static void ocean2_cleanup(void) { stoy_cleanup(&g_ocean2); }
+
 // ----------------------------- MANDELBULB scene -----------------------------
 // The power-8 Mandelbulb (standard distance estimator) ray-marched, with
 // orbit-trap coloring + AO. A heavy fragment-ALU workload.
@@ -2735,6 +2789,7 @@ static const D3D11Scene kScenes[] = {
     {"dolphin", "D3D11 Dolphin", dol_init, dol_frame, dol_cleanup},
     {"raymarch", "D3D11 Raymarch SDF", ray_init, ray_frame, ray_cleanup},
     {"ocean", "D3D11 Ocean", ocean_init, ocean_frame, ocean_cleanup},
+    {"ocean2", "D3D11 Ocean v2", ocean2_init, ocean2_frame, ocean2_cleanup},
     {"mandelbulb", "D3D11 Mandelbulb", bulb_init, bulb_frame, bulb_cleanup},
     {"nebula", "D3D11 Nebula", nebula_init, nebula_frame, nebula_cleanup},
     {"nebula2", "D3D11 Nebula (detailed)", nebula2_init, nebula2_frame, nebula2_cleanup},
