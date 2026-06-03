@@ -1749,6 +1749,50 @@ static int space_init(ID3D11Device *d, ID3D11DeviceContext *c, int w, int h) {
 static void space_frame(ID3D11DeviceContext *c, double t, float a) { stoy_frame(c, &g_space, t, a); }
 static void space_cleanup(void) { stoy_cleanup(&g_space); }
 
+// ----------------------------- DESERT scene --------------------------------
+// Photoreal-leaning dune sea at golden hour (same recipe as the planet: cheap
+// smooth-ish heightfield marched, ALL realism in the shading). Rolling dunes
+// (directional ridges + a few value-noise octaves), warm low sun + soft
+// terrain shadows, fine wind ripples as normal-only detail at the hit point,
+// warm sky gradient + sun disk, aerial haze. Camera glides forward over the sand.
+static const char *kDesertHLSL =
+    AIO_STOY_HEADER
+    "float h21(float2 p){p=frac(p*float2(127.1,311.7));p+=dot(p,p+34.5);return frac(p.x*p.y);}\n"
+    "float vn(float2 p){float2 i=floor(p),f=frac(p);f=f*f*(3.0-2.0*f);float a=h21(i),b=h21(i+float2(1,0)),c=h21(i+float2(0,1)),d=h21(i+float2(1,1));return lerp(lerp(a,b,f.x),lerp(c,d,f.x),f.y);}\n"
+    "float dunes(float2 p){float h=sin(p.x*0.10+sin(p.y*0.055)*2.3)*1.8;h+=vn(p*0.07)*3.2;h+=vn(p*0.19)*0.9;h+=vn(p*0.46)*0.25;return h;}\n"  // cheap marched heightfield (no fbm-in-march blowup)
+    "float3 sunDir(){return normalize(float3(-0.6,0.23,0.55));}\n"  // low warm sun
+    "float marchT(float3 ro,float3 rd,out float tt){float lh=1.0,lt=0.1,t=0.1;[loop]for(int i=0;i<200;i++){float3 p=ro+rd*t;float h=p.y-dunes(p.xz);if(h<0.0015*t){tt=lt+lh/(lh-h)*(t-lt);return tt;}lh=h;lt=t;t+=max(0.16,t*0.018);if(t>340.0)break;}tt=t;return -1.0;}\n"  // fixed-stride heightfield walk + linear refine
+    "float3 nrmT(float3 p){float e=0.05+0.0012*length(p.xz);float h=dunes(p.xz);return normalize(float3(h-dunes(p.xz+float2(e,0.0)),e,h-dunes(p.xz+float2(0.0,e))));}\n"
+    "float shT(float3 ro,float3 rd){float res=1.0,t=0.4;[loop]for(int i=0;i<48;i++){float3 p=ro+rd*t;float h=p.y-dunes(p.xz);if(h<0.0015)return 0.0;res=min(res,13.0*h/t);t+=clamp(h,0.4,4.0);if(t>140.0)break;}return saturate(res);}\n"
+    "float3 sky(float3 rd,float3 L){float h=saturate(rd.y);float3 zen=float3(0.20,0.40,0.78),hor=float3(0.98,0.80,0.55);\n"
+    "  float3 col=lerp(hor,zen,pow(h,0.55));float sd=dot(rd,L);\n"
+    "  col+=float3(1.0,0.85,0.55)*(pow(saturate(sd),250.0)*1.5+smoothstep(0.9988,0.9997,sd)*9.0);\n"  // sun disk + glow
+    "  col+=float3(1.0,0.65,0.4)*pow(saturate(sd),5.0)*0.4*(1.0-h);return col;}\n"  // warm sky near sun
+    "float3 sandCol(float3 p,float3 n,float3 rd,float3 L){\n"
+    "  float rip=sin((p.x*0.7+p.z*0.35)*3.0+vn(p.xz*0.5)*5.0);n=normalize(n+float3(rip,0.0,rip*0.4)*0.05);\n"  // wind ripples (normal-only)
+    "  float dif=saturate(dot(n,L));float sh=shT(p+n*0.12,L);\n"
+    "  float3 alb=lerp(float3(0.80,0.63,0.39),float3(0.90,0.76,0.52),vn(p.xz*0.04));alb*=0.92+0.08*vn(p.xz*1.8);\n"
+    "  float3 amb=float3(0.40,0.55,0.85);\n"  // sky-fill ambient
+    "  float3 col=alb*(0.16*amb+1.25*dif*sh*float3(1.0,0.86,0.62));\n"
+    "  float3 H=normalize(L-rd);col+=float3(1.0,0.9,0.7)*pow(saturate(dot(n,H)),20.0)*sh*0.22;\n"  // sand sheen
+    "  col+=float3(1.0,0.78,0.55)*pow(1.0-saturate(dot(n,-rd)),4.0)*0.16;return col;}\n"  // warm grazing rim
+    "float4 PSMain(VSOut inp):SV_TARGET{float2 uv=inp.ndc;uv.x*=iAspect;float3 L=sunDir();\n"
+    "  float cz=iTime*2.4;float cx=sin(cz*0.025)*5.0;float gh=dunes(float2(cx,cz));\n"  // glide forward, gentle sway, ride the dune tops
+    "  float3 ro=float3(cx,gh+2.7,cz);float yaw=sin(iTime*0.05)*0.22;\n"
+    "  float3 fw=normalize(float3(sin(yaw),-0.13,cos(yaw)));float3 rt=normalize(cross(float3(0,1,0),fw)),up=cross(fw,rt);\n"
+    "  float3 rd=normalize(uv.x*rt+uv.y*up+1.6*fw);\n"
+    "  float tt;float t=marchT(ro,rd,tt);float3 col;\n"
+    "  if(t>0.0){float3 p=ro+rd*tt;float3 n=nrmT(p);col=sandCol(p,n,rd,L);\n"
+    "    float fog=1.0-exp(-tt*0.0055);col=lerp(col,sky(rd,L),fog);}\n"  // aerial haze
+    "  else col=sky(rd,L);\n"
+    "  col*=1.08;col=(col*(2.51*col+0.03))/(col*(2.43*col+0.59)+0.14);col=pow(saturate(col),1.0/2.2);return float4(col,1.0);}\n";  // ACES
+static StoyState g_desert;
+static int desert_init(ID3D11Device *d, ID3D11DeviceContext *c, int w, int h) {
+    (void)c; (void)w; (void)h; return stoy_init(d, &g_desert, kDesertHLSL);
+}
+static void desert_frame(ID3D11DeviceContext *c, double t, float a) { stoy_frame(c, &g_desert, t, a); }
+static void desert_cleanup(void) { stoy_cleanup(&g_desert); }
+
 // ----------------------------- CITYSCAPE scene ------------------------------
 // A night Blade-Runner city: a domain-repeated grid of towers (hashed heights)
 // with emissive window grids + neon, a WET REFLECTIVE STREET that mirrors the
@@ -2632,6 +2676,7 @@ static const D3D11Scene kScenes[] = {
     {"nebula", "D3D11 Nebula", nebula_init, nebula_frame, nebula_cleanup},
     {"showcase", "D3D11 Showcase", show_init, show_frame, show_cleanup},
     {"space", "D3D11 Space", space_init, space_frame, space_cleanup},
+    {"desert", "D3D11 Desert", desert_init, desert_frame, desert_cleanup},
     {"city", "D3D11 Cityscape", city_init, city_frame, city_cleanup},
     {"gsexplode", "D3D11 GS Exploder", gs_init, gs_frame, gs_cleanup},
     {"cel", "D3D11 Cel Shading", cel_init, cel_frame, cel_cleanup},

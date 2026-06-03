@@ -50,6 +50,14 @@ static HFONT g_ui_font_bold;
 static HFONT g_header_font;
 static HFONT g_mono_font;
 
+// Dark theme palette + brushes (created in aio_run_shell, used by WM_CTLCOLOR*).
+#define DARK_BG    RGB(26, 28, 33)    // window / panel background
+#define DARK_CTL   RGB(38, 41, 48)    // control (edit/readout) background
+#define DARK_TEXT  RGB(228, 230, 234) // primary text
+#define DARK_DIM   RGB(150, 156, 166) // dim / secondary text
+static HBRUSH g_br_bg;
+static HBRUSH g_br_ctl;
+
 // Content views.
 static HWND g_tab;       // GPU Info tab control
 static HWND g_edit_vk;   // GPU Info: Vulkan tab text
@@ -57,7 +65,7 @@ static HWND g_edit_gl;   // GPU Info: OpenGL tab text
 static HWND g_placeholder;
 
 #define ID_CB_FIRST 3000  // content-area buttons (Benchmark + scene-picker views)
-#define MAX_CB 32
+#define MAX_CB 40
 static HWND g_cbtn[MAX_CB];
 static HWND g_cbtn_avg[MAX_CB];      // bold "Avg N" label next to each benchmark button
 static HWND g_cbtn_result[MAX_CB];   // "Min N   Max N" label next to each benchmark button
@@ -369,6 +377,7 @@ static const BenchRow kBenchRows[] = {
     {"Nebula", "dx11 --scene nebula", "D3D11 Nebula", 1},
     {"Showcase", "dx11 --scene showcase", "D3D11 Showcase", 1},
     {"Space", "dx11 --scene space", "D3D11 Space", 1},
+    {"Desert", "dx11 --scene desert", "D3D11 Desert", 1},
     {"Cityscape", "dx11 --scene city", "D3D11 Cityscape", 1},
     {"GS Explode", "dx11 --scene gsexplode", "D3D11 GS Exploder", 1},
     {"Cel", "dx11 --scene cel", "D3D11 Cel Shading", 1},
@@ -715,13 +724,13 @@ static void show_dx11_demos(HWND frame) {
     static const char *labels[] = {"Raymarch SDF",            "Ocean (raymarched)",
                                    "Mandelbulb fractal",      "Volumetric nebula",
                                    "Showcase (reflect+shadow)", "Space (planet+asteroids)",
-                                   "Cityscape (neon city)",   "Cel shading (torus)",
-                                   "Matcap (chrome ball)"};
+                                   "Desert (dunes)",          "Cityscape (neon city)",
+                                   "Cel shading (torus)",     "Matcap (chrome ball)"};
     static const char *args[] = {"dx11 --scene raymarch",   "dx11 --scene ocean",
                                  "dx11 --scene mandelbulb",  "dx11 --scene nebula",
                                  "dx11 --scene showcase",    "dx11 --scene space",
-                                 "dx11 --scene city",        "dx11 --scene cel",
-                                 "dx11 --scene matcap"};
+                                 "dx11 --scene desert",      "dx11 --scene city",
+                                 "dx11 --scene cel",         "dx11 --scene matcap"};
     g_cbtn_n = (int)(sizeof(args) / sizeof(args[0]));
     int y = cr.top + 70;
     const int colw = 220, rowh = 38;
@@ -1239,15 +1248,24 @@ static LRESULT CALLBACK shell_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             }
             return 0;
         }
-        case WM_CTLCOLORSTATIC: {
+        case WM_CTLCOLORSTATIC:
+        case WM_CTLCOLORBTN: {
             HWND ctl = (HWND)lParam;
-            if (ctl == g_foot_heart || ctl == g_foot_a || ctl == g_foot_b || ctl == g_version) {
-                HDC hdc = (HDC)wParam;
-                SetTextColor(hdc, ctl == g_foot_heart ? RGB(214, 69, 79) : RGB(112, 112, 120));
-                SetBkMode(hdc, TRANSPARENT);
-                return (LRESULT)GetSysColorBrush(COLOR_BTNFACE);
-            }
-            break;
+            HDC hdc = (HDC)wParam;
+            COLORREF txt = DARK_TEXT;
+            if (ctl == g_foot_heart) txt = RGB(214, 69, 79);
+            else if (ctl == g_foot_a || ctl == g_foot_b || ctl == g_version) txt = DARK_DIM;
+            SetTextColor(hdc, txt);
+            SetBkColor(hdc, DARK_BG);
+            SetBkMode(hdc, TRANSPARENT);
+            return (LRESULT)g_br_bg;
+        }
+        case WM_CTLCOLOREDIT:
+        case WM_CTLCOLORLISTBOX: {
+            HDC hdc = (HDC)wParam;
+            SetTextColor(hdc, DARK_TEXT);
+            SetBkColor(hdc, DARK_CTL);
+            return (LRESULT)g_br_ctl;
         }
         case WM_SIZE:
             layout_content(hwnd);
@@ -1287,6 +1305,9 @@ int aio_run_shell(HINSTANCE hInstance) {
                               OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY,
                               FIXED_PITCH | FF_MODERN, "Consolas");
 
+    g_br_bg = CreateSolidBrush(DARK_BG);     // dark theme brushes (window/panel + controls)
+    g_br_ctl = CreateSolidBrush(DARK_CTL);
+
     const char *cls = "AIOGraphicsTestShell";
     WNDCLASSA wc;
     memset(&wc, 0, sizeof(wc));
@@ -1294,7 +1315,7 @@ int aio_run_shell(HINSTANCE hInstance) {
     wc.hInstance = hInstance;
     wc.hIcon = LoadIconA(hInstance, MAKEINTRESOURCEA(1));
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-    wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+    wc.hbrBackground = g_br_bg;  // dark theme
     wc.lpszClassName = cls;
     RegisterClassA(&wc);
 
@@ -1324,6 +1345,8 @@ int aio_run_shell(HINSTANCE hInstance) {
     if (g_ui_font) DeleteObject(g_ui_font);
     if (g_header_font) DeleteObject(g_header_font);
     if (g_mono_font) DeleteObject(g_mono_font);
+    if (g_br_bg) DeleteObject(g_br_bg);
+    if (g_br_ctl) DeleteObject(g_br_ctl);
     UnregisterClassA(cls, hInstance);
     return 0;
 }
