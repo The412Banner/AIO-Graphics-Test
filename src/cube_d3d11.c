@@ -55,8 +55,15 @@ static int g_resize_w = 0, g_resize_h = 0;
 static int   g_freelook = 0;
 static HWND  g_free_hwnd = NULL;         // current window, for cursor-position steering
 static float g_cam_eye[3] = {0.0f, 8.0f, 0.0f};
-static float g_cam_yaw    = 1.5707963f;  // facing +Z
-static float g_cam_pitch  = -0.12f;
+// Surface-relative camera: heading is a world-space unit vector kept TANGENT to the
+// planet (perpendicular to the local up = normalize(eye)), and pitch is the angle
+// above the local horizon. This keeps "up" locked to the planet so the horizon stays
+// level as you fly around the globe (no apparent roll/spin).
+static float g_cam_head[3] = {1.0f, 0.0f, 0.0f};  // tangent heading (compass dir)
+static float g_cam_pitch  = -0.12f;               // angle above local horizon (rad)
+static float g_cam_fwd[3] = {1.0f, 0.0f, 0.0f};   // derived look dir (world)
+static float g_cam_rgt[3] = {0.0f, 0.0f, 1.0f};   // derived screen-right (world)
+static float g_cam_upv[3] = {0.0f, 1.0f, 0.0f};   // derived screen-up (world)
 static float g_cam_speed  = 22.0f;       // world units / second
 static unsigned char g_keys[256];        // WM_KEYDOWN/UP state, indexed by VK code
 static int   g_autofwd = 1;              // SkyFly cruise: auto-fly forward (F toggles)
@@ -2821,20 +2828,19 @@ static void atom_cleanup(void) {
 //   arrows        : also look   mouse wheel        : speed
 //   E/Space, Q/Ctrl : up/down   Shift : boost       ESC : quit
 typedef struct {
-    float eye[3];
-    float yaw;
-    float pitch;
-    float aspect;
-    float iTime;
-    float pad;
-} FreeCB;
+    float eye[3]; float pad0;
+    float fwd[3]; float pad1;
+    float rgt[3]; float pad2;
+    float upv[3]; float aspect;
+    float iTime;  float pad3[3];
+} FreeCB;  // 5 x float4 = 80 bytes, std cbuffer layout
 
 // Free Look is a true *curved planet*: terrain is a height field displaced onto a
 // sphere of radius PR centred at the origin, so flying straight up curves the
 // horizon and eventually shows the whole globe from orbit (seamless, one world --
 // no flat-plane / skybox swap). Sea level == PR; land rises above, ocean below.
 static const char kFreeLookHLSL[] =
-    "cbuffer CB:register(b0){float3 eye;float yaw;float pitch;float aspect;float iTime;float pad;}\n"
+    "cbuffer CB:register(b0){float3 eye;float pad0;float3 fwd;float pad1;float3 rgt;float pad2;float3 upv;float aspect;float iTime;float3 pad3;}\n"
     "struct VSOut{float4 pos:SV_POSITION;float2 ndc:TEXCOORD0;};\n"
     "VSOut VSMain(uint vid:SV_VertexID){VSOut o;float2 p=float2((vid<<1)&2,vid&2);"
     "o.pos=float4(p*2.0-1.0,0.0,1.0);o.ndc=o.pos.xy;return o;}\n"
@@ -2907,10 +2913,6 @@ static const char kFreeLookHLSL[] =
     "      float a=saturate(den*dt*0.25);acc+=T*a*c;T*=(1.0-a);if(T<0.02)break;}}\n"
     "  return bg*T+acc;}\n"
     "float4 PSMain(VSOut i):SV_Target{\n"
-    "  float cp=cos(pitch),spp=sin(pitch),cy=cos(yaw),sy=sin(yaw);\n"
-    "  float3 fwd=float3(cy*cp,spp,sy*cp);\n"
-    "  float3 rgt=normalize(cross(float3(0,1,0),fwd));\n"
-    "  float3 upv=cross(fwd,rgt);\n"
     "  float2 uv=i.ndc;uv.x*=aspect;\n"
     "  float3 rd=normalize(fwd+uv.x*rgt*0.72+uv.y*upv*0.72);\n"
     "  float3 ro=eye;float tm=iTime;\n"
@@ -3018,11 +3020,38 @@ static void freelook_update(double t) {
     if (dt > 0.05f) dt = 0.05f;  // clamp first-frame / hitch spikes
     if (dt < 0.0f) dt = 0.0f;
 
+    // Local up = radial direction from the planet centre (origin).
+    float er = sqrtf(g_cam_eye[0] * g_cam_eye[0] + g_cam_eye[1] * g_cam_eye[1] +
+                     g_cam_eye[2] * g_cam_eye[2]);
+    if (er < 1e-4f) er = 1e-4f;
+    float up[3] = {g_cam_eye[0] / er, g_cam_eye[1] / er, g_cam_eye[2] / er};
+
+    // Re-project the heading to stay tangent to the surface: the local up rotates as
+    // we fly around the curved planet, so strip the up-component and renormalize.
+    // This is what keeps the horizon level (no apparent roll / spin).
+    float hu = g_cam_head[0] * up[0] + g_cam_head[1] * up[1] + g_cam_head[2] * up[2];
+    g_cam_head[0] -= up[0] * hu; g_cam_head[1] -= up[1] * hu; g_cam_head[2] -= up[2] * hu;
+    float hl = sqrtf(g_cam_head[0] * g_cam_head[0] + g_cam_head[1] * g_cam_head[1] +
+                     g_cam_head[2] * g_cam_head[2]);
+    if (hl < 1e-4f) {  // heading collapsed onto up (rare) -> rebuild any tangent
+        float ref[3] = {0.0f, 1.0f, 0.0f};
+        if (fabsf(up[1]) > 0.95f) { ref[0] = 1.0f; ref[1] = 0.0f; }
+        float d = ref[0] * up[0] + ref[1] * up[1] + ref[2] * up[2];
+        g_cam_head[0] = ref[0] - up[0] * d;
+        g_cam_head[1] = ref[1] - up[1] * d;
+        g_cam_head[2] = ref[2] - up[2] * d;
+        hl = sqrtf(g_cam_head[0] * g_cam_head[0] + g_cam_head[1] * g_cam_head[1] +
+                   g_cam_head[2] * g_cam_head[2]);
+    }
+    g_cam_head[0] /= hl; g_cam_head[1] /= hl; g_cam_head[2] /= hl;
+
+    // --- steering: yaw turns the heading around local up, pitch tilts toward up ---
     float look = 1.7f * dt;
-    if (g_keys[VK_LEFT]) g_cam_yaw -= look;
-    if (g_keys[VK_RIGHT]) g_cam_yaw += look;
-    if (g_keys[VK_UP]) g_cam_pitch += look;
-    if (g_keys[VK_DOWN]) g_cam_pitch -= look;
+    float yaw_d = 0.0f, pitch_d = 0.0f;
+    if (g_keys[VK_LEFT]) yaw_d -= look;
+    if (g_keys[VK_RIGHT]) yaw_d += look;
+    if (g_keys[VK_UP]) pitch_d += look;
+    if (g_keys[VK_DOWN]) pitch_d -= look;
 
     // Joystick steering from the cursor's offset from the window centre (only while
     // the cursor is over the window) -- steer just by moving the mouse, no buttons.
@@ -3036,69 +3065,79 @@ static void freelook_update(double t) {
             nx = (nx > dz) ? (nx - dz) / (1.0f - dz) : (nx < -dz ? (nx + dz) / (1.0f - dz) : 0.0f);
             ny = (ny > dz) ? (ny - dz) / (1.0f - dz) : (ny < -dz ? (ny + dz) / (1.0f - dz) : 0.0f);
             float steer = 2.0f * dt;
-            g_cam_yaw += nx * steer;
-            g_cam_pitch -= ny * steer;
+            yaw_d += nx * steer;
+            pitch_d -= ny * steer;
         }
     }
-    if (g_cam_pitch > 1.5f) g_cam_pitch = 1.5f;
-    if (g_cam_pitch < -1.5f) g_cam_pitch = -1.5f;
-
-    float cp = cosf(g_cam_pitch), sp = sinf(g_cam_pitch);
-    float cy = cosf(g_cam_yaw), sy = sinf(g_cam_yaw);
-    float fwd[3] = {cy * cp, sp, sy * cp};
-    // right = normalize(cross((0,1,0), fwd)) = normalize(fwd.z, 0, -fwd.x)
-    float rx = fwd[2], rz = -fwd[0];
-    float rl = sqrtf(rx * rx + rz * rz);
-    if (rl > 1e-5f) {
-        rx /= rl;
-        rz /= rl;
+    // Yaw: rotate heading around up (head is perpendicular to up, so the Rodrigues
+    // rotation reduces to v' = v*cos + (up x v)*sin).
+    if (yaw_d != 0.0f) {
+        float c = cosf(yaw_d), s = sinf(yaw_d);
+        float cx = up[1] * g_cam_head[2] - up[2] * g_cam_head[1];
+        float cy = up[2] * g_cam_head[0] - up[0] * g_cam_head[2];
+        float cz = up[0] * g_cam_head[1] - up[1] * g_cam_head[0];
+        g_cam_head[0] = g_cam_head[0] * c + cx * s;
+        g_cam_head[1] = g_cam_head[1] * c + cy * s;
+        g_cam_head[2] = g_cam_head[2] * c + cz * s;
+        float n = sqrtf(g_cam_head[0] * g_cam_head[0] + g_cam_head[1] * g_cam_head[1] +
+                        g_cam_head[2] * g_cam_head[2]);
+        g_cam_head[0] /= n; g_cam_head[1] /= n; g_cam_head[2] /= n;
     }
+    g_cam_pitch += pitch_d;
+    if (g_cam_pitch > 1.4f) g_cam_pitch = 1.4f;
+    if (g_cam_pitch < -1.4f) g_cam_pitch = -1.4f;
 
+    // Look dir = heading tilted toward/away from local up by pitch.
+    float cpz = cosf(g_cam_pitch), spz = sinf(g_cam_pitch);
+    float fwd[3] = {g_cam_head[0] * cpz + up[0] * spz,
+                    g_cam_head[1] * cpz + up[1] * spz,
+                    g_cam_head[2] * cpz + up[2] * spz};
+    // Camera basis: right = normalize(cross(up, fwd)), screen-up = cross(fwd, right).
+    float rgt[3] = {up[1] * fwd[2] - up[2] * fwd[1],
+                    up[2] * fwd[0] - up[0] * fwd[2],
+                    up[0] * fwd[1] - up[1] * fwd[0]};
+    float rl = sqrtf(rgt[0] * rgt[0] + rgt[1] * rgt[1] + rgt[2] * rgt[2]);
+    if (rl < 1e-5f) rl = 1e-5f;
+    rgt[0] /= rl; rgt[1] /= rl; rgt[2] /= rl;
+    float upv[3] = {fwd[1] * rgt[2] - fwd[2] * rgt[1],
+                    fwd[2] * rgt[0] - fwd[0] * rgt[2],
+                    fwd[0] * rgt[1] - fwd[1] * rgt[0]};
+    for (int k = 0; k < 3; k++) { g_cam_fwd[k] = fwd[k]; g_cam_rgt[k] = rgt[k]; g_cam_upv[k] = upv[k]; }
+
+    // --- movement ---
     float spd = g_cam_speed * dt * (g_keys[VK_SHIFT] ? 3.0f : 1.0f);
     if (g_keys['W']) {
-        g_cam_eye[0] += fwd[0] * spd;
-        g_cam_eye[1] += fwd[1] * spd;
-        g_cam_eye[2] += fwd[2] * spd;
+        g_cam_eye[0] += fwd[0] * spd; g_cam_eye[1] += fwd[1] * spd; g_cam_eye[2] += fwd[2] * spd;
     }
     if (g_keys['S']) {
-        g_cam_eye[0] -= fwd[0] * spd;
-        g_cam_eye[1] -= fwd[1] * spd;
-        g_cam_eye[2] -= fwd[2] * spd;
+        g_cam_eye[0] -= fwd[0] * spd; g_cam_eye[1] -= fwd[1] * spd; g_cam_eye[2] -= fwd[2] * spd;
     }
     if (g_keys['D']) {
-        g_cam_eye[0] += rx * spd;
-        g_cam_eye[2] += rz * spd;
+        g_cam_eye[0] += rgt[0] * spd; g_cam_eye[1] += rgt[1] * spd; g_cam_eye[2] += rgt[2] * spd;
     }
     if (g_keys['A']) {
-        g_cam_eye[0] -= rx * spd;
-        g_cam_eye[2] -= rz * spd;
+        g_cam_eye[0] -= rgt[0] * spd; g_cam_eye[1] -= rgt[1] * spd; g_cam_eye[2] -= rgt[2] * spd;
     }
-    // Ascend / descend are radial (away from / toward the planet centre at origin)
-    // so they feel right anywhere on the globe.
-    float er = sqrtf(g_cam_eye[0] * g_cam_eye[0] + g_cam_eye[1] * g_cam_eye[1] +
-                     g_cam_eye[2] * g_cam_eye[2]);
-    float ux = g_cam_eye[0] / er, uy = g_cam_eye[1] / er, uz = g_cam_eye[2] / er;
+    // Ascend / descend are radial (away from / toward the planet centre).
     if (g_keys['E'] || g_keys[VK_SPACE]) {
-        g_cam_eye[0] += ux * spd; g_cam_eye[1] += uy * spd; g_cam_eye[2] += uz * spd;
+        g_cam_eye[0] += up[0] * spd; g_cam_eye[1] += up[1] * spd; g_cam_eye[2] += up[2] * spd;
     }
     if (g_keys['Q'] || g_keys[VK_CONTROL]) {
-        g_cam_eye[0] -= ux * spd; g_cam_eye[1] -= uy * spd; g_cam_eye[2] -= uz * spd;
+        g_cam_eye[0] -= up[0] * spd; g_cam_eye[1] -= up[1] * spd; g_cam_eye[2] -= up[2] * spd;
     }
     // Continuous SkyFly-style forward cruise (on by default; F toggles it).
     if (g_autofwd) {
-        g_cam_eye[0] += fwd[0] * spd;
-        g_cam_eye[1] += fwd[1] * spd;
-        g_cam_eye[2] += fwd[2] * spd;
+        g_cam_eye[0] += fwd[0] * spd; g_cam_eye[1] += fwd[1] * spd; g_cam_eye[2] += fwd[2] * spd;
     }
     // Soft floor: stay just above the actual displaced surface (sea or mountains).
     er = sqrtf(g_cam_eye[0] * g_cam_eye[0] + g_cam_eye[1] * g_cam_eye[1] +
                g_cam_eye[2] * g_cam_eye[2]);
-    ux = g_cam_eye[0] / er; uy = g_cam_eye[1] / er; uz = g_cam_eye[2] / er;
-    float gh = fl_terrH(ux, uy, uz);
+    float fux = g_cam_eye[0] / er, fuy = g_cam_eye[1] / er, fuz = g_cam_eye[2] / er;
+    float gh = fl_terrH(fux, fuy, fuz);
     if (gh < 0.0f) gh = 0.0f;  // water surface sits at sea level
     float minr = FL_PR + gh + 1.6f;
     if (er < minr) {
-        g_cam_eye[0] = ux * minr; g_cam_eye[1] = uy * minr; g_cam_eye[2] = uz * minr;
+        g_cam_eye[0] = fux * minr; g_cam_eye[1] = fuy * minr; g_cam_eye[2] = fuz * minr;
     }
 }
 
@@ -3144,15 +3183,15 @@ static int freelook_init(ID3D11Device *dev, ID3D11DeviceContext *ctx, int w, int
         g_cam_eye[0] = dx * sr;
         g_cam_eye[1] = dy * sr;
         g_cam_eye[2] = dz * sr;
-        // forward = a surface tangent, tilted slightly down toward the ground.
-        float tx = dz, ty = 0.0f, tz = -dx;  // cross(up,(0,1,0)) direction
-        float tl = sqrtf(tx * tx + tz * tz);
-        tx /= tl; tz /= tl;
-        float fx = tx - dx * 0.30f, fy = ty - dy * 0.30f, fz = tz - dz * 0.30f;
-        float fld = sqrtf(fx * fx + fy * fy + fz * fz);
-        fx /= fld; fy /= fld; fz /= fld;
-        g_cam_yaw = atan2f(fz, fx);
-        g_cam_pitch = asinf(fy);
+        // heading = a surface tangent (perpendicular to up); start looking slightly
+        // down toward the horizon via a small negative pitch.
+        float tx = dz, ty = 0.0f, tz = -dx;  // cross(up,(0,1,0)) -> a tangent direction
+        float td = tx * dx + ty * dy + tz * dz;
+        tx -= dx * td; ty -= dy * td; tz -= dz * td;
+        float tl = sqrtf(tx * tx + ty * ty + tz * tz);
+        if (tl < 1e-4f) { tx = 1.0f; ty = 0.0f; tz = 0.0f; tl = 1.0f; }
+        g_cam_head[0] = tx / tl; g_cam_head[1] = ty / tl; g_cam_head[2] = tz / tl;
+        g_cam_pitch = -0.12f;
     }
     g_cam_speed = 22.0f;
     g_autofwd = 1;
@@ -3171,11 +3210,13 @@ static void freelook_frame(ID3D11DeviceContext *ctx, double t, float aspect) {
         cb->eye[0] = g_cam_eye[0];
         cb->eye[1] = g_cam_eye[1];
         cb->eye[2] = g_cam_eye[2];
-        cb->yaw = g_cam_yaw;
-        cb->pitch = g_cam_pitch;
+        cb->fwd[0] = g_cam_fwd[0]; cb->fwd[1] = g_cam_fwd[1]; cb->fwd[2] = g_cam_fwd[2];
+        cb->rgt[0] = g_cam_rgt[0]; cb->rgt[1] = g_cam_rgt[1]; cb->rgt[2] = g_cam_rgt[2];
+        cb->upv[0] = g_cam_upv[0]; cb->upv[1] = g_cam_upv[1]; cb->upv[2] = g_cam_upv[2];
         cb->aspect = aspect;
         cb->iTime = (float)t;
-        cb->pad = 0.0f;
+        cb->pad0 = cb->pad1 = cb->pad2 = 0.0f;
+        cb->pad3[0] = cb->pad3[1] = cb->pad3[2] = 0.0f;
         ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)g_free.cbo, 0);
     }
     ID3D11DeviceContext_RSSetState(ctx, g_free.rs);
