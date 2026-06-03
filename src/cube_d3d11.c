@@ -1897,11 +1897,11 @@ static const char *kCityHLSL =
     "      float fres=0.02+0.98*pow(1.0-saturate(dot(n,-rd)),4.0);col=lerp(col,refl,fres*wet*0.95);}\n"  // only puddles mirror; dry asphalt matte
     "    float3 fogc=float3(0.025,0.035,0.075);col=lerp(col,fogc+sky(rd)*0.4,1.0-exp(-0.02*t));}\n"  // denser deep-blue haze (neon glows through)
     "  else col=sky(rd);\n"
-    "  float2 ruv=float2(uv.x,inp.ndc.y);\n"  // STYLIZED: animated rain streaks
-    "  [unroll]for(int ri=0;ri<2;ri++){float2 q=ruv*float2(70.0,11.0)+float2(ri*37.0,-iTime*(16.0+ri*9.0));\n"
+    "  float2 ruv=float2(uv.x,inp.ndc.y);ruv.x+=ruv.y*0.12;\n"  // STYLIZED: animated rain streaks (slight wind slant)
+    "  [unroll]for(int ri=0;ri<3;ri++){float2 q=ruv*float2(80.0,10.0)+float2(ri*37.0,iTime*(20.0+ri*10.0));\n"  // +iTime => falls DOWN
     "    float2 ci=floor(q);float2 cf=frac(q);\n"
-    "    float st=smoothstep(0.5,0.0,abs(cf.x-0.5))*smoothstep(0.55,0.05,cf.y)*step(0.94,h21(ci+ri*7.0));\n"
-    "    col+=st*0.10*float3(0.65,0.78,1.0);}\n"
+    "    float st=smoothstep(0.45,0.0,abs(cf.x-0.5))*smoothstep(0.7,0.05,cf.y)*step(0.93,h21(ci+ri*7.0));\n"
+    "    col+=st*0.13*float3(0.65,0.78,1.0);}\n"
     "  float lum=dot(col,float3(0.299,0.587,0.114));col=lerp(float3(lum,lum,lum),col,1.28);\n"  // saturation boost
     "  col=lerp(col,col*float3(0.78,0.93,1.25),saturate(0.35-lum)*1.1);\n"  // teal/blue shadows
     "  col=lerp(col,col*float3(1.16,1.02,0.82),saturate(lum-0.45)*0.6);\n"  // warm highlights
