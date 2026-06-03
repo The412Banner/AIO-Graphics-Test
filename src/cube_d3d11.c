@@ -47,7 +47,7 @@ static int g_resize_w = 0, g_resize_h = 0;
 
 // ---- Free Look interactive camera (only the "freelook" scene reads these) ---
 // The single wndproc serves every scene, so all camera input is gated behind
-// g_freelook (set by freelook_init, cleared by freelook_cleanup); other scenes
+// g_freelook (set by planet_init, cleared by planet_cleanup); other scenes
 // are completely unaffected. SkyFly style: the scene opens already cruising and
 // steering is read from the cursor's position each frame (joystick-like) -- just
 // nudge the mouse off-centre to turn. No button-holding, no cursor capture (which
@@ -55,6 +55,7 @@ static int g_resize_w = 0, g_resize_h = 0;
 static int   g_freelook = 0;
 static HWND  g_free_hwnd = NULL;         // current window, for cursor-position steering
 static float g_cam_eye[3] = {0.0f, 8.0f, 0.0f};
+static float g_cam_yaw    = 1.5707963f;  // world-yaw, used only by the SkyFly "freelook" scene
 // Surface-relative camera: heading is a world-space unit vector kept TANGENT to the
 // planet (perpendicular to the local up = normalize(eye)), and pitch is the angle
 // above the local horizon. This keeps "up" locked to the planet so the horizon stays
@@ -2836,14 +2837,14 @@ typedef struct {
     float rgt[3]; float pad2;
     float upv[3]; float aspect;
     float iTime;  float pad3[3];
-} FreeCB;  // 5 x float4 = 80 bytes, std cbuffer layout
+} PlanetCB;  // 5 x float4 = 80 bytes, std cbuffer layout
 
 // Free Look is a true *curved planet* system: terrain is a height field displaced onto
 // a sphere, so flying straight up curves the horizon and shows the whole globe from
 // orbit (seamless, one world). TWO planets: Earth (home, origin, blue/ocean) and Mars
 // (offset, rusty/dry, CO2 ice caps, thin atmosphere). Fly off one, cross space, land on
 // the other. Kind 0 = Earth (sea level == radius), kind 1 = Mars (no ocean).
-static const char kFreeLookHLSL[] =
+static const char kPlanetHLSL[] =
     "cbuffer CB:register(b0){float3 eye;float pad0;float3 fwd;float pad1;float3 rgt;float pad2;float3 upv;float aspect;float iTime;float3 pad3;}\n"
     "struct VSOut{float4 pos:SV_POSITION;float2 ndc:TEXCOORD0;};\n"
     "VSOut VSMain(uint vid:SV_VertexID){VSOut o;float2 p=float2((vid<<1)&2,vid&2);"
@@ -2998,11 +2999,11 @@ static struct {
     ID3D11PixelShader *ps;
     ID3D11Buffer *cbo;
     ID3D11RasterizerState *rs;
-} g_free;
+} g_planet;
 
 // --- CPU mirror of the shader's terrain height, used only for camera collision so
 //     we ride just above the real ground. Keep in sync with terrH / mapP in
-//     kFreeLookHLSL above. Two planets: Earth (kind 0) at origin, Mars (kind 1) at FL_CB.
+//     kPlanetHLSL above. Two planets: Earth (kind 0) at origin, Mars (kind 1) at FL_CB.
 #define FL_RA 200.0f
 #define FL_RB 150.0f
 static const float FL_CB[3] = {2500.0f, 0.0f, 0.0f};
@@ -3103,7 +3104,7 @@ static float fl_axis(short v, short dz) {
     return f < -1.0f ? -1.0f : (f > 1.0f ? 1.0f : f);
 }
 
-static void freelook_update(double t) {
+static void planet_update(double t) {
     // scene->frame() doesn't pass dt, so derive it from the monotonic elapsed t.
     static double last = -1.0;
     if (last < 0.0) last = t;
@@ -3308,34 +3309,34 @@ static void freelook_update(double t) {
     }
 }
 
-static int freelook_init(ID3D11Device *dev, ID3D11DeviceContext *ctx, int w, int h) {
+static int planet_init(ID3D11Device *dev, ID3D11DeviceContext *ctx, int w, int h) {
     (void)ctx;
     (void)w;
     (void)h;
-    ID3DBlob *vsb = compile_hlsl(kFreeLookHLSL, "VSMain", "vs_4_0");
-    ID3DBlob *psb = compile_hlsl(kFreeLookHLSL, "PSMain", "ps_4_0");
+    ID3DBlob *vsb = compile_hlsl(kPlanetHLSL, "VSMain", "vs_4_0");
+    ID3DBlob *psb = compile_hlsl(kPlanetHLSL, "PSMain", "ps_4_0");
     if (!vsb || !psb) return 1;
     ID3D11Device_CreateVertexShader(dev, ID3D10Blob_GetBufferPointer(vsb),
-                                    ID3D10Blob_GetBufferSize(vsb), NULL, &g_free.vs);
+                                    ID3D10Blob_GetBufferSize(vsb), NULL, &g_planet.vs);
     ID3D11Device_CreatePixelShader(dev, ID3D10Blob_GetBufferPointer(psb),
-                                   ID3D10Blob_GetBufferSize(psb), NULL, &g_free.ps);
+                                   ID3D10Blob_GetBufferSize(psb), NULL, &g_planet.ps);
     ID3D10Blob_Release(vsb);
     ID3D10Blob_Release(psb);
 
     D3D11_BUFFER_DESC cbd;
     memset(&cbd, 0, sizeof(cbd));
-    cbd.ByteWidth = sizeof(FreeCB);
+    cbd.ByteWidth = sizeof(PlanetCB);
     cbd.Usage = D3D11_USAGE_DYNAMIC;
     cbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     cbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-    ID3D11Device_CreateBuffer(dev, &cbd, NULL, &g_free.cbo);
+    ID3D11Device_CreateBuffer(dev, &cbd, NULL, &g_planet.cbo);
 
     D3D11_RASTERIZER_DESC rd;
     memset(&rd, 0, sizeof(rd));
     rd.FillMode = D3D11_FILL_SOLID;
     rd.CullMode = D3D11_CULL_NONE;
     rd.DepthClipEnable = TRUE;
-    ID3D11Device_CreateRasterizerState(dev, &rd, &g_free.rs);
+    ID3D11Device_CreateRasterizerState(dev, &rd, &g_planet.rs);
 
     // Reset the camera + input to a known state and arm the wndproc input path.
     // Start standing on the globe's surface at a scenic spot, looking along the
@@ -3367,6 +3368,284 @@ static int freelook_init(ID3D11Device *dev, ID3D11DeviceContext *ctx, int w, int
     memset(g_keys, 0, sizeof(g_keys));
     fl_xinput_load();  // arm controller support (no-op if no XInput / no pad)
     g_freelook = 1;
+    return (g_planet.vs && g_planet.ps && g_planet.cbo && g_planet.rs) ? 0 : 1;
+}
+
+static void planet_frame(ID3D11DeviceContext *ctx, double t, float aspect) {
+    planet_update(t);
+    D3D11_MAPPED_SUBRESOURCE m;
+    if (SUCCEEDED(ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)g_planet.cbo, 0,
+                                          D3D11_MAP_WRITE_DISCARD, 0, &m))) {
+        PlanetCB *cb = (PlanetCB *)m.pData;
+        cb->eye[0] = g_cam_eye[0];
+        cb->eye[1] = g_cam_eye[1];
+        cb->eye[2] = g_cam_eye[2];
+        cb->fwd[0] = g_cam_fwd[0]; cb->fwd[1] = g_cam_fwd[1]; cb->fwd[2] = g_cam_fwd[2];
+        cb->rgt[0] = g_cam_rgt[0]; cb->rgt[1] = g_cam_rgt[1]; cb->rgt[2] = g_cam_rgt[2];
+        cb->upv[0] = g_cam_upv[0]; cb->upv[1] = g_cam_upv[1]; cb->upv[2] = g_cam_upv[2];
+        cb->aspect = aspect;
+        cb->iTime = (float)t;
+        cb->pad0 = cb->pad1 = cb->pad2 = 0.0f;
+        cb->pad3[0] = cb->pad3[1] = cb->pad3[2] = 0.0f;
+        ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)g_planet.cbo, 0);
+    }
+    ID3D11DeviceContext_RSSetState(ctx, g_planet.rs);
+    ID3D11DeviceContext_IASetInputLayout(ctx, NULL);
+    ID3D11DeviceContext_IASetPrimitiveTopology(ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ID3D11DeviceContext_VSSetShader(ctx, g_planet.vs, NULL, 0);
+    ID3D11DeviceContext_PSSetShader(ctx, g_planet.ps, NULL, 0);
+    ID3D11DeviceContext_PSSetConstantBuffers(ctx, 0, 1, &g_planet.cbo);
+    ID3D11DeviceContext_Draw(ctx, 3, 0);
+}
+
+static void planet_cleanup(void) {
+    g_freelook = 0;
+    g_autofwd = 0;
+    g_free_hwnd = NULL;
+    if (g_planet.rs) ID3D11RasterizerState_Release(g_planet.rs);
+    if (g_planet.cbo) ID3D11Buffer_Release(g_planet.cbo);
+    if (g_planet.ps) ID3D11PixelShader_Release(g_planet.ps);
+    if (g_planet.vs) ID3D11VertexShader_Release(g_planet.vs);
+    memset(&g_planet, 0, sizeof(g_planet));
+}
+
+// ==================== SkyFly Free Look scene (original) ====================
+
+// ============================ Free Look scene ===============================
+// Interactive SkyFly homage: a fullscreen-triangle heightfield raymarcher whose
+// camera (eye + yaw/pitch) is driven by the keyboard/mouse instead of iTime, so
+// the user flies the view around procedural fog terrain. 100% original content.
+//   WASD / arrows : move        drag (left button) : look
+//   arrows        : also look   mouse wheel        : speed
+//   E/Space, Q/Ctrl : up/down   Shift : boost       ESC : quit
+typedef struct {
+    float eye[3];
+    float yaw;
+    float pitch;
+    float aspect;
+    float iTime;
+    float pad;
+} FreeCB;
+
+static const char kFreeLookHLSL[] =
+    "cbuffer CB:register(b0){float3 eye;float yaw;float pitch;float aspect;float iTime;float pad;}\n"
+    "struct VSOut{float4 pos:SV_POSITION;float2 ndc:TEXCOORD0;};\n"
+    "VSOut VSMain(uint vid:SV_VertexID){VSOut o;float2 p=float2((vid<<1)&2,vid&2);"
+    "o.pos=float4(p*2.0-1.0,0.0,1.0);o.ndc=o.pos.xy;return o;}\n"
+    "#define SEA 0.0\n"
+    "#define CL0 55.0\n"
+    "#define CL1 92.0\n"
+    "float h21(float2 p){p=frac(p*float2(123.34,456.21));p+=dot(p,p+45.32);return frac(p.x*p.y);}\n"
+    "float h31(float3 p){p=frac(p*0.1031);p+=dot(p,p.yzx+33.33);return frac((p.x+p.y)*p.z);}\n"
+    "float n2(float2 p){float2 i=floor(p),f=frac(p);float2 u=f*f*(3.0-2.0*f);\n"
+    "  float a=h21(i),b=h21(i+float2(1,0)),c=h21(i+float2(0,1)),d=h21(i+float2(1,1));\n"
+    "  return lerp(lerp(a,b,u.x),lerp(c,d,u.x),u.y);}\n"
+    "float n3(float3 p){float3 i=floor(p),f=frac(p);f=f*f*(3.0-2.0*f);float2 e=float2(0,1);\n"
+    "  float x00=lerp(h31(i+e.xxx),h31(i+e.yxx),f.x),x10=lerp(h31(i+e.xyx),h31(i+e.yyx),f.x);\n"
+    "  float x01=lerp(h31(i+e.xxy),h31(i+e.yxy),f.x),x11=lerp(h31(i+e.xyy),h31(i+e.yyy),f.x);\n"
+    "  return lerp(lerp(x00,x10,f.y),lerp(x01,x11,f.y),f.z);}\n"
+    "float fbm2(float2 p){float s=0.0,a=0.5;float2x2 m=float2x2(1.6,1.2,-1.2,1.6);\n"
+    "  [unroll] for(int i=0;i<5;i++){s+=a*n2(p);p=mul(m,p);a*=0.5;}return s;}\n"
+    "float rdg(float2 p){float s=0.0,a=0.5;float2x2 m=float2x2(1.6,1.2,-1.2,1.6);\n"
+    "  [unroll] for(int i=0;i<3;i++){float v=1.0-abs(n2(p)*2.0-1.0);s+=a*v*v;p=mul(m,p);a*=0.5;}return s;}\n"
+    "float fbm3(float3 p){float s=0.0,a=0.5;\n"
+    "  [unroll] for(int i=0;i<4;i++){s+=a*n3(p);p*=2.03;a*=0.5;}return s;}\n"
+    "float terr(float2 p){return fbm2(p*0.045)*20.0+rdg(p*0.03)*14.0-7.0;}\n"
+    "float starf(float3 rd){\n"
+    "  float2 a=float2(atan2(rd.z,rd.x)*0.1591,acos(clamp(rd.y,-1.0,1.0))*0.3183);\n"
+    "  float2 uv=a*float2(220.0,150.0);float2 id=floor(uv),f=frac(uv);\n"
+    "  float pr=h21(id);if(pr<0.86) return 0.0;\n"
+    "  float2 c=float2(h21(id+3.1),h21(id+7.7));\n"
+    "  float d=length(f-c);float s=smoothstep(0.16,0.0,d);\n"
+    "  float tw=0.65+0.35*sin(iTime*2.5+pr*43.0);\n"
+    "  return s*(0.55+0.6*pr)*tw;}\n"
+    "float3 skyc(float3 rd,float3 sun,float sp){\n"
+    "  float3 day=lerp(float3(0.55,0.72,0.97),float3(0.10,0.26,0.60),saturate(rd.y));\n"
+    "  day=lerp(day,float3(0.85,0.89,0.96),pow(1.0-saturate(abs(rd.y)),8.0)*(1.0-sp));\n"
+    "  float3 col=lerp(day,float3(0.008,0.01,0.025),sp);\n"
+    "  col+=starf(rd)*sp*1.3;\n"
+    "  float s=saturate(dot(rd,sun));\n"
+    "  col+=pow(s,3000.0)*float3(1.0,0.97,0.9)*4.0;\n"
+    "  col+=pow(s,120.0)*float3(1.0,0.8,0.55)*(1.0-sp*0.7);\n"
+    "  return col;}\n"
+    "float cden(float3 p,float tm){float3 q=p*0.016+float3(tm*0.02,0.0,tm*0.013);\n"
+    "  float d=fbm3(q);float hb=saturate((p.y-CL0)/(CL1-CL0));\n"
+    "  float shp=smoothstep(0.0,0.3,hb)*smoothstep(1.0,0.65,hb);\n"
+    "  return saturate(d-0.5)*shp*2.2;}\n"
+    "float3 clouds(float3 ro,float3 rd,float tmax,float3 sun,float3 bg,float sp,float tm){\n"
+    "  if(abs(rd.y)<1e-4 && (ro.y<CL0||ro.y>CL1)) return bg;\n"
+    "  float ta=(CL0-ro.y)/rd.y,tb=(CL1-ro.y)/rd.y;\n"
+    "  float t0=max(min(ta,tb),0.0),t1=min(max(ta,tb),tmax);\n"
+    "  if(abs(rd.y)<1e-4){t0=0.0;t1=min(tmax,700.0);}\n"
+    "  if(t1<=t0) return bg;\n"
+    "  t1=min(t1,t0+700.0);float dt=(t1-t0)/18.0;float T=1.0;float3 acc=float3(0,0,0);\n"
+    "  [loop] for(int i=0;i<18;i++){float t=t0+(float(i)+0.5)*dt;float3 p=ro+rd*t;\n"
+    "    float den=cden(p,tm);\n"
+    "    if(den>0.01){float ls=cden(p+sun*7.0,tm);float lit=saturate(den-ls)*1.6+0.3;\n"
+    "      float3 c=lerp(float3(0.42,0.47,0.58),float3(1.0,1.0,1.02),lit)*(1.0-sp*0.5);\n"
+    "      float a=saturate(den*dt*0.22);acc+=T*a*c;T*=(1.0-a);if(T<0.02)break;}}\n"
+    "  return bg*T+acc;}\n"
+    "float4 PSMain(VSOut i):SV_Target{\n"
+    "  float cp=cos(pitch),spp=sin(pitch),cy=cos(yaw),sy=sin(yaw);\n"
+    "  float3 fwd=float3(cy*cp,spp,sy*cp);\n"
+    "  float3 rgt=normalize(cross(float3(0,1,0),fwd));\n"
+    "  float3 upv=cross(fwd,rgt);\n"
+    "  float2 uv=i.ndc;uv.x*=aspect;\n"
+    "  float3 rd=normalize(fwd+uv.x*rgt*0.72+uv.y*upv*0.72);\n"
+    "  float3 ro=eye;float tm=iTime;\n"
+    "  float3 sun=normalize(float3(-0.45,0.5,0.4));\n"
+    "  float sp=smoothstep(120.0,340.0,ro.y);\n"
+    "  float t=0.4,hit=-1.0;bool can=!(rd.y>0.0 && ro.y>42.0);\n"
+    "  if(can){[loop] for(int s=0;s<150;s++){float3 p=ro+rd*t;\n"
+    "    float sf=max(terr(p.xz),SEA);float d=p.y-sf;\n"
+    "    if(d<0.003*t+0.02){hit=t;break;}t+=max(d*0.5,0.5);if(t>3000.0)break;}}\n"
+    "  float3 col;float tmax;\n"
+    "  if(hit>0.0){float3 p=ro+rd*hit;float e=0.6;\n"
+    "    float hl=max(terr(p.xz-float2(e,0)),SEA),hr=max(terr(p.xz+float2(e,0)),SEA);\n"
+    "    float hb=max(terr(p.xz-float2(0,e)),SEA),hf=max(terr(p.xz+float2(0,e)),SEA);\n"
+    "    float3 n=normalize(float3(hl-hr,2.0*e,hb-hf));float realh=terr(p.xz);\n"
+    "    float3 sky=skyc(rd,sun,sp);\n"
+    "    if(realh<SEA-0.05){float3 wn=float3(0,1,0);\n"
+    "      float fr=pow(1.0-saturate(dot(-rd,wn)),4.0);\n"
+    "      float3 rfl=skyc(reflect(rd,wn),sun,sp);\n"
+    "      col=lerp(float3(0.02,0.08,0.13),rfl,0.35+0.65*fr);\n"
+    "      col+=pow(saturate(dot(reflect(rd,wn),sun)),250.0)*1.6;\n"
+    "    }else{float diff=saturate(dot(n,sun))*0.9+0.12;\n"
+    "      float3 amb=float3(0.35,0.45,0.6)*0.35;float slope=saturate(1.0-n.y);\n"
+    "      float3 grass=float3(0.17,0.38,0.14),rock=float3(0.33,0.29,0.25),snow=float3(0.95,0.97,1.0),sand=float3(0.74,0.68,0.47);\n"
+    "      float3 alb=grass;alb=lerp(alb,sand,smoothstep(0.6,0.0,realh));\n"
+    "      alb=lerp(alb,rock,smoothstep(0.32,0.6,slope));\n"
+    "      alb=lerp(alb,snow,smoothstep(13.0,21.0,realh)*saturate(1.0-slope*1.3));\n"
+    "      col=alb*(diff*float3(1.0,0.96,0.9)+amb);}\n"
+    "    float fog=1.0-exp(-hit*hit*(1.6e-7+sp*1.2e-6));col=lerp(col,sky,fog);tmax=hit;\n"
+    "  }else{col=skyc(rd,sun,sp);tmax=4000.0;}\n"
+    "  col=clouds(ro,rd,tmax,sun,col,sp,tm);\n"
+    "  col=pow(saturate(col),1.0/2.2);\n"
+    "  return float4(col,1.0);\n"
+    "}\n";
+
+static struct {
+    ID3D11VertexShader *vs;
+    ID3D11PixelShader *ps;
+    ID3D11Buffer *cbo;
+    ID3D11RasterizerState *rs;
+} g_free;
+
+static void freelook_update(double t) {
+    // scene->frame() doesn't pass dt, so derive it from the monotonic elapsed t.
+    static double last = -1.0;
+    if (last < 0.0) last = t;
+    float dt = (float)(t - last);
+    last = t;
+    if (dt > 0.05f) dt = 0.05f;  // clamp first-frame / hitch spikes
+    if (dt < 0.0f) dt = 0.0f;
+
+    float look = 1.7f * dt;
+    if (g_keys[VK_LEFT]) g_cam_yaw -= look;
+    if (g_keys[VK_RIGHT]) g_cam_yaw += look;
+    if (g_keys[VK_UP]) g_cam_pitch += look;
+    if (g_keys[VK_DOWN]) g_cam_pitch -= look;
+
+    // Joystick steering from the cursor's offset from the window centre (only while
+    // the cursor is over the window) -- steer just by moving the mouse, no buttons.
+    if (g_mousesteer && g_free_hwnd && g_w > 0 && g_h > 0) {
+        POINT cur;
+        if (GetCursorPos(&cur) && ScreenToClient(g_free_hwnd, &cur) && cur.x >= 0 &&
+            cur.y >= 0 && cur.x < g_w && cur.y < g_h) {
+            float nx = (cur.x - g_w * 0.5f) / (g_w * 0.5f);
+            float ny = (cur.y - g_h * 0.5f) / (g_h * 0.5f);
+            const float dz = 0.10f;  // centre dead-zone so a parked cursor doesn't drift
+            nx = (nx > dz) ? (nx - dz) / (1.0f - dz) : (nx < -dz ? (nx + dz) / (1.0f - dz) : 0.0f);
+            ny = (ny > dz) ? (ny - dz) / (1.0f - dz) : (ny < -dz ? (ny + dz) / (1.0f - dz) : 0.0f);
+            float steer = 2.0f * dt;
+            g_cam_yaw += nx * steer;
+            g_cam_pitch -= ny * steer;
+        }
+    }
+    if (g_cam_pitch > 1.5f) g_cam_pitch = 1.5f;
+    if (g_cam_pitch < -1.5f) g_cam_pitch = -1.5f;
+
+    float cp = cosf(g_cam_pitch), sp = sinf(g_cam_pitch);
+    float cy = cosf(g_cam_yaw), sy = sinf(g_cam_yaw);
+    float fwd[3] = {cy * cp, sp, sy * cp};
+    // right = normalize(cross((0,1,0), fwd)) = normalize(fwd.z, 0, -fwd.x)
+    float rx = fwd[2], rz = -fwd[0];
+    float rl = sqrtf(rx * rx + rz * rz);
+    if (rl > 1e-5f) {
+        rx /= rl;
+        rz /= rl;
+    }
+
+    float spd = g_cam_speed * dt * (g_keys[VK_SHIFT] ? 3.0f : 1.0f);
+    if (g_keys['W']) {
+        g_cam_eye[0] += fwd[0] * spd;
+        g_cam_eye[1] += fwd[1] * spd;
+        g_cam_eye[2] += fwd[2] * spd;
+    }
+    if (g_keys['S']) {
+        g_cam_eye[0] -= fwd[0] * spd;
+        g_cam_eye[1] -= fwd[1] * spd;
+        g_cam_eye[2] -= fwd[2] * spd;
+    }
+    if (g_keys['D']) {
+        g_cam_eye[0] += rx * spd;
+        g_cam_eye[2] += rz * spd;
+    }
+    if (g_keys['A']) {
+        g_cam_eye[0] -= rx * spd;
+        g_cam_eye[2] -= rz * spd;
+    }
+    if (g_keys['E'] || g_keys[VK_SPACE]) g_cam_eye[1] += spd;
+    if (g_keys['Q'] || g_keys[VK_CONTROL]) g_cam_eye[1] -= spd;
+    // Continuous SkyFly-style forward cruise (on by default; F toggles it).
+    if (g_autofwd) {
+        g_cam_eye[0] += fwd[0] * spd;
+        g_cam_eye[1] += fwd[1] * spd;
+        g_cam_eye[2] += fwd[2] * spd;
+    }
+    if (g_cam_eye[1] < 0.5f) g_cam_eye[1] = 0.5f;  // soft floor so we don't dive far underground
+}
+
+static int freelook_init(ID3D11Device *dev, ID3D11DeviceContext *ctx, int w, int h) {
+    (void)ctx;
+    (void)w;
+    (void)h;
+    ID3DBlob *vsb = compile_hlsl(kFreeLookHLSL, "VSMain", "vs_4_0");
+    ID3DBlob *psb = compile_hlsl(kFreeLookHLSL, "PSMain", "ps_4_0");
+    if (!vsb || !psb) return 1;
+    ID3D11Device_CreateVertexShader(dev, ID3D10Blob_GetBufferPointer(vsb),
+                                    ID3D10Blob_GetBufferSize(vsb), NULL, &g_free.vs);
+    ID3D11Device_CreatePixelShader(dev, ID3D10Blob_GetBufferPointer(psb),
+                                   ID3D10Blob_GetBufferSize(psb), NULL, &g_free.ps);
+    ID3D10Blob_Release(vsb);
+    ID3D10Blob_Release(psb);
+
+    D3D11_BUFFER_DESC cbd;
+    memset(&cbd, 0, sizeof(cbd));
+    cbd.ByteWidth = sizeof(FreeCB);
+    cbd.Usage = D3D11_USAGE_DYNAMIC;
+    cbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    cbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    ID3D11Device_CreateBuffer(dev, &cbd, NULL, &g_free.cbo);
+
+    D3D11_RASTERIZER_DESC rd;
+    memset(&rd, 0, sizeof(rd));
+    rd.FillMode = D3D11_FILL_SOLID;
+    rd.CullMode = D3D11_CULL_NONE;
+    rd.DepthClipEnable = TRUE;
+    ID3D11Device_CreateRasterizerState(dev, &rd, &g_free.rs);
+
+    // Reset the camera + input to a known state and arm the wndproc input path.
+    g_cam_eye[0] = 0.0f;
+    g_cam_eye[1] = 8.0f;
+    g_cam_eye[2] = 0.0f;
+    g_cam_yaw = 1.5707963f;
+    g_cam_pitch = -0.12f;
+    g_cam_speed = 22.0f;
+    g_autofwd = 1;
+    g_mousesteer = 1;
+    memset(g_keys, 0, sizeof(g_keys));
+    g_freelook = 1;
     return (g_free.vs && g_free.ps && g_free.cbo && g_free.rs) ? 0 : 1;
 }
 
@@ -3379,13 +3658,11 @@ static void freelook_frame(ID3D11DeviceContext *ctx, double t, float aspect) {
         cb->eye[0] = g_cam_eye[0];
         cb->eye[1] = g_cam_eye[1];
         cb->eye[2] = g_cam_eye[2];
-        cb->fwd[0] = g_cam_fwd[0]; cb->fwd[1] = g_cam_fwd[1]; cb->fwd[2] = g_cam_fwd[2];
-        cb->rgt[0] = g_cam_rgt[0]; cb->rgt[1] = g_cam_rgt[1]; cb->rgt[2] = g_cam_rgt[2];
-        cb->upv[0] = g_cam_upv[0]; cb->upv[1] = g_cam_upv[1]; cb->upv[2] = g_cam_upv[2];
+        cb->yaw = g_cam_yaw;
+        cb->pitch = g_cam_pitch;
         cb->aspect = aspect;
         cb->iTime = (float)t;
-        cb->pad0 = cb->pad1 = cb->pad2 = 0.0f;
-        cb->pad3[0] = cb->pad3[1] = cb->pad3[2] = 0.0f;
+        cb->pad = 0.0f;
         ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)g_free.cbo, 0);
     }
     ID3D11DeviceContext_RSSetState(ctx, g_free.rs);
@@ -3432,6 +3709,7 @@ static const D3D11Scene kScenes[] = {
     {"atomics", "D3D11 Atomics", atom_init, atom_frame, atom_cleanup},
     {"drawstress", "D3D11 Draw Stress", ds_init, ds_frame, ds_cleanup},
     {"freelook", "D3D11 Free Look", freelook_init, freelook_frame, freelook_cleanup},
+    {"planet", "D3D11 Planet Fly", planet_init, planet_frame, planet_cleanup},
 };
 
 static const D3D11Scene *pick_scene(const char *name) {
@@ -3458,7 +3736,7 @@ int aio_run_d3d11_cube(HINSTANCE hinst, const char *scene_name) {
     RegisterClassA(&wc);
 
     char wtitle[160];
-    if (strcmp(scene->name, "freelook") == 0)
+    if (strcmp(scene->name, "freelook") == 0 || strcmp(scene->name, "planet") == 0)
         snprintf(wtitle, sizeof(wtitle),
                  "AIO Graphics Test  -  %s   [move mouse to steer - WASD - F=stop/go - "
                  "M=mouse off - wheel=speed - ESC]",
@@ -3655,7 +3933,7 @@ int aio_run_d3d11_cube(HINSTANCE hinst, const char *scene_name) {
             char hud[96], title[160];
             snprintf(hud, sizeof(hud), "%s   %.0f FPS", api, fps);
             aio_hud_update(hwnd, hud);
-            if (strcmp(scene->name, "freelook") == 0)
+            if (strcmp(scene->name, "freelook") == 0 || strcmp(scene->name, "planet") == 0)
                 snprintf(title, sizeof(title),
                          "AIO  -  %s  -  %.0f FPS   [mouse=steer - WASD - F=stop/go - ESC]",
                          api, fps);

@@ -465,6 +465,7 @@ static const BenchRow kBenchRows[] = {
     {"Nebula HD", "dx11 --scene nebula2", "D3D11 Nebula (detailed)", 1},
     {"Showcase", "dx11 --scene showcase", "D3D11 Showcase", 1},
     {"Free Look", "dx11 --scene freelook", "D3D11 Free Look (interactive)", 1},
+    {"Planet Fly", "dx11 --scene planet", "D3D11 Planet Fly (Earth + Mars)", 1},
     {"Space", "dx11 --scene space", "D3D11 Space", 1},
     {"Desert", "dx11 --scene desert", "D3D11 Desert", 1},
     {"Cityscape", "dx11 --scene city", "D3D11 Cityscape", 1},
@@ -811,6 +812,7 @@ static void show_dx11_demos(HWND frame) {
     if (g_ui_font) SendMessage(g_placeholder, WM_SETFONT, (WPARAM)g_ui_font, TRUE);
 
     static const char *labels[] = {"Free Look (fly camera)",
+                                   "Planet Fly (Earth + Mars)",
                                    "Raymarch SDF",            "Ocean (raymarched)",
                                    "Ocean v2",                "Mandelbulb fractal",
                                    "Volumetric nebula",       "Detailed Nebula",
@@ -818,6 +820,7 @@ static void show_dx11_demos(HWND frame) {
                                    "Desert (dunes)",          "Cityscape (neon city)",
                                    "Cel shading (torus)",     "Matcap (chrome ball)"};
     static const char *args[] = {"dx11 --scene freelook",
+                                 "dx11 --scene planet",
                                  "dx11 --scene raymarch",   "dx11 --scene ocean",
                                  "dx11 --scene ocean2",      "dx11 --scene mandelbulb",
                                  "dx11 --scene nebula",      "dx11 --scene nebula2",
