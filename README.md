@@ -5,7 +5,10 @@ graphics stack on Android (DXVK, VKD3D-Proton, Turnip, Zink). One Windows `.exe`
 into a container — it replaces `vkcube.exe`, `GPUInfo.exe`, and the whole `3d-tests` kit
 (DX8/9/11/12 + GL demos) with a single, touch-friendly, instrumented binary that renders
 the **same cube through every graphics API** so you can see exactly which translation layer
-is broken or slow.
+is broken or slow. On top of the diagnostic cubes it bundles a gallery of detailed
+**procedural showcase scenes** (a photoreal planet, a neon-rain city, moonlit dunes, a
+volumetric nebula, a "Seascape" ocean) that double as fragment-heavy benchmarks, and a full
+**dark theme**.
 
 Forked from Khronos [Vulkan-Tools `vkcube`](https://github.com/KhronosGroup/Vulkan-Tools)
 (`cube.c`, tag `sdk-1.3.239.0`, Apache-2.0). The self-contained pre-codegen base links
@@ -29,10 +32,13 @@ used as the shortcut art when you add it to a container.
 A single binary, driven by an **in-app menu** (touch-friendly — Winlator is a touchscreen),
 with optional CLI shortcuts:
 
-- **App shell** — a persistent left-sidebar menu + content pane. Pick a test; GPU Info opens
-  in-frame, cube tests open in their own window (so the menu stays usable).
-- **GPU / driver report** — an in-frame tabbed **Vulkan / OpenGL** view (device, driver +
-  API version, memory heaps, queue families, features, extensions). Replaces `GPUInfo.exe`.
+- **App shell** — a persistent left-sidebar menu + content pane, **dark-themed throughout**
+  (window, push buttons, checkboxes, panes, and report scrollbars are all custom dark-painted).
+  Pick a test; GPU Info opens in-frame, cube/scene tests open in their own window (so the menu
+  stays usable).
+- **GPU / driver report** — Vulkan and OpenGL shown as **two stacked, independently-scrollable
+  panes** on one page (device, driver + API version, memory heaps, queue families, features,
+  extensions). Replaces `GPUInfo.exe`.
 - **Multi-API renderer** — the same cube through **every** graphics API in the Winlator
   stack, so 5/6/7/8/9/10/11/12 are all covered:
 
@@ -54,8 +60,8 @@ with optional CLI shortcuts:
   > x86 build tests DLLs the x64 build physically can't reach. Use whichever matches the game
   > you're debugging — or run both to compare the two DLL sets.
 
-- **DX11 test suite** — Direct3D 11 is a dozen scenes, each stressing a different part of
-  the pipeline / DXVK:
+- **DX11 test suite** — Direct3D 11 has the deepest coverage: a suite of scenes, each
+  stressing a different part of the pipeline / DXVK:
 
   | Scene | Exercises |
   |---|---|
@@ -72,6 +78,18 @@ with optional CLI shortcuts:
   | Atomics | a histogram built with **`InterlockedAdd`** atomics + clear-UAV + a structured-buffer SRV-in-VS (a correctness probe for the translation layer) |
   | Draw stress (128–2048) | thousands of **individual draw calls** (not instanced) → **CPU/submit-bound**, a different axis from every GPU-bound scene; pick the draw count to map the scaling curve |
 
+- **Demo Scenes** — a gallery of procedural **showcase** scenes (all ray-marched in the D3D11
+  pixel shader, so they double as heavy fragment-ALU stress tests), reached via **Demo Scenes ▸**:
+
+  | Scene | What it renders |
+  |---|---|
+  | **Space** | a photoreal planet from orbit — multi-octave terrain, biomes + ice caps, drifting clouds with shadowing, ocean sun-glint, atmospheric limb scattering, night-side city lights, cratered asteroids, ACES tonemap |
+  | **Cityscape** | a rainy neon night — hashed buildings with a real skyline, lit windows (frames/curtains/occupant silhouettes), neon signs, taxis, rooftop water tanks + AC units, a wet reflective street, animated rain, cinematic grade |
+  | **Desert** | a moonlit dune sea — rolling heightfield dunes, cool moonlight + soft terrain shadows, wind ripples, a craters moon and a star field |
+  | **Detailed Nebula** | volumetric emission/absorption — glowing gas (red → magenta → reflection-blue temperature palette) + dark dust lanes, three embedded stars lighting the gas from within, dithered front-to-back march |
+  | **Ocean v2** | a "Seascape" sea — choppy summed wave octaves, binary-search heightmap trace, Fresnel sky-reflection vs deep-water refraction, subsurface crest glow, sun specular + sun disk |
+  | Showcase · Raymarch SDF · Mandelbulb · Volumetric nebula · Ocean · Cel · Matcap | the original lighter procedural scenes (reflections + soft shadows, a raw SDF march, a fractal, simple volumetrics, toon, chrome matcap) |
+
 - **Native-Vulkan scenes** — beyond the textured cube, the Vulkan backend has a **Phong-lit**
   cube (full ambient + diffuse + specular on the *native* VK path, no DXVK) and a
   **mesh-shader probe** that reports whether the device/driver exposes `VK_EXT_mesh_shader`
@@ -81,8 +99,9 @@ with optional CLI shortcuts:
   + **1%-low** FPS (with a per-frame **CSV**). Min/Max use the 1st/99th percentile so a stray
   sub-frame timing glitch can't produce an absurd reading; a short **warm-up window** is
   excluded so first-frame shader compilation doesn't skew the result.
-  - **Tick what to run** — every test is a checkbox; the dozen D3D11 scenes collapse under one
-    **Direct3D 11** group (and the draw-stress counts under one **Draw Stress** sub-row).
+  - **Tick what to run** — every test is a checkbox (with **Select All / Clear All**); the many
+    D3D11 scenes collapse under one **Direct3D 11** group (and the draw-stress counts under one
+    **Draw Stress** sub-row).
   - **Run Selected** sweeps the ticked tests **sequentially and hands-free** (no GPU
     contention between tests).
   - **Selectable length** — 15 / 30 / 45 / 60 s — and a **Vsync toggle**.
@@ -111,7 +130,7 @@ The menu is the primary interface, but every mode has a flag too:
 | `--cube vk\|gl\|dx7\|dx8\|dx9\|dx10\|dx11\|dx12` | Launch a backend directly in its own window |
 | `--cube ddraw2d` | Launch the pure-2D DirectDraw blit test (`dx7` = the DirectDraw 3D cube) |
 | `--cube vk --scene phong\|meshshader` | Native-VK Phong-lit cube, or the mesh-shader probe |
-| `--cube dx11 --scene spin\|textured\|instanced\|tess\|compute\|dolphin\|raymarch\|gsexplode\|cel\|matcap\|atomics\|drawstress` | Pick a DX11 scene |
+| `--cube dx11 --scene <name>` | Pick a DX11 scene. **Pipeline tests:** `spin` `textured` `instanced` `tess` `compute` `dolphin` `gsexplode` `atomics` `drawstress`. **Showcases:** `space` `city` `desert` `nebula2` `ocean2` `showcase` `raymarch` `ocean` `mandelbulb` `nebula` `cel` `matcap` |
 | `--cube dx11 --scene drawstress --draws <n>` | Draw-stress with N draws (128 / 256 / 512 / 1024 / 2048) |
 | `--bench <sec>` | Run the launched cube as a timed benchmark (avg/min/max/1%-low + CSV) |
 | `--vsync` | Present with vsync (default is uncapped) |
@@ -132,13 +151,13 @@ artifacts. Only `vulkan-1` is statically imported (always present in a container
 
 ```
 src/cube.c            forked vkcube + WinMain dispatch (also the Vulkan backend)
-src/menu.c            app shell: sidebar menu, GPU Info tabs, scene/benchmark/probe views
+src/menu.c            app shell (dark theme): sidebar, stacked GPU Info panes, scene/benchmark/probe views
 src/cube_gl.c         OpenGL backend (WGL)
 src/cube_ddraw.c      DirectDraw / legacy Direct3D backend (DX7 cube + 2D blit)
 src/cube_d3d8.c       Direct3D 8 backend (DXVK d3d8 wrapper)
 src/cube_d3d9.c       Direct3D 9 backend (DXVK)
 src/cube_d3d10.c      Direct3D 10 backend (DXVK)
-src/cube_d3d11.c      Direct3D 11 scene framework + 12 scenes
+src/cube_d3d11.c      Direct3D 11 scene framework + 21 scenes (pipeline tests + procedural showcases)
 src/cube_phong.frag   native-Vulkan Phong fragment shader (--scene phong)
 src/cube_d3d12.c      Direct3D 12 backend (VKD3D-Proton)
 src/gpuinfo.c         GL + VK adapter report
