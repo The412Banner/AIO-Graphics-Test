@@ -1764,13 +1764,12 @@ static const char *kCityHLSL =
     "float sdCyl(float3 p,float h,float r){float2 d=float2(length(p.xz)-r,abs(p.y)-h);return min(max(d.x,d.y),0.0)+length(max(d,0.0));}\n"
     "float2 mapCity(float3 p){float ax=abs(p.x);float2 res=float2(p.y,0.0);\n"  // road = ground
     "  float sw=sdBox(float3(ax-5.4,p.y-0.07,0.0),float3(1.6,0.07,2000.0));if(sw<res.x)res=float2(sw,1.0);\n"  // sidewalk
-    "  float side=(p.x>=0.0)?1.0:-1.0;float L=15.0;float kc=floor(p.z/L+0.5);\n"  // distinct buildings: domain-repeat blocks along z, per side
-    "  [unroll]for(int bi=-1;bi<=1;bi++){float k=kc+float(bi);\n"  // check nearest 3 blocks -> no sliver/seam artifacts
-    "    float sd=h11(k*1.93+side*57.1);float H=11.0+frac(sd*7.0)*30.0;float setb=6.2+frac(sd*13.0)*3.2;float wdep=12.0+frac(sd*5.0)*4.0;\n"  // hashed height/setback/depth
-    "    float zc=k*L;float zh=L*0.5-0.7;float xc=side*(setb+wdep);\n"  // 1.4m alley gap between buildings
-    "    float bw=sdBox(float3(p.x-xc,p.y-H*0.5,p.z-zc),float3(wdep,H*0.5,zh));if(bw<res.x)res=float2(bw,2.0);\n"  // the building box
-    "    if(frac(sd*3.0)>0.45){float tank=sdCyl(float3(p.x-(xc-side*wdep*0.4),p.y-(H+1.3),p.z-(zc+zh*0.4)),1.3,1.5);if(tank<res.x)res=float2(tank,6.0);}\n"  // rooftop water tank (NYC)
-    "    if(frac(sd*9.0)>0.5){float ac=sdBox(float3(p.x-(xc+side*wdep*0.45),p.y-(H+0.5),p.z-(zc-zh*0.4)),float3(0.9,0.5,0.9));if(ac<res.x)res=float2(ac,6.0);}}\n"  // rooftop AC unit
+    "  float side=(p.x>=0.0)?1.0:-1.0;float L=15.0;float k=floor(p.z/L+0.5);\n"  // distinct buildings: domain-repeat blocks along z, per side
+    "  float sd=h11(k*1.93+side*57.1);float H=11.0+frac(sd*7.0)*30.0;float setb=6.2+frac(sd*13.0)*3.2;float wdep=12.0+frac(sd*5.0)*4.0;\n"  // hashed height/setback/depth
+    "  float zc=k*L;float zh=L*0.5;float xc=side*(setb+wdep);\n"  // buildings TOUCH in z (no gap) -> nearest-block is exact, no sliver lines, cheap
+    "  float bw=sdBox(float3(p.x-xc,p.y-H*0.5,p.z-zc),float3(wdep,H*0.5,zh));if(bw<res.x)res=float2(bw,2.0);\n"  // the building box
+    "  if(frac(sd*3.0)>0.45){float tank=sdCyl(float3(p.x-(xc-side*wdep*0.4),p.y-(H+1.3),p.z-(zc+zh*0.35)),1.3,1.5);if(tank<res.x)res=float2(tank,6.0);}\n"  // rooftop water tank (NYC)
+    "  if(frac(sd*9.0)>0.5){float ac=sdBox(float3(p.x-(xc+side*wdep*0.45),p.y-(H+0.5),p.z-(zc-zh*0.35)),float3(0.9,0.5,0.9));if(ac<res.x)res=float2(ac,6.0);}\n"  // rooftop AC unit
     "  float3 lp=float3(ax-5.3,p.y,fmod(p.z+6.0,12.0)-6.0);\n"  // street-lamp repeat every 12m, x=+/-5.3
     "  float pole=sdCyl(lp-float3(0.0,2.5,0.0),2.5,0.07);if(pole<res.x)res=float2(pole,3.0);\n"
     "  float head=length(lp-float3(0.0,5.1,0.0))-0.25;if(head<res.x)res=float2(head,4.0);\n"  // emissive lamp
