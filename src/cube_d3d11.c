@@ -2850,7 +2850,7 @@ static const char kFreeLookHLSL[] =
     "o.pos=float4(p*2.0-1.0,0.0,1.0);o.ndc=o.pos.xy;return o;}\n"
     "static const float3 CA=float3(0.0,0.0,0.0);\n"     // Earth centre
     "static const float RA=200.0;\n"                    // Earth radius (sea level)
-    "static const float3 CB=float3(4000.0,0.0,0.0);\n"  // Mars centre (far out in space)
+    "static const float3 CB=float3(2500.0,0.0,0.0);\n"  // Mars centre (far out in space)
     "static const float RB=150.0;\n"                    // Mars radius
     "#define PMAX 60.0\n"  // bounding-shell margin (>= max terrain height on either)
     "#define CL0 16.0\n"   // Earth cloud shell base altitude
@@ -3005,7 +3005,7 @@ static struct {
 //     kFreeLookHLSL above. Two planets: Earth (kind 0) at origin, Mars (kind 1) at FL_CB.
 #define FL_RA 200.0f
 #define FL_RB 150.0f
-static const float FL_CB[3] = {4000.0f, 0.0f, 0.0f};
+static const float FL_CB[3] = {2500.0f, 0.0f, 0.0f};
 static float fl_fr1(float x) { return x - floorf(x); }
 static float fl_h31(float x, float y, float z) {
     float px = fl_fr1(x * 0.1031f), py = fl_fr1(y * 0.1031f), pz = fl_fr1(z * 0.1031f);
@@ -3062,6 +3062,17 @@ static float fl_terrH(int kind, float x, float y, float z) {
     return h < -38.0f ? -38.0f : (h > 46.0f ? 46.0f : h);
 }
 
+// Rotate unit vector v about unit axis ax by angle (c=cos, s=sin) — Rodrigues.
+static void fl_rot(float *v, const float *ax, float c, float s) {
+    float d = ax[0] * v[0] + ax[1] * v[1] + ax[2] * v[2];
+    float cx = ax[1] * v[2] - ax[2] * v[1];
+    float cy = ax[2] * v[0] - ax[0] * v[2];
+    float cz = ax[0] * v[1] - ax[1] * v[0];
+    v[0] = v[0] * c + cx * s + ax[0] * d * (1.0f - c);
+    v[1] = v[1] * c + cy * s + ax[1] * d * (1.0f - c);
+    v[2] = v[2] * c + cz * s + ax[2] * d * (1.0f - c);
+}
+
 static void freelook_update(double t) {
     // scene->frame() doesn't pass dt, so derive it from the monotonic elapsed t.
     static double last = -1.0;
@@ -3088,20 +3099,32 @@ static void freelook_update(double t) {
     float radUp[3] = {rx0 / er, ry0 / er, rz0 / er};
 
     // Engage radial "gravity" only when near a planet; in deep space hold the current
-    // up so flying between planets is free 6DOF (no snap at the midpoint).
+    // up so flying between planets is free 6DOF (no snap at the midpoint). When it does
+    // engage, rotate the WHOLE frame (up AND heading) by the same rotation so the camera
+    // keeps facing where it was -- re-deriving heading from a ~180-flipped up scrambles it.
     float alt = er - Rn;
     float eng = (260.0f - alt) / (260.0f - 25.0f);
     eng = eng < 0.0f ? 0.0f : (eng > 1.0f ? 1.0f : eng);
     eng = eng * eng * (3.0f - 2.0f * eng);
-    float a = 2.5f * dt * eng;
-    if (a > 1.0f) a = 1.0f;
     float dotur = g_cam_up[0] * radUp[0] + g_cam_up[1] * radUp[1] + g_cam_up[2] * radUp[2];
-    if (a > 0.0f && dotur < -0.9f) {  // nearly antipodal: snap (only when far/rare)
-        g_cam_up[0] = radUp[0]; g_cam_up[1] = radUp[1]; g_cam_up[2] = radUp[2];
-    } else {
-        g_cam_up[0] += (radUp[0] - g_cam_up[0]) * a;
-        g_cam_up[1] += (radUp[1] - g_cam_up[1]) * a;
-        g_cam_up[2] += (radUp[2] - g_cam_up[2]) * a;
+    if (dotur > 1.0f) dotur = 1.0f; else if (dotur < -1.0f) dotur = -1.0f;
+    float ang = acosf(dotur);                 // angle from current up to target up
+    float step = 2.5f * dt * eng;             // how far we turn toward it this frame
+    if (step > ang) step = ang;
+    if (step > 1e-5f) {
+        // rotation axis = current_up x target_up; degenerate (antipodal) -> use heading.
+        float ax[3] = {g_cam_up[1] * radUp[2] - g_cam_up[2] * radUp[1],
+                       g_cam_up[2] * radUp[0] - g_cam_up[0] * radUp[2],
+                       g_cam_up[0] * radUp[1] - g_cam_up[1] * radUp[0]};
+        float axl = sqrtf(ax[0] * ax[0] + ax[1] * ax[1] + ax[2] * ax[2]);
+        if (axl < 1e-5f) { ax[0] = g_cam_head[0]; ax[1] = g_cam_head[1]; ax[2] = g_cam_head[2];
+                           axl = sqrtf(ax[0] * ax[0] + ax[1] * ax[1] + ax[2] * ax[2]); }
+        if (axl > 1e-6f) {
+            ax[0] /= axl; ax[1] /= axl; ax[2] /= axl;
+            float c = cosf(step), s = sinf(step);
+            fl_rot(g_cam_up, ax, c, s);
+            fl_rot(g_cam_head, ax, c, s);  // carry the heading along -> no scramble
+        }
     }
     float ul = sqrtf(g_cam_up[0] * g_cam_up[0] + g_cam_up[1] * g_cam_up[1] + g_cam_up[2] * g_cam_up[2]);
     if (ul < 1e-4f) { g_cam_up[0] = radUp[0]; g_cam_up[1] = radUp[1]; g_cam_up[2] = radUp[2]; ul = 1.0f; }
