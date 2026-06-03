@@ -461,6 +461,7 @@ static const BenchRow kBenchRows[] = {
     {"Ocean", "dx11 --scene ocean", "D3D11 Ocean", 1},
     {"Mandelbulb", "dx11 --scene mandelbulb", "D3D11 Mandelbulb", 1},
     {"Nebula", "dx11 --scene nebula", "D3D11 Nebula", 1},
+    {"Nebula HD", "dx11 --scene nebula2", "D3D11 Nebula (detailed)", 1},
     {"Showcase", "dx11 --scene showcase", "D3D11 Showcase", 1},
     {"Space", "dx11 --scene space", "D3D11 Space", 1},
     {"Desert", "dx11 --scene desert", "D3D11 Desert", 1},
@@ -809,14 +810,16 @@ static void show_dx11_demos(HWND frame) {
 
     static const char *labels[] = {"Raymarch SDF",            "Ocean (raymarched)",
                                    "Mandelbulb fractal",      "Volumetric nebula",
-                                   "Showcase (reflect+shadow)", "Space (planet+asteroids)",
-                                   "Desert (dunes)",          "Cityscape (neon city)",
-                                   "Cel shading (torus)",     "Matcap (chrome ball)"};
+                                   "Detailed Nebula",         "Showcase (reflect+shadow)",
+                                   "Space (planet+asteroids)", "Desert (dunes)",
+                                   "Cityscape (neon city)",   "Cel shading (torus)",
+                                   "Matcap (chrome ball)"};
     static const char *args[] = {"dx11 --scene raymarch",   "dx11 --scene ocean",
                                  "dx11 --scene mandelbulb",  "dx11 --scene nebula",
-                                 "dx11 --scene showcase",    "dx11 --scene space",
-                                 "dx11 --scene desert",      "dx11 --scene city",
-                                 "dx11 --scene cel",         "dx11 --scene matcap"};
+                                 "dx11 --scene nebula2",     "dx11 --scene showcase",
+                                 "dx11 --scene space",       "dx11 --scene desert",
+                                 "dx11 --scene city",        "dx11 --scene cel",
+                                 "dx11 --scene matcap"};
     g_cbtn_n = (int)(sizeof(args) / sizeof(args[0]));
     int y = cr.top + 70;
     const int colw = 220, rowh = 38;

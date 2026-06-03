@@ -1621,6 +1621,61 @@ static int nebula_init(ID3D11Device *d, ID3D11DeviceContext *c, int w, int h) {
 static void nebula_frame(ID3D11DeviceContext *c, double t, float a) { stoy_frame(c, &g_nebula, t, a); }
 static void nebula_cleanup(void) { stoy_cleanup(&g_nebula); }
 
+// ------------------------- DETAILED NEBULA scene ---------------------------
+// Showcase-grade volumetric emission/absorption nebula. Two-component medium:
+// glowing GAS (emits, colored by a temperature field: H-alpha red -> magenta ->
+// reflection blue) and dark DUST (absorbs strongly, no emission -> silhouetted
+// lanes). Three embedded stars light the surrounding gas from within (in-scatter
+// approximation) and bloom through it. Front-to-back march with per-pixel dither
+// to kill banding, a confining shell so empty space is skipped, real background
+// starfield, ACES tonemap. All heavy noise is in the volume march (unavoidable
+// for volumetrics) but octave-budgeted + shell-skipped + transmittance early-out.
+static const char *kNebula2HLSL =
+    AIO_STOY_HEADER
+    "float h13(float3 p){p=frac(p*0.3183099+0.1);p*=17.0;return frac(p.x*p.y*p.z*(p.x+p.y+p.z));}\n"
+    "float h21(float2 p){p=frac(p*float2(127.1,311.7));p+=dot(p,p+34.5);return frac(p.x*p.y);}\n"
+    "float vn3(float3 p){float3 i=floor(p),f=frac(p);f=f*f*(3.0-2.0*f);\n"
+    "  return lerp(lerp(lerp(h13(i),h13(i+float3(1,0,0)),f.x),lerp(h13(i+float3(0,1,0)),h13(i+float3(1,1,0)),f.x),f.y),\n"
+    "              lerp(lerp(h13(i+float3(0,0,1)),h13(i+float3(1,0,1)),f.x),lerp(h13(i+float3(0,1,1)),h13(i+float3(1,1,1)),f.x),f.y),f.z);}\n"
+    "float fbm5(float3 p){float s=0.0,a=0.5;[unroll]for(int i=0;i<5;i++){s+=a*vn3(p);p=p*2.02+0.15;a*=0.5;}return s;}\n"
+    "float fbm3(float3 p){float s=0.0,a=0.5;[unroll]for(int i=0;i<3;i++){s+=a*vn3(p);p=p*2.05+0.27;a*=0.5;}return s;}\n"
+    "float ridged4(float3 p){float s=0.0,a=0.5;[unroll]for(int i=0;i<4;i++){float n=1.0-abs(2.0*vn3(p)-1.0);s+=a*n*n;p=p*2.03+0.21;a*=0.5;}return s;}\n"
+    "float3 starP(int i){if(i==0)return float3(1.8,0.8,-0.5);if(i==1)return float3(-2.1,-0.4,1.0);return float3(0.3,1.6,1.7);}\n"
+    "float3 starC(int i){if(i==0)return float3(1.0,0.55,0.30);if(i==1)return float3(0.45,0.65,1.0);return float3(0.95,0.9,1.0);}\n"
+    "void medium(float3 p,out float gas,out float dust,out float temp){gas=0.0;dust=0.0;temp=0.5;\n"
+    "  float r=length(p);float shell=1.0-smoothstep(2.6,5.8,r);if(shell<=0.0)return;\n"  // confine to a region (skip empty space cheaply)
+    "  float3 q=p+0.22*sin(p.yzx*0.55+iTime*0.04);\n"
+    "  float base=fbm5(q*0.34+float3(0,0,iTime*0.015));temp=base;\n"  // big puffy structure + temperature field
+    "  float fil=ridged4(q*0.72+3.1);\n"  // filaments / wisps
+    "  gas=saturate((base*0.72+fil*0.55)-0.64)*shell*2.5;\n"
+    "  float dn=fbm3(q*0.5+11.0);dust=saturate(dn-0.58)*shell*3.2*smoothstep(0.0,0.25,gas+0.15);}\n"  // dark dust lanes hug the gas
+    "float3 emitCol(float temp){float3 c=lerp(float3(1.0,0.22,0.34),float3(0.66,0.28,0.95),smoothstep(0.30,0.52,temp));\n"  // red -> magenta
+    "  return lerp(c,float3(0.22,0.5,1.0),smoothstep(0.52,0.8,temp));}\n"  // -> reflection blue
+    "float3 starLight(float3 p){float3 L=float3(0,0,0);[unroll]for(int i=0;i<3;i++){float3 d=p-starP(i);L+=starC(i)/(1.0+4.0*dot(d,d));}return L;}\n"  // gas lit from within
+    "float3 bg(float3 rd){float3 col=float3(0.010,0.012,0.022);\n"  // deep space + background starfield
+    "  float3 g=floor(rd*230.0);float hh=h13(g);float st=(hh>0.984)?pow((hh-0.984)/0.016,3.5):0.0;\n"
+    "  col+=st*lerp(float3(0.7,0.8,1.0),float3(1.0,0.82,0.6),h13(g+1.7))*2.2;return col;}\n"
+    "float4 PSMain(VSOut inp):SV_TARGET{float2 uv=inp.ndc;uv.x*=iAspect;\n"
+    "  float ct=iTime*0.045;float3 ro=float3(sin(ct)*1.3,cos(ct*0.7)*0.7,-5.4);\n"  // slow drift around the cloud
+    "  float3 fw=normalize(-ro),rt=normalize(cross(float3(0,1,0),fw)),up=cross(fw,rt);\n"
+    "  float3 rd=normalize(uv.x*rt+uv.y*up+1.7*fw);\n"
+    "  float3 acc=float3(0,0,0);float trans=1.0;\n"
+    "  float jit=h21(uv*float2(813.0,477.0)+frac(iTime*0.7));float t=1.2+jit*0.15;\n"  // dither start -> no slice banding
+    "  [loop]for(int i=0;i<84;i++){float3 p=ro+rd*t;float gas,dust,temp;medium(p,gas,dust,temp);\n"
+    "    if(gas>0.002||dust>0.002){float3 em=(emitCol(temp)*0.42+starLight(p)*1.5)*gas;\n"
+    "      acc+=trans*em*0.16;float ab=gas*0.30+dust*1.2;trans*=exp(-ab*0.15);}\n"  // dust absorbs hard -> dark lanes
+    "    t+=0.15;if(trans<0.015||t>13.0)break;}\n"
+    "  float3 col=bg(rd)*trans+acc;\n"
+    "  [unroll]for(int i=0;i<3;i++){float3 sp=starP(i);float pj=dot(sp-ro,rd);\n"  // embedded stars: core + bloom
+    "    if(pj>0.0){float r=length(ro+rd*pj-sp);col+=starC(i)*(exp(-r*r*10.0)*3.0+exp(-r*7.0)*0.5)*trans;}}\n"
+    "  col*=1.1;col=(col*(2.51*col+0.03))/(col*(2.43*col+0.59)+0.14);col=pow(saturate(col),1.0/2.2);return float4(col,1.0);}\n";  // ACES
+static StoyState g_nebula2;
+static int nebula2_init(ID3D11Device *d, ID3D11DeviceContext *c, int w, int h) {
+    (void)c; (void)w; (void)h; return stoy_init(d, &g_nebula2, kNebula2HLSL);
+}
+static void nebula2_frame(ID3D11DeviceContext *c, double t, float a) { stoy_frame(c, &g_nebula2, t, a); }
+static void nebula2_cleanup(void) { stoy_cleanup(&g_nebula2); }
+
 // ----------------------------- SHOWCASE scene -------------------------------
 // A full lit/shadowed/reflective scene: three animated SDF objects (a bouncing
 // sphere, an orbiting sphere, a spinning rounded box) on a reflective checkered
@@ -2677,6 +2732,7 @@ static const D3D11Scene kScenes[] = {
     {"ocean", "D3D11 Ocean", ocean_init, ocean_frame, ocean_cleanup},
     {"mandelbulb", "D3D11 Mandelbulb", bulb_init, bulb_frame, bulb_cleanup},
     {"nebula", "D3D11 Nebula", nebula_init, nebula_frame, nebula_cleanup},
+    {"nebula2", "D3D11 Nebula (detailed)", nebula2_init, nebula2_frame, nebula2_cleanup},
     {"showcase", "D3D11 Showcase", show_init, show_frame, show_cleanup},
     {"space", "D3D11 Space", space_init, space_frame, space_cleanup},
     {"desert", "D3D11 Desert", desert_init, desert_frame, desert_cleanup},
