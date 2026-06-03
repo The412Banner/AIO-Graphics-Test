@@ -1760,23 +1760,23 @@ static const char *kDesertHLSL =
     "float h21(float2 p){p=frac(p*float2(127.1,311.7));p+=dot(p,p+34.5);return frac(p.x*p.y);}\n"
     "float vn(float2 p){float2 i=floor(p),f=frac(p);f=f*f*(3.0-2.0*f);float a=h21(i),b=h21(i+float2(1,0)),c=h21(i+float2(0,1)),d=h21(i+float2(1,1));return lerp(lerp(a,b,f.x),lerp(c,d,f.x),f.y);}\n"
     "float dunes(float2 p){float h=sin(p.x*0.10+sin(p.y*0.055)*2.3)*1.8;h+=vn(p*0.07)*3.2;h+=vn(p*0.19)*0.9;h+=vn(p*0.46)*0.25;return h;}\n"  // cheap marched heightfield (no fbm-in-march blowup)
-    "float3 moonDir(){return normalize(float3(-0.45,0.38,0.55));}\n"  // moon, a bit higher in the sky
-    "float marchT(float3 ro,float3 rd,out float tt){float lh=1.0,lt=0.1,t=0.1;[loop]for(int i=0;i<200;i++){float3 p=ro+rd*t;float h=p.y-dunes(p.xz);if(h<0.0015*t){tt=lt+lh/(lh-h)*(t-lt);return tt;}lh=h;lt=t;t+=max(0.16,t*0.018);if(t>340.0)break;}tt=t;return -1.0;}\n"  // fixed-stride heightfield walk + linear refine
+    "float3 moonDir(){return normalize(float3(0.25,0.5,1.0));}\n"  // moon ahead + high -> sits in the forward view
+    "float marchT(float3 ro,float3 rd,out float tt){float lh=1.0,lt=0.1,t=0.1;[loop]for(int i=0;i<140;i++){float3 p=ro+rd*t;float h=p.y-dunes(p.xz);if(h<0.002*t){tt=lt+lh/(lh-h)*(t-lt);return tt;}lh=h;lt=t;t+=max(0.25,t*0.02);if(t>320.0)break;}tt=t;return -1.0;}\n"  // fixed-stride heightfield walk + linear refine
     "float3 nrmT(float3 p){float e=0.05+0.0012*length(p.xz);float h=dunes(p.xz);return normalize(float3(h-dunes(p.xz+float2(e,0.0)),e,h-dunes(p.xz+float2(0.0,e))));}\n"
-    "float shT(float3 ro,float3 rd){float res=1.0,t=0.4;[loop]for(int i=0;i<48;i++){float3 p=ro+rd*t;float h=p.y-dunes(p.xz);if(h<0.0015)return 0.0;res=min(res,13.0*h/t);t+=clamp(h,0.4,4.0);if(t>140.0)break;}return saturate(res);}\n"
+    "float shT(float3 ro,float3 rd){float res=1.0,t=0.5;[loop]for(int i=0;i<28;i++){float3 p=ro+rd*t;float h=p.y-dunes(p.xz);if(h<0.002)return 0.0;res=min(res,13.0*h/t);t+=clamp(h,0.6,5.0);if(t>120.0)break;}return saturate(res);}\n"
     "float3 sky(float3 rd,float3 L){float h=saturate(rd.y);float3 zen=float3(0.010,0.020,0.055),hor=float3(0.06,0.09,0.16);\n"  // night gradient
     "  float3 col=lerp(hor,zen,pow(h,0.5));\n"
     "  float3 g=floor(rd*260.0);float hh=h21(g.xy+g.z*1.7);float star=(hh>0.992)?pow((hh-0.992)/0.008,8.0):0.0;\n"  // stars
     "  col+=star*float3(0.9,0.95,1.0)*saturate(rd.y*3.0)*1.7;\n"
-    "  float md=distance(normalize(rd),L);float crat=0.72+0.28*vn(rd.xy*55.0+5.0);\n"  // moon (at light dir) + craters
-    "  col=lerp(col,float3(0.93,0.94,0.88)*crat,smoothstep(0.072,0.060,md));\n"  // moon disc
-    "  col+=float3(0.5,0.6,0.85)*smoothstep(0.30,0.06,md)*0.5;return col;}\n"  // soft moon halo
+    "  float md=distance(normalize(rd),L);float crat=0.80+0.20*vn(rd.xy*40.0+5.0);\n"  // moon (at light dir) + craters
+    "  col=lerp(col,float3(1.0,0.98,0.92)*crat,smoothstep(0.15,0.135,md));\n"  // big bright moon disc
+    "  col+=float3(0.6,0.7,0.95)*smoothstep(0.5,0.135,md)*0.7;return col;}\n"  // soft moon halo
     "float3 sandCol(float3 p,float3 n,float3 rd,float3 L){\n"
     "  float rip=sin((p.x*0.7+p.z*0.35)*3.0+vn(p.xz*0.5)*5.0);n=normalize(n+float3(rip,0.0,rip*0.4)*0.05);\n"  // wind ripples (normal-only)
     "  float dif=saturate(dot(n,L));float sh=shT(p+n*0.12,L);\n"
-    "  float3 alb=lerp(float3(0.60,0.56,0.49),float3(0.72,0.66,0.55),vn(p.xz*0.04));alb*=0.92+0.08*vn(p.xz*1.8);\n"  // cooler/darker sand at night
-    "  float3 amb=float3(0.05,0.07,0.13);float3 moonlit=float3(0.55,0.66,1.0);\n"  // dim night-sky fill + cool moonlight
-    "  float3 col=alb*(amb+1.0*dif*sh*moonlit);\n"
+    "  float3 alb=lerp(float3(0.34,0.30,0.24),float3(0.44,0.39,0.31),vn(p.xz*0.04));alb*=0.92+0.08*vn(p.xz*1.8);\n"  // muted moonlit SAND (was reading as snow)
+    "  float3 amb=float3(0.05,0.07,0.13);float3 moonlit=float3(0.5,0.58,0.82);\n"  // dim night-sky fill + cool (not white) moonlight
+    "  float3 col=alb*(amb+0.95*dif*sh*moonlit);\n"
     "  float3 H=normalize(L-rd);col+=moonlit*pow(saturate(dot(n,H)),24.0)*sh*0.18;\n"  // cool sheen
     "  col+=float3(0.4,0.5,0.8)*pow(1.0-saturate(dot(n,-rd)),4.0)*0.10;return col;}\n"  // cool grazing rim
     "float4 PSMain(VSOut inp):SV_TARGET{float2 uv=inp.ndc;uv.x*=iAspect;float3 L=moonDir();\n"
@@ -1788,7 +1788,7 @@ static const char *kDesertHLSL =
     "  if(t>0.0){float3 p=ro+rd*tt;float3 n=nrmT(p);col=sandCol(p,n,rd,L);\n"
     "    float fog=1.0-exp(-tt*0.0055);col=lerp(col,sky(rd,L),fog);}\n"  // aerial haze
     "  else col=sky(rd,L);\n"
-    "  col*=1.08;col=(col*(2.51*col+0.03))/(col*(2.43*col+0.59)+0.14);col=pow(saturate(col),1.0/2.2);return float4(col,1.0);}\n";  // ACES
+    "  col*=0.95;col=(col*(2.51*col+0.03))/(col*(2.43*col+0.59)+0.14);col=pow(saturate(col),1.0/2.2);return float4(col,1.0);}\n";  // ACES
 static StoyState g_desert;
 static int desert_init(ID3D11Device *d, ID3D11DeviceContext *c, int w, int h) {
     (void)c; (void)w; (void)h; return stoy_init(d, &g_desert, kDesertHLSL);

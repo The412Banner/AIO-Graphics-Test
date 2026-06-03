@@ -58,6 +58,7 @@ static HFONT g_mono_font;
 static HBRUSH g_br_bg;
 static HBRUSH g_br_ctl;
 static WNDPROC g_btn_oldproc;  // saved system BUTTON proc (buttons are subclassed for dark paint)
+static WNDPROC g_tab_oldproc;  // saved system tab proc (tab strip subclassed for dark background)
 
 // Content views.
 static HWND g_tab;       // GPU Info tab control
@@ -306,6 +307,18 @@ static HWND make_report_edit(HWND frame, const RECT *r, const char *text) {
     return e;
 }
 
+// Dark tab strip: fill the control background (the band behind the tabs) dark;
+// the tab buttons themselves are owner-drawn in WM_DRAWITEM.
+static LRESULT CALLBACK tab_subproc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    if (m == WM_ERASEBKGND) {
+        RECT rc;
+        GetClientRect(h, &rc);
+        FillRect((HDC)w, &rc, g_br_bg);
+        return 1;
+    }
+    return CallWindowProcA(g_tab_oldproc, h, m, w, l);
+}
+
 static void show_gpuinfo(HWND frame) {
     destroy_content();
     SetWindowTextA(g_header, "GPU Info  (Vulkan / OpenGL)");
@@ -313,10 +326,11 @@ static void show_gpuinfo(HWND frame) {
     RECT cr;
     get_content_rect(frame, &cr);
 
-    g_tab = CreateWindowA(WC_TABCONTROLA, "", WS_CHILD | WS_VISIBLE, cr.left, cr.top,
-                          cr.right - cr.left, cr.bottom - cr.top, frame, (HMENU)(INT_PTR)ID_TAB,
-                          g_hinst, NULL);
+    g_tab = CreateWindowA(WC_TABCONTROLA, "", WS_CHILD | WS_VISIBLE | TCS_OWNERDRAWFIXED, cr.left,
+                          cr.top, cr.right - cr.left, cr.bottom - cr.top, frame,
+                          (HMENU)(INT_PTR)ID_TAB, g_hinst, NULL);
     if (g_ui_font) SendMessage(g_tab, WM_SETFONT, (WPARAM)g_ui_font, TRUE);
+    g_tab_oldproc = (WNDPROC)SetWindowLongPtrA(g_tab, GWLP_WNDPROC, (LONG_PTR)tab_subproc);
 
     TCITEMA ti;
     memset(&ti, 0, sizeof(ti));
@@ -1365,6 +1379,27 @@ static LRESULT CALLBACK shell_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             SetTextColor(hdc, DARK_TEXT);
             SetBkColor(hdc, DARK_CTL);
             return (LRESULT)g_br_ctl;
+        }
+        case WM_DRAWITEM: {
+            LPDRAWITEMSTRUCT d = (LPDRAWITEMSTRUCT)lParam;
+            if (d->hwndItem == g_tab) {  // dark-paint each owner-drawn tab button
+                int sel = (d->itemState & ODS_SELECTED) != 0;
+                FillRect(d->hDC, &d->rcItem, sel ? g_br_ctl : g_br_bg);
+                char buf[40];
+                TCITEMA ti;
+                memset(&ti, 0, sizeof(ti));
+                ti.mask = TCIF_TEXT;
+                ti.pszText = buf;
+                ti.cchTextMax = (int)sizeof(buf);
+                SendMessageA(g_tab, TCM_GETITEMA, d->itemID, (LPARAM)&ti);
+                HFONT of = g_ui_font ? (HFONT)SelectObject(d->hDC, g_ui_font) : NULL;
+                SetBkMode(d->hDC, TRANSPARENT);
+                SetTextColor(d->hDC, sel ? DARK_TEXT : DARK_DIM);
+                DrawTextA(d->hDC, buf, -1, &d->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                if (of) SelectObject(d->hDC, of);
+                return TRUE;
+            }
+            break;
         }
         case WM_SIZE:
             layout_content(hwnd);
