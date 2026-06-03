@@ -1647,8 +1647,8 @@ static const char *kNebula2HLSL =
     "  float3 q=p+0.22*sin(p.yzx*0.55+iTime*0.04);\n"
     "  float base=fbm5(q*0.34+float3(0,0,iTime*0.015));temp=base;\n"  // big puffy structure + temperature field
     "  float fil=ridged4(q*0.72+3.1);\n"  // filaments / wisps
-    "  gas=saturate((base*0.72+fil*0.55)-0.64)*shell*2.5;\n"
-    "  float dn=fbm3(q*0.5+11.0);dust=saturate(dn-0.58)*shell*3.2*smoothstep(0.0,0.25,gas+0.15);}\n"  // dark dust lanes hug the gas
+    "  float g=(base*0.60+fil*0.74)-0.62;gas=pow(saturate(g),1.35)*shell*3.0;\n"  // ridged filaments + contrast curve
+    "  float dn=fbm3(q*0.55+11.0);dust=saturate(dn-0.50)*shell*4.2*smoothstep(0.0,0.30,gas+0.1);}\n"  // stronger / more dust lanes
     "float3 emitCol(float temp){float3 c=lerp(float3(1.0,0.22,0.34),float3(0.66,0.28,0.95),smoothstep(0.30,0.52,temp));\n"  // red -> magenta
     "  return lerp(c,float3(0.22,0.5,1.0),smoothstep(0.52,0.8,temp));}\n"  // -> reflection blue
     "float3 starLight(float3 p){float3 L=float3(0,0,0);[unroll]for(int i=0;i<3;i++){float3 d=p-starP(i);L+=starC(i)/(1.0+4.0*dot(d,d));}return L;}\n"  // gas lit from within
@@ -1662,8 +1662,13 @@ static const char *kNebula2HLSL =
     "  float3 acc=float3(0,0,0);float trans=1.0;\n"
     "  float jit=h21(uv*float2(813.0,477.0)+frac(iTime*0.7));float t=1.2+jit*0.15;\n"  // dither start -> no slice banding
     "  [loop]for(int i=0;i<84;i++){float3 p=ro+rd*t;float gas,dust,temp;medium(p,gas,dust,temp);\n"
-    "    if(gas>0.002||dust>0.002){float3 em=(emitCol(temp)*0.42+starLight(p)*1.5)*gas;\n"
-    "      acc+=trans*em*0.16;float ab=gas*0.30+dust*1.2;trans*=exp(-ab*0.15);}\n"  // dust absorbs hard -> dark lanes
+    "    if(gas>0.002||dust>0.002){float3 lit=starLight(p);\n"
+    "      float core=saturate(gas*0.55+dot(lit,float3(0.5,0.5,0.5))*1.3);\n"  // dense + star-lit = hot core
+    "      float3 c=lerp(float3(0.26,0.5,1.0),float3(1.0,0.40,0.72),smoothstep(0.16,0.5,core));\n"  // blue edge -> pink
+    "      c=lerp(c,float3(1.0,0.42,0.26),smoothstep(0.5,0.9,core));\n"  // -> hot red/orange core (H-alpha)
+    "      c*=0.7+0.5*temp;\n"  // patch-to-patch variation
+    "      float3 em=(c*0.6+lit*1.3)*gas*(1.0-saturate(dust*0.5));\n"  // dust carves dark lanes out of the glow
+    "      acc+=trans*em*0.16;float ab=gas*0.28+dust*1.7;trans*=exp(-ab*0.15);}\n"  // dust absorbs hard
     "    t+=0.15;if(trans<0.015||t>13.0)break;}\n"
     "  float3 col=bg(rd)*trans+acc;\n"
     "  [unroll]for(int i=0;i<3;i++){float3 sp=starP(i);float pj=dot(sp-ro,rd);\n"  // embedded stars: core + bloom
