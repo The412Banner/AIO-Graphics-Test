@@ -1637,9 +1637,9 @@ static const char *kNebula2HLSL =
     "float vn3(float3 p){float3 i=floor(p),f=frac(p);f=f*f*(3.0-2.0*f);\n"
     "  return lerp(lerp(lerp(h13(i),h13(i+float3(1,0,0)),f.x),lerp(h13(i+float3(0,1,0)),h13(i+float3(1,1,0)),f.x),f.y),\n"
     "              lerp(lerp(h13(i+float3(0,0,1)),h13(i+float3(1,0,1)),f.x),lerp(h13(i+float3(0,1,1)),h13(i+float3(1,1,1)),f.x),f.y),f.z);}\n"
-    "float fbm5(float3 p){float s=0.0,a=0.5;[unroll]for(int i=0;i<5;i++){s+=a*vn3(p);p=p*2.02+0.15;a*=0.5;}return s;}\n"
+    "float fbm5(float3 p){float s=0.0,a=0.5;[unroll]for(int i=0;i<4;i++){s+=a*vn3(p);p=p*2.02+0.15;a*=0.5;}return s;}\n"
     "float fbm3(float3 p){float s=0.0,a=0.5;[unroll]for(int i=0;i<3;i++){s+=a*vn3(p);p=p*2.05+0.27;a*=0.5;}return s;}\n"
-    "float ridged4(float3 p){float s=0.0,a=0.5;[unroll]for(int i=0;i<4;i++){float n=1.0-abs(2.0*vn3(p)-1.0);s+=a*n*n;p=p*2.03+0.21;a*=0.5;}return s;}\n"
+    "float ridged4(float3 p){float s=0.0,a=0.5;[unroll]for(int i=0;i<3;i++){float n=1.0-abs(2.0*vn3(p)-1.0);s+=a*n*n;p=p*2.03+0.21;a*=0.5;}return s;}\n"
     "float3 starP(int i){if(i==0)return float3(1.8,0.8,-0.5);if(i==1)return float3(-2.1,-0.4,1.0);return float3(0.3,1.6,1.7);}\n"
     "float3 starC(int i){if(i==0)return float3(1.0,0.55,0.30);if(i==1)return float3(0.45,0.65,1.0);return float3(0.95,0.9,1.0);}\n"
     "void medium(float3 p,out float gas,out float dust,out float temp){gas=0.0;dust=0.0;temp=0.5;\n"
@@ -1660,16 +1660,16 @@ static const char *kNebula2HLSL =
     "  float3 fw=normalize(-ro),rt=normalize(cross(float3(0,1,0),fw)),up=cross(fw,rt);\n"
     "  float3 rd=normalize(uv.x*rt+uv.y*up+1.7*fw);\n"
     "  float3 acc=float3(0,0,0);float trans=1.0;\n"
-    "  float jit=h21(uv*float2(813.0,477.0)+frac(iTime*0.7));float t=1.2+jit*0.15;\n"  // dither start -> no slice banding
-    "  [loop]for(int i=0;i<84;i++){float3 p=ro+rd*t;float gas,dust,temp;medium(p,gas,dust,temp);\n"
+    "  float jit=h21(uv*float2(813.0,477.0)+frac(iTime*0.7));float t=1.2+jit*0.2;\n"  // dither start -> no slice banding
+    "  [loop]for(int i=0;i<62;i++){float3 p=ro+rd*t;float gas,dust,temp;medium(p,gas,dust,temp);\n"
     "    if(gas>0.002||dust>0.002){float3 lit=starLight(p);\n"
     "      float core=saturate(gas*0.55+dot(lit,float3(0.5,0.5,0.5))*1.3);\n"  // dense + star-lit = hot core
     "      float3 c=lerp(float3(0.26,0.5,1.0),float3(1.0,0.40,0.72),smoothstep(0.16,0.5,core));\n"  // blue edge -> pink
     "      c=lerp(c,float3(1.0,0.42,0.26),smoothstep(0.5,0.9,core));\n"  // -> hot red/orange core (H-alpha)
     "      c*=0.7+0.5*temp;\n"  // patch-to-patch variation
     "      float3 em=(c*0.6+lit*1.3)*gas*(1.0-saturate(dust*0.5));\n"  // dust carves dark lanes out of the glow
-    "      acc+=trans*em*0.16;float ab=gas*0.28+dust*1.7;trans*=exp(-ab*0.15);}\n"  // dust absorbs hard
-    "    t+=0.15;if(trans<0.015||t>13.0)break;}\n"
+    "      acc+=trans*em*0.21;float ab=gas*0.28+dust*1.7;trans*=exp(-ab*0.205);}\n"  // dust absorbs hard (per-step scaled)
+    "    t+=0.205;if(trans<0.02||t>13.5)break;}\n"
     "  float3 col=bg(rd)*trans+acc;\n"
     "  [unroll]for(int i=0;i<3;i++){float3 sp=starP(i);float pj=dot(sp-ro,rd);\n"  // embedded stars: core + bloom
     "    if(pj>0.0){float r=length(ro+rd*pj-sp);col+=starC(i)*(exp(-r*r*10.0)*3.0+exp(-r*7.0)*0.5)*trans;}}\n"
