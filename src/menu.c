@@ -58,13 +58,14 @@ static HFONT g_mono_font;
 static HBRUSH g_br_bg;
 static HBRUSH g_br_ctl;
 static WNDPROC g_btn_oldproc;  // saved system BUTTON proc (buttons are subclassed for dark paint)
-static WNDPROC g_tab_oldproc;  // saved system tab proc (tab strip subclassed for dark background)
 static WNDPROC g_edit_oldproc;  // saved system EDIT proc (report edits subclassed for a dark scrollbar)
 
 // Content views.
-static HWND g_tab;       // GPU Info tab control
-static HWND g_edit_vk;   // GPU Info: Vulkan tab text
-static HWND g_edit_gl;   // GPU Info: OpenGL tab text
+static HWND g_tab;       // (unused — GPU Info is now two stacked panes, no tabs)
+static HWND g_cap_vk;    // GPU Info: "Vulkan" caption (top pane)
+static HWND g_cap_gl;    // GPU Info: "OpenGL" caption (bottom pane)
+static HWND g_edit_vk;   // GPU Info: Vulkan report (top, scrollable)
+static HWND g_edit_gl;   // GPU Info: OpenGL report (bottom, scrollable)
 static HWND g_placeholder;
 
 #define ID_CB_FIRST 3000  // content-area buttons (Benchmark + scene-picker views)
@@ -144,6 +145,8 @@ static void get_content_rect(HWND frame, RECT *out) {
 static void destroy_content(void) {
     if (g_edit_vk) { DestroyWindow(g_edit_vk); g_edit_vk = NULL; }
     if (g_edit_gl) { DestroyWindow(g_edit_gl); g_edit_gl = NULL; }
+    if (g_cap_vk) { DestroyWindow(g_cap_vk); g_cap_vk = NULL; }
+    if (g_cap_gl) { DestroyWindow(g_cap_gl); g_cap_gl = NULL; }
     if (g_tab) { DestroyWindow(g_tab); g_tab = NULL; }
     if (g_placeholder) { DestroyWindow(g_placeholder); g_placeholder = NULL; }
     if (g_verdict) { DestroyWindow(g_verdict); g_verdict = NULL; }
@@ -382,16 +385,19 @@ static HWND make_report_edit(HWND frame, const RECT *r, const char *text) {
     return e;
 }
 
-// Dark tab strip: fill the control background (the band behind the tabs) dark;
-// the tab buttons themselves are owner-drawn in WM_DRAWITEM.
-static LRESULT CALLBACK tab_subproc(HWND h, UINT m, WPARAM w, LPARAM l) {
-    if (m == WM_ERASEBKGND) {
-        RECT rc;
-        GetClientRect(h, &rc);
-        FillRect((HDC)w, &rc, g_br_bg);
-        return 1;
-    }
-    return CallWindowProcA(g_tab_oldproc, h, m, w, l);
+// GPU Info layout: two stacked panes (Vulkan on top, OpenGL below), each a
+// caption + an independently-scrollable report edit, split 50/50. No tabs.
+static void layout_gpuinfo(const RECT *cr) {
+    if (!g_edit_vk || !g_edit_gl) return;
+    int x = cr->left, w = cr->right - cr->left, H = cr->bottom - cr->top;
+    int capH = 22, gap = 8;
+    int editH = (H - 2 * capH - gap) / 2;
+    if (editH < 40) editH = 40;
+    int y = cr->top;
+    MoveWindow(g_cap_vk, x, y, w, capH, TRUE);   y += capH;
+    MoveWindow(g_edit_vk, x, y, w, editH, TRUE); y += editH + gap;
+    MoveWindow(g_cap_gl, x, y, w, capH, TRUE);   y += capH;
+    MoveWindow(g_edit_gl, x, y, w, editH, TRUE);
 }
 
 static void show_gpuinfo(HWND frame) {
@@ -401,33 +407,23 @@ static void show_gpuinfo(HWND frame) {
     RECT cr;
     get_content_rect(frame, &cr);
 
-    g_tab = CreateWindowA(WC_TABCONTROLA, "", WS_CHILD | WS_VISIBLE | TCS_OWNERDRAWFIXED, cr.left,
-                          cr.top, cr.right - cr.left, cr.bottom - cr.top, frame,
-                          (HMENU)(INT_PTR)ID_TAB, g_hinst, NULL);
-    if (g_ui_font) SendMessage(g_tab, WM_SETFONT, (WPARAM)g_ui_font, TRUE);
-    g_tab_oldproc = (WNDPROC)SetWindowLongPtrA(g_tab, GWLP_WNDPROC, (LONG_PTR)tab_subproc);
-
-    TCITEMA ti;
-    memset(&ti, 0, sizeof(ti));
-    ti.mask = TCIF_TEXT;
-    ti.pszText = (char *)"Vulkan";
-    SendMessage(g_tab, TCM_INSERTITEMA, 0, (LPARAM)&ti);
-    ti.pszText = (char *)"OpenGL";
-    SendMessage(g_tab, TCM_INSERTITEMA, 1, (LPARAM)&ti);
-
-    RECT dr = cr;
-    SendMessage(g_tab, TCM_ADJUSTRECT, FALSE, (LPARAM)&dr);
+    g_cap_vk = CreateWindowA("STATIC", "Vulkan", WS_CHILD | WS_VISIBLE | SS_LEFT, 0, 0, 10, 10,
+                             frame, NULL, g_hinst, NULL);
+    g_cap_gl = CreateWindowA("STATIC", "OpenGL", WS_CHILD | WS_VISIBLE | SS_LEFT, 0, 0, 10, 10,
+                             frame, NULL, g_hinst, NULL);
+    if (g_ui_font_bold) {
+        SendMessage(g_cap_vk, WM_SETFONT, (WPARAM)g_ui_font_bold, TRUE);
+        SendMessage(g_cap_gl, WM_SETFONT, (WPARAM)g_ui_font_bold, TRUE);
+    }
 
     char *vk = aio_gpuinfo_build_vk_text();
     char *gl = aio_gpuinfo_build_gl_text();
-    g_edit_vk = make_report_edit(frame, &dr, vk ? vk : "(no Vulkan data)");
-    g_edit_gl = make_report_edit(frame, &dr, gl ? gl : "(no OpenGL data)");
+    g_edit_vk = make_report_edit(frame, &cr, vk ? vk : "(no Vulkan data)");
+    g_edit_gl = make_report_edit(frame, &cr, gl ? gl : "(no OpenGL data)");
     if (vk) free(vk);
     if (gl) free(gl);
 
-    // Vulkan tab selected first.
-    ShowWindow(g_edit_vk, SW_SHOW);
-    ShowWindow(g_edit_gl, SW_HIDE);
+    layout_gpuinfo(&cr);  // both panes visible + stacked
 }
 
 static void show_placeholder(HWND frame, const char *title, const char *msg) {
@@ -972,13 +968,7 @@ static void layout_content(HWND frame) {
     RECT hr;
     GetClientRect(frame, &hr);
     MoveWindow(g_header, SB_W + 10, 8, hr.right - (SB_W + 10) - 10, HEADER_H - 4, TRUE);
-    if (g_tab) {
-        MoveWindow(g_tab, cr.left, cr.top, cr.right - cr.left, cr.bottom - cr.top, TRUE);
-        RECT dr = cr;
-        SendMessage(g_tab, TCM_ADJUSTRECT, FALSE, (LPARAM)&dr);
-        if (g_edit_vk) MoveWindow(g_edit_vk, dr.left, dr.top, dr.right - dr.left, dr.bottom - dr.top, TRUE);
-        if (g_edit_gl) MoveWindow(g_edit_gl, dr.left, dr.top, dr.right - dr.left, dr.bottom - dr.top, TRUE);
-    }
+    if (g_edit_vk) layout_gpuinfo(&cr);
     if (g_placeholder)
         MoveWindow(g_placeholder, cr.left, cr.top, cr.right - cr.left, cr.bottom - cr.top, TRUE);
 }
@@ -1372,18 +1362,6 @@ static LRESULT CALLBACK shell_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             if (idx >= 0 && idx < NITEMS) on_select(hwnd, g_items[idx].action);
             return 0;
         }
-        case WM_NOTIFY: {
-            LPNMHDR nh = (LPNMHDR)lParam;
-            if (g_tab && nh->hwndFrom == g_tab && nh->code == TCN_SELCHANGE) {
-                int sel = (int)SendMessage(g_tab, TCM_GETCURSEL, 0, 0);
-                ShowWindow(g_edit_vk, sel == 0 ? SW_SHOW : SW_HIDE);
-                ShowWindow(g_edit_gl, sel == 1 ? SW_SHOW : SW_HIDE);
-                HWND vis = sel == 0 ? g_edit_vk : g_edit_gl;
-                RedrawWindow(vis, NULL, NULL, RDW_FRAME | RDW_INVALIDATE | RDW_UPDATENOW);
-                paint_dark_vscroll(vis);  // draw scrollbar now (don't wait for a hover to repaint)
-            }
-            return 0;
-        }
         case WM_TIMER: {
             // Poll running benchmark processes; when one exits, show its result.
             for (int i = 0; i < g_cbtn_n; i++) {
@@ -1472,27 +1450,6 @@ static LRESULT CALLBACK shell_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             SetTextColor(hdc, DARK_TEXT);
             SetBkColor(hdc, DARK_CTL);
             return (LRESULT)g_br_ctl;
-        }
-        case WM_DRAWITEM: {
-            LPDRAWITEMSTRUCT d = (LPDRAWITEMSTRUCT)lParam;
-            if (d->hwndItem == g_tab) {  // dark-paint each owner-drawn tab button
-                int sel = (d->itemState & ODS_SELECTED) != 0;
-                FillRect(d->hDC, &d->rcItem, sel ? g_br_ctl : g_br_bg);
-                char buf[40];
-                TCITEMA ti;
-                memset(&ti, 0, sizeof(ti));
-                ti.mask = TCIF_TEXT;
-                ti.pszText = buf;
-                ti.cchTextMax = (int)sizeof(buf);
-                SendMessageA(g_tab, TCM_GETITEMA, d->itemID, (LPARAM)&ti);
-                HFONT of = g_ui_font ? (HFONT)SelectObject(d->hDC, g_ui_font) : NULL;
-                SetBkMode(d->hDC, TRANSPARENT);
-                SetTextColor(d->hDC, sel ? DARK_TEXT : DARK_DIM);
-                DrawTextA(d->hDC, buf, -1, &d->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-                if (of) SelectObject(d->hDC, of);
-                return TRUE;
-            }
-            break;
         }
         case WM_SIZE:
             layout_content(hwnd);
