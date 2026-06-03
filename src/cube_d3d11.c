@@ -1784,7 +1784,10 @@ static const char *kCityHLSL =
     "float3 nrmCity(float3 p){float2 e=float2(0.008,0.0);return normalize(float3(mapCity(p+e.xyy).x-mapCity(p-e.xyy).x,mapCity(p+e.yxy).x-mapCity(p-e.yxy).x,mapCity(p+e.yyx).x-mapCity(p-e.yyx).x));}\n"
     "float marchCity(float3 ro,float3 rd,out float mid){float t=0.02;mid=-1.0;[loop]for(int i=0;i<180;i++){float2 r=mapCity(ro+rd*t);if(r.x<0.003*t+0.0018){mid=r.y;return t;}t+=r.x*0.92;if(t>160.0)break;}return -1.0;}\n"
     "float3 lampP(float3 p){float k=floor((p.z+6.0)/12.0+0.5);return float3((p.x>0.0?1.0:-1.0)*5.3,5.1,12.0*k-6.0);}\n"
-    "float shad(float3 ro,float3 rd,float mx){float res=1.0,t=0.06;[loop]for(int i=0;i<22;i++){float h=mapCity(ro+rd*t).x;if(h<0.003)return 0.0;res=min(res,12.0*h/t);t+=clamp(h,0.06,0.5);if(t>mx)break;}return saturate(res);}\n"
+    "float mapOcc(float3 p){float side=(p.x>=0.0)?1.0:-1.0;float L=15.0;float k=floor(p.z/L+0.5);\n"  // shadow occluders ONLY: buildings + ground (no lamp/taxi/props -> no ringing at the light, faster)
+    "  float sd=h11(k*1.93+side*57.1);float H=11.0+frac(sd*7.0)*30.0;float setb=6.2+frac(sd*13.0)*3.2;float wdep=12.0+frac(sd*5.0)*4.0;\n"
+    "  float bw=sdBox(float3(p.x-side*(setb+wdep),p.y-H*0.5,p.z-k*L),float3(wdep,H*0.5,L*0.5));return min(p.y,bw);}\n"
+    "float shad(float3 ro,float3 rd,float mx){float res=1.0,t=0.12;[loop]for(int i=0;i<20;i++){float h=mapOcc(ro+rd*t);if(h<0.004)return 0.0;res=min(res,11.0*h/t);t+=clamp(h,0.1,0.6);if(t>mx)break;}return saturate(res);}\n"
     "float3 cityShade(float3 p,float3 n,float3 rd,float mid){\n"
     "  if(mid>3.5&&mid<4.5)return float3(1.0,0.78,0.48)*8.0;\n"  // lamp head emissive
     "  float3 amb=float3(0.018,0.022,0.038);\n"
