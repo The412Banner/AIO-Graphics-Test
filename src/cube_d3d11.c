@@ -2881,38 +2881,13 @@ static const char kFreeLookHLSL[] =
     "  float3 d=q/max(r,1e-4);float gap=r-R;\n"
     "  int fo=gap<10.0?5:(gap<60.0?4:3);int ro=gap<10.0?4:(gap<60.0?3:2);\n"
     "  float h=terrH(kind,d,fo,ro);if(kind==0)h=max(h,0.0);return r-(R+h);}\n"
-    // --- asteroid belt between the planets (tube around the Earth->Mars axis) ---
-    "float3 ah(float3 p){p=frac(p*float3(0.1031,0.1107,0.1063));p+=dot(p,p.yxz+33.33);\n"
-    "  return frac((p.xxy+p.yzz)*p.zyx);}\n"
-    // centre of asteroid i: scattered along x in [860,1640], biased toward the axis.
-    "float3 astC(int i){float fi=float(i);float3 h=ah(float3(fi*1.3+2.0,fi*2.7+5.0,fi*0.7+9.0));\n"
-    "  float x=lerp(860.0,1640.0,h.x);float ang=h.y*6.2831853;float rr=h.z*h.z*260.0;\n"
-    "  return float3(x,sin(ang)*rr,cos(ang)*rr);}\n"
-    // SDF to the belt: cheap box distance when far (asteroids live inside the box, so it
-    // is a valid lower bound -> the marcher approaches without overshooting); the 24 lumpy
-    // ellipsoids are only evaluated within 30 units of the box.
-    "float astSDF(float3 p){float3 q=abs(p-float3(1250.0,0.0,0.0))-float3(450.0,300.0,300.0);\n"
-    "  float boxd=length(max(q,0.0))+min(max(q.x,max(q.y,q.z)),0.0);\n"
-    "  if(boxd>30.0) return boxd;\n"
-    "  float dmin=1e9;\n"
-    "  [loop]for(int i=0;i<24;i++){float3 c=astC(i);\n"
-    "    float3 h2=ah(float3(float(i)*5.0+1.0,float(i)*3.0+7.0,float(i)*11.0+2.0));\n"
-    "    float rad=lerp(7.0,22.0,h2.x);float3 sc=1.0+(h2-0.5)*0.6;\n"
-    "    float3 rp=(p-c)/sc;float d=(length(rp)-rad)*min(sc.x,min(sc.y,sc.z));\n"
-    "    dmin=min(dmin,d);}\n"
-    "  return dmin;}\n"
-    "float mapP(float3 p){float d=min(mapPl(0,CA,RA,p),mapPl(1,CB,RB,p));return min(d,astSDF(p));}\n"
+    "float mapP(float3 p){return min(mapPl(0,CA,RA,p),mapPl(1,CB,RB,p));}\n"
     "float3 nrm(float3 p){float2 k=float2(1.0,-1.0);float e=0.06;\n"
     "  return normalize(k.xyy*mapP(p+k.xyy*e)+k.yyx*mapP(p+k.yyx*e)+\n"
     "                   k.yxy*mapP(p+k.yxy*e)+k.xxx*mapP(p+k.xxx*e));}\n"
     // ray vs sphere (pass ro already relative to the centre); miss returns y<0.
     "float2 iSph(float3 ro,float3 rd,float ra){float b=dot(ro,rd);float c=dot(ro,ro)-ra*ra;\n"
     "  float h=b*b-c;if(h<0.0)return float2(1.0,-1.0);h=sqrt(h);return float2(-b-h,-b+h);}\n"
-    // ray vs axis-aligned box (centre bc, half-extents bh) -> (tnear,tfar); miss y<0.
-    "float2 iBox(float3 ro,float3 rd,float3 bc,float3 bh){float3 m=1.0/rd;float3 n=m*(ro-bc);\n"
-    "  float3 k=abs(m)*bh;float3 t1=-n-k,t2=-n+k;\n"
-    "  float tn=max(max(t1.x,t1.y),t1.z),tf=min(min(t2.x,t2.y),t2.z);\n"
-    "  if(tn>tf||tf<0.0)return float2(1.0,-1.0);return float2(tn,tf);}\n"
     "float starf(float3 rd){\n"
     "  float2 a=float2(atan2(rd.z,rd.x)*0.1591,acos(clamp(rd.y,-1.0,1.0))*0.3183);\n"
     "  float2 uv=a*float2(220.0,150.0);float2 id=floor(uv),f=frac(uv);\n"
@@ -2972,26 +2947,15 @@ static const char kFreeLookHLSL[] =
     "  float alt=length(ro-nC)-nR;float sp=smoothstep(40.0,240.0,alt);\n"
     // march inside whichever bounding shells the ray crosses; gap between is skipped fast.
     "  float2 bA=iSph(ro-CA,rd,RA+PMAX);float2 bB=iSph(ro-CB,rd,RB+PMAX);\n"
-    "  float2 bx=iBox(ro,rd,float3(1250.0,0.0,0.0),float3(450.0,300.0,300.0));\n"
     "  float t0=1e9,te=-1.0;\n"
     "  if(bA.y>0.0){t0=min(t0,max(bA.x,0.0));te=max(te,bA.y);}\n"
     "  if(bB.y>0.0){t0=min(t0,max(bB.x,0.0));te=max(te,bB.y);}\n"
-    "  if(bx.y>0.0){t0=min(t0,max(bx.x,0.0));te=max(te,bx.y);}\n"
     "  float hit=-1.0;\n"
     "  if(te>0.0){float t=t0;\n"
     "    [loop] for(int s=0;s<160;s++){float3 p=ro+rd*t;float d=mapP(p);\n"
     "      if(d<0.0015*t+0.02){hit=t;break;}t+=max(d*0.62,0.4);if(t>te)break;}}\n"
     "  float3 col;float tmax;\n"
     "  if(hit>0.0){float3 p=ro+rd*hit;\n"
-    // asteroid or planet? (whichever surface is nearer at the hit point)
-    "    float plD=min(mapPl(0,CA,RA,p),mapPl(1,CB,RB,p));float astD=astSDF(p);\n"
-    "    if(astD<plD){float3 an=nrm(p);\n"                  // asteroid: sunlit rock, no atmosphere
-    "      float3 hh=ah(floor(p*0.05));\n"
-    "      float3 base=lerp(float3(0.34,0.30,0.26),float3(0.20,0.17,0.15),hh.x);\n"
-    "      base*=0.65+0.5*fbm3(p*0.25,3);\n"
-    "      float diff=saturate(dot(an,sun))+0.05;\n"
-    "      col=base*(diff*float3(1.0,0.95,0.88)+0.04);tmax=hit;\n"
-    "    }else{\n"
     // which planet did we hit?
     "    float sdA=length(p-CA)-RA,sdB=length(p-CB)-RB;\n"
     "    int hk;float3 hC;float hR;if(sdB<sdA){hk=1;hC=CB;hR=RB;}else{hk=0;hC=CA;hR=RA;}\n"
@@ -3020,7 +2984,7 @@ static const char kFreeLookHLSL[] =
     "      alb=lerp(alb,float3(0.92,0.92,0.96),smoothstep(0.80,0.90,lat));\n"  // CO2 ice caps
     "      col=alb*(diff*float3(1.0,0.92,0.82)+amb);}\n"
     "    float fk=(hk==0)?1.0:0.45;\n"  // Mars: thinner aerial haze
-    "    float fog=(1.0-sp)*saturate(hit/1600.0)*fk;col=lerp(col,sky,fog);tmax=hit;}\n"
+    "    float fog=(1.0-sp)*saturate(hit/1600.0)*fk;col=lerp(col,sky,fog);tmax=hit;\n"
     "  }else{col=skyc(nk,nC,ro,rd,sun,sp);tmax=6000.0;\n"
     "    col+=rimGlow(ro,rd,CA,RA,sun,float3(0.30,0.55,1.0),46.0,1.5,sp);\n"   // Earth rim
     "    col+=rimGlow(ro,rd,CB,RB,sun,float3(0.75,0.42,0.26),22.0,0.7,sp);}\n" // Mars rim
