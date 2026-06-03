@@ -2829,30 +2829,45 @@ typedef struct {
     float pad;
 } FreeCB;
 
+// Free Look is a true *curved planet*: terrain is a height field displaced onto a
+// sphere of radius PR centred at the origin, so flying straight up curves the
+// horizon and eventually shows the whole globe from orbit (seamless, one world --
+// no flat-plane / skybox swap). Sea level == PR; land rises above, ocean below.
 static const char kFreeLookHLSL[] =
     "cbuffer CB:register(b0){float3 eye;float yaw;float pitch;float aspect;float iTime;float pad;}\n"
     "struct VSOut{float4 pos:SV_POSITION;float2 ndc:TEXCOORD0;};\n"
     "VSOut VSMain(uint vid:SV_VertexID){VSOut o;float2 p=float2((vid<<1)&2,vid&2);"
     "o.pos=float4(p*2.0-1.0,0.0,1.0);o.ndc=o.pos.xy;return o;}\n"
-    "#define SEA 0.0\n"
-    "#define CL0 55.0\n"
-    "#define CL1 92.0\n"
+    "#define PR 200.0\n"   // planet radius == sea level
+    "#define PMAX 60.0\n"  // bounding-shell margin above sea (>= max terrain height)
+    "#define CL0 16.0\n"   // cloud shell base altitude above sea
+    "#define CL1 30.0\n"   // cloud shell top altitude above sea
     "float h21(float2 p){p=frac(p*float2(123.34,456.21));p+=dot(p,p+45.32);return frac(p.x*p.y);}\n"
     "float h31(float3 p){p=frac(p*0.1031);p+=dot(p,p.yzx+33.33);return frac((p.x+p.y)*p.z);}\n"
-    "float n2(float2 p){float2 i=floor(p),f=frac(p);float2 u=f*f*(3.0-2.0*f);\n"
-    "  float a=h21(i),b=h21(i+float2(1,0)),c=h21(i+float2(0,1)),d=h21(i+float2(1,1));\n"
-    "  return lerp(lerp(a,b,u.x),lerp(c,d,u.x),u.y);}\n"
     "float n3(float3 p){float3 i=floor(p),f=frac(p);f=f*f*(3.0-2.0*f);float2 e=float2(0,1);\n"
     "  float x00=lerp(h31(i+e.xxx),h31(i+e.yxx),f.x),x10=lerp(h31(i+e.xyx),h31(i+e.yyx),f.x);\n"
     "  float x01=lerp(h31(i+e.xxy),h31(i+e.yxy),f.x),x11=lerp(h31(i+e.xyy),h31(i+e.yyy),f.x);\n"
     "  return lerp(lerp(x00,x10,f.y),lerp(x01,x11,f.y),f.z);}\n"
-    "float fbm2(float2 p){float s=0.0,a=0.5;float2x2 m=float2x2(1.6,1.2,-1.2,1.6);\n"
-    "  [unroll] for(int i=0;i<5;i++){s+=a*n2(p);p=mul(m,p);a*=0.5;}return s;}\n"
-    "float rdg(float2 p){float s=0.0,a=0.5;float2x2 m=float2x2(1.6,1.2,-1.2,1.6);\n"
-    "  [unroll] for(int i=0;i<3;i++){float v=1.0-abs(n2(p)*2.0-1.0);s+=a*v*v;p=mul(m,p);a*=0.5;}return s;}\n"
     "float fbm3(float3 p){float s=0.0,a=0.5;\n"
-    "  [unroll] for(int i=0;i<4;i++){s+=a*n3(p);p*=2.03;a*=0.5;}return s;}\n"
-    "float terr(float2 p){return fbm2(p*0.045)*20.0+rdg(p*0.03)*14.0-7.0;}\n"
+    "  [unroll] for(int i=0;i<5;i++){s+=a*n3(p);p*=2.03;a*=0.5;}return s;}\n"
+    "float rdg3(float3 p){float s=0.0,a=0.5;\n"
+    "  [unroll] for(int i=0;i<4;i++){float v=1.0-abs(n3(p)*2.0-1.0);s+=a*v*v;p*=2.04;a*=0.5;}return s;}\n"
+    // terrain height (in world units) as a function of a unit direction on the sphere.
+    // continents from low-freq fbm; ridged mountains added only on land.
+    "float terrH(float3 d){float cont=fbm3(d*2.1);\n"
+    "  float land=smoothstep(0.59,0.66,cont);\n"
+    "  float base=(cont-0.60)*70.0;\n"
+    "  float m=rdg3(d*4.6+9.0);float mt=m*m*30.0*land;\n"
+    "  return clamp(base+mt,-44.0,58.0);}\n"
+    // SDF: distance to the displaced surface (water fills to sea level PR).
+    "float mapP(float3 p){float r=length(p);float3 d=p/max(r,1e-4);\n"
+    "  float h=max(terrH(d),0.0);return r-(PR+h);}\n"
+    "float3 nrm(float3 p){float2 k=float2(1.0,-1.0);float e=0.06;\n"
+    "  return normalize(k.xyy*mapP(p+k.xyy*e)+k.yyx*mapP(p+k.yyx*e)+\n"
+    "                   k.yxy*mapP(p+k.yxy*e)+k.xxx*mapP(p+k.xxx*e));}\n"
+    // ray vs sphere centred at origin -> (tnear,tfar); miss returns y<0.
+    "float2 iSph(float3 ro,float3 rd,float ra){float b=dot(ro,rd);float c=dot(ro,ro)-ra*ra;\n"
+    "  float h=b*b-c;if(h<0.0)return float2(1.0,-1.0);h=sqrt(h);return float2(-b-h,-b+h);}\n"
     "float starf(float3 rd){\n"
     "  float2 a=float2(atan2(rd.z,rd.x)*0.1591,acos(clamp(rd.y,-1.0,1.0))*0.3183);\n"
     "  float2 uv=a*float2(220.0,150.0);float2 id=floor(uv),f=frac(uv);\n"
@@ -2861,31 +2876,35 @@ static const char kFreeLookHLSL[] =
     "  float d=length(f-c);float s=smoothstep(0.16,0.0,d);\n"
     "  float tw=0.65+0.35*sin(iTime*2.5+pr*43.0);\n"
     "  return s*(0.55+0.6*pr)*tw;}\n"
-    "float3 skyc(float3 rd,float3 sun,float sp){\n"
-    "  float3 day=lerp(float3(0.55,0.72,0.97),float3(0.10,0.26,0.60),saturate(rd.y));\n"
-    "  day=lerp(day,float3(0.85,0.89,0.96),pow(1.0-saturate(abs(rd.y)),8.0)*(1.0-sp));\n"
-    "  float3 col=lerp(day,float3(0.008,0.01,0.025),sp);\n"
+    // sky uses the *local* up (radial) so the horizon gradient stays correct anywhere
+    // on the globe; sp = spaceness (0 in atmosphere, 1 in orbit).
+    "float3 skyc(float3 ro,float3 rd,float3 sun,float sp){\n"
+    "  float3 up=normalize(ro);float upd=dot(rd,up);\n"
+    "  float3 day=lerp(float3(0.55,0.72,0.97),float3(0.10,0.26,0.60),saturate(upd));\n"
+    "  day=lerp(day,float3(0.85,0.89,0.96),pow(1.0-saturate(abs(upd)),8.0)*(1.0-sp));\n"
+    "  float3 col=lerp(day,float3(0.006,0.008,0.02),sp);\n"
     "  col+=starf(rd)*sp*1.3;\n"
     "  float s=saturate(dot(rd,sun));\n"
-    "  col+=pow(s,3000.0)*float3(1.0,0.97,0.9)*4.0;\n"
+    "  col+=pow(s,3000.0)*float3(1.0,0.97,0.9)*5.0;\n"
     "  col+=pow(s,120.0)*float3(1.0,0.8,0.55)*(1.0-sp*0.7);\n"
     "  return col;}\n"
-    "float cden(float3 p,float tm){float3 q=p*0.016+float3(tm*0.02,0.0,tm*0.013);\n"
-    "  float d=fbm3(q);float hb=saturate((p.y-CL0)/(CL1-CL0));\n"
-    "  float shp=smoothstep(0.0,0.3,hb)*smoothstep(1.0,0.65,hb);\n"
-    "  return saturate(d-0.5)*shp*2.2;}\n"
+    // volumetric cloud shell (radial band CL0..CL1 above sea); fly into and through it.
+    "float cden(float3 p,float tm){float r=length(p);float alt=r-PR;float3 d=p/max(r,1e-4);\n"
+    "  float3 q=d*7.0+float3(tm*0.012,tm*0.008,0.0);float dd=fbm3(q);\n"
+    "  float hb=saturate((alt-CL0)/(CL1-CL0));\n"
+    "  float shp=smoothstep(0.0,0.3,hb)*smoothstep(1.0,0.6,hb);\n"
+    "  return saturate(dd-0.52)*shp*2.4;}\n"
     "float3 clouds(float3 ro,float3 rd,float tmax,float3 sun,float3 bg,float sp,float tm){\n"
-    "  if(abs(rd.y)<1e-4 && (ro.y<CL0||ro.y>CL1)) return bg;\n"
-    "  float ta=(CL0-ro.y)/rd.y,tb=(CL1-ro.y)/rd.y;\n"
-    "  float t0=max(min(ta,tb),0.0),t1=min(max(ta,tb),tmax);\n"
-    "  if(abs(rd.y)<1e-4){t0=0.0;t1=min(tmax,700.0);}\n"
+    "  float2 so=iSph(ro,rd,PR+CL1+2.0);\n"
+    "  if(so.y<0.0) return bg;\n"
+    "  float t0=max(so.x,0.0),t1=min(so.y,tmax);t1=min(t1,t0+800.0);\n"
     "  if(t1<=t0) return bg;\n"
-    "  t1=min(t1,t0+700.0);float dt=(t1-t0)/18.0;float T=1.0;float3 acc=float3(0,0,0);\n"
-    "  [loop] for(int i=0;i<18;i++){float t=t0+(float(i)+0.5)*dt;float3 p=ro+rd*t;\n"
+    "  float dt=(t1-t0)/20.0;float T=1.0;float3 acc=float3(0,0,0);\n"
+    "  [loop] for(int i=0;i<20;i++){float t=t0+(float(i)+0.5)*dt;float3 p=ro+rd*t;\n"
     "    float den=cden(p,tm);\n"
-    "    if(den>0.01){float ls=cden(p+sun*7.0,tm);float lit=saturate(den-ls)*1.6+0.3;\n"
-    "      float3 c=lerp(float3(0.42,0.47,0.58),float3(1.0,1.0,1.02),lit)*(1.0-sp*0.5);\n"
-    "      float a=saturate(den*dt*0.22);acc+=T*a*c;T*=(1.0-a);if(T<0.02)break;}}\n"
+    "    if(den>0.01){float ls=cden(p+sun*5.0,tm);float lit=saturate(den-ls)*1.6+0.3;\n"
+    "      float3 c=lerp(float3(0.42,0.47,0.58),float3(1.0,1.0,1.02),lit)*(1.0-sp*0.4);\n"
+    "      float a=saturate(den*dt*0.25);acc+=T*a*c;T*=(1.0-a);if(T<0.02)break;}}\n"
     "  return bg*T+acc;}\n"
     "float4 PSMain(VSOut i):SV_Target{\n"
     "  float cp=cos(pitch),spp=sin(pitch),cy=cos(yaw),sy=sin(yaw);\n"
@@ -2896,31 +2915,38 @@ static const char kFreeLookHLSL[] =
     "  float3 rd=normalize(fwd+uv.x*rgt*0.72+uv.y*upv*0.72);\n"
     "  float3 ro=eye;float tm=iTime;\n"
     "  float3 sun=normalize(float3(-0.45,0.5,0.4));\n"
-    "  float sp=smoothstep(120.0,340.0,ro.y);\n"
-    "  float t=0.4,hit=-1.0;bool can=!(rd.y>0.0 && ro.y>42.0);\n"
-    "  if(can){[loop] for(int s=0;s<150;s++){float3 p=ro+rd*t;\n"
-    "    float sf=max(terr(p.xz),SEA);float d=p.y-sf;\n"
-    "    if(d<0.003*t+0.02){hit=t;break;}t+=max(d*0.5,0.5);if(t>3000.0)break;}}\n"
+    "  float alt=length(ro)-PR;\n"
+    "  float sp=smoothstep(40.0,240.0,alt);\n"
+    // march only inside the planet's bounding shell -> rays to space exit cheaply.
+    "  float2 bs=iSph(ro,rd,PR+PMAX);\n"
+    "  float hit=-1.0;\n"
+    "  if(bs.y>0.0){float t=max(bs.x,0.0),te=bs.y;\n"
+    "    [loop] for(int s=0;s<170;s++){float3 p=ro+rd*t;float d=mapP(p);\n"
+    "      if(d<0.0015*t+0.02){hit=t;break;}t+=max(d*0.6,0.4);if(t>te)break;}}\n"
     "  float3 col;float tmax;\n"
-    "  if(hit>0.0){float3 p=ro+rd*hit;float e=0.6;\n"
-    "    float hl=max(terr(p.xz-float2(e,0)),SEA),hr=max(terr(p.xz+float2(e,0)),SEA);\n"
-    "    float hb=max(terr(p.xz-float2(0,e)),SEA),hf=max(terr(p.xz+float2(0,e)),SEA);\n"
-    "    float3 n=normalize(float3(hl-hr,2.0*e,hb-hf));float realh=terr(p.xz);\n"
-    "    float3 sky=skyc(rd,sun,sp);\n"
-    "    if(realh<SEA-0.05){float3 wn=float3(0,1,0);\n"
+    "  if(hit>0.0){float3 p=ro+rd*hit;float3 d=normalize(p);float3 n=nrm(p);\n"
+    "    float realh=terrH(d);float3 sky=skyc(ro,rd,sun,sp);\n"
+    "    if(realh<0.05){float3 wn=d;\n"
     "      float fr=pow(1.0-saturate(dot(-rd,wn)),4.0);\n"
-    "      float3 rfl=skyc(reflect(rd,wn),sun,sp);\n"
+    "      float3 rfl=skyc(ro,reflect(rd,wn),sun,sp);\n"
     "      col=lerp(float3(0.02,0.08,0.13),rfl,0.35+0.65*fr);\n"
     "      col+=pow(saturate(dot(reflect(rd,wn),sun)),250.0)*1.6;\n"
     "    }else{float diff=saturate(dot(n,sun))*0.9+0.12;\n"
-    "      float3 amb=float3(0.35,0.45,0.6)*0.35;float slope=saturate(1.0-n.y);\n"
+    "      float3 amb=float3(0.35,0.45,0.6)*0.35;float slope=saturate(1.0-dot(n,d));\n"
+    "      float lat=abs(d.y);\n"
     "      float3 grass=float3(0.17,0.38,0.14),rock=float3(0.33,0.29,0.25),snow=float3(0.95,0.97,1.0),sand=float3(0.74,0.68,0.47);\n"
-    "      float3 alb=grass;alb=lerp(alb,sand,smoothstep(0.6,0.0,realh));\n"
-    "      alb=lerp(alb,rock,smoothstep(0.32,0.6,slope));\n"
-    "      alb=lerp(alb,snow,smoothstep(13.0,21.0,realh)*saturate(1.0-slope*1.3));\n"
+    "      float3 alb=grass;alb=lerp(alb,sand,smoothstep(2.5,0.0,realh));\n"
+    "      alb=lerp(alb,rock,smoothstep(0.30,0.6,slope));\n"
+    "      alb=lerp(alb,snow,smoothstep(30.0,40.0,realh)*saturate(1.0-slope*1.3));\n"
+    "      alb=lerp(alb,snow,smoothstep(0.82,0.92,lat));\n"
     "      col=alb*(diff*float3(1.0,0.96,0.9)+amb);}\n"
-    "    float fog=1.0-exp(-hit*hit*(1.6e-7+sp*1.2e-6));col=lerp(col,sky,fog);tmax=hit;\n"
-    "  }else{col=skyc(rd,sun,sp);tmax=4000.0;}\n"
+    "    float fog=(1.0-sp)*saturate(hit/1600.0);col=lerp(col,sky,fog);tmax=hit;\n"
+    "  }else{col=skyc(ro,rd,sun,sp);tmax=6000.0;\n"
+    // blue atmosphere rim hugging the limb, visible from orbit.
+    "    float tc=-dot(ro,rd);float3 cp2=ro+rd*max(tc,0.0);float cd=length(cp2);\n"
+    "    float rim=smoothstep(PR+46.0,PR+2.0,cd)*smoothstep(PR-4.0,PR+8.0,cd);\n"
+    "    float lit=saturate(dot(normalize(cp2),sun)*0.6+0.45);\n"
+    "    col+=float3(0.30,0.55,1.0)*rim*lit*1.5*saturate(sp+0.2);}\n"
     "  col=clouds(ro,rd,tmax,sun,col,sp,tm);\n"
     "  col=pow(saturate(col),1.0/2.2);\n"
     "  return float4(col,1.0);\n"
@@ -2932,6 +2958,56 @@ static struct {
     ID3D11Buffer *cbo;
     ID3D11RasterizerState *rs;
 } g_free;
+
+// --- CPU mirror of the shader's terrain height, used only for camera collision so
+//     we ride just above the real ground (sea level == FL_PR). Keep in sync with
+//     terrH / mapP in kFreeLookHLSL above.
+#define FL_PR 200.0f
+static float fl_fr1(float x) { return x - floorf(x); }
+static float fl_h31(float x, float y, float z) {
+    float px = fl_fr1(x * 0.1031f), py = fl_fr1(y * 0.1031f), pz = fl_fr1(z * 0.1031f);
+    float d = px * (py + 33.33f) + py * (pz + 33.33f) + pz * (px + 33.33f);
+    px += d; py += d; pz += d;
+    return fl_fr1((px + py) * pz);
+}
+static float fl_n3(float x, float y, float z) {
+    float ix = floorf(x), iy = floorf(y), iz = floorf(z);
+    float fx = x - ix, fy = y - iy, fz = z - iz;
+    fx = fx * fx * (3.0f - 2.0f * fx);
+    fy = fy * fy * (3.0f - 2.0f * fy);
+    fz = fz * fz * (3.0f - 2.0f * fz);
+    float x00 = fl_h31(ix, iy, iz) + (fl_h31(ix + 1, iy, iz) - fl_h31(ix, iy, iz)) * fx;
+    float x10 = fl_h31(ix, iy + 1, iz) + (fl_h31(ix + 1, iy + 1, iz) - fl_h31(ix, iy + 1, iz)) * fx;
+    float x01 = fl_h31(ix, iy, iz + 1) + (fl_h31(ix + 1, iy, iz + 1) - fl_h31(ix, iy, iz + 1)) * fx;
+    float x11 = fl_h31(ix, iy + 1, iz + 1) + (fl_h31(ix + 1, iy + 1, iz + 1) - fl_h31(ix, iy + 1, iz + 1)) * fx;
+    float y0 = x00 + (x10 - x00) * fy, y1 = x01 + (x11 - x01) * fy;
+    return y0 + (y1 - y0) * fz;
+}
+static float fl_fbm3(float x, float y, float z) {
+    float s = 0.0f, a = 0.5f;
+    for (int i = 0; i < 5; i++) { s += a * fl_n3(x, y, z); x *= 2.03f; y *= 2.03f; z *= 2.03f; a *= 0.5f; }
+    return s;
+}
+static float fl_rdg3(float x, float y, float z) {
+    float s = 0.0f, a = 0.5f;
+    for (int i = 0; i < 4; i++) {
+        float v = 1.0f - fabsf(fl_n3(x, y, z) * 2.0f - 1.0f);
+        s += a * v * v; x *= 2.04f; y *= 2.04f; z *= 2.04f; a *= 0.5f;
+    }
+    return s;
+}
+// terrain height for a unit direction (x,y,z); mirrors terrH() in the shader.
+static float fl_terrH(float x, float y, float z) {
+    float cont = fl_fbm3(x * 2.1f, y * 2.1f, z * 2.1f);
+    float land = (cont - 0.59f) / (0.66f - 0.59f);
+    land = land < 0.0f ? 0.0f : (land > 1.0f ? 1.0f : land);
+    land = land * land * (3.0f - 2.0f * land);
+    float base = (cont - 0.60f) * 70.0f;
+    float m = fl_rdg3(x * 4.6f + 9.0f, y * 4.6f + 9.0f, z * 4.6f + 9.0f);
+    float mt = m * m * 30.0f * land;
+    float h = base + mt;
+    return h < -44.0f ? -44.0f : (h > 58.0f ? 58.0f : h);
+}
 
 static void freelook_update(double t) {
     // scene->frame() doesn't pass dt, so derive it from the monotonic elapsed t.
@@ -2997,15 +3073,33 @@ static void freelook_update(double t) {
         g_cam_eye[0] -= rx * spd;
         g_cam_eye[2] -= rz * spd;
     }
-    if (g_keys['E'] || g_keys[VK_SPACE]) g_cam_eye[1] += spd;
-    if (g_keys['Q'] || g_keys[VK_CONTROL]) g_cam_eye[1] -= spd;
+    // Ascend / descend are radial (away from / toward the planet centre at origin)
+    // so they feel right anywhere on the globe.
+    float er = sqrtf(g_cam_eye[0] * g_cam_eye[0] + g_cam_eye[1] * g_cam_eye[1] +
+                     g_cam_eye[2] * g_cam_eye[2]);
+    float ux = g_cam_eye[0] / er, uy = g_cam_eye[1] / er, uz = g_cam_eye[2] / er;
+    if (g_keys['E'] || g_keys[VK_SPACE]) {
+        g_cam_eye[0] += ux * spd; g_cam_eye[1] += uy * spd; g_cam_eye[2] += uz * spd;
+    }
+    if (g_keys['Q'] || g_keys[VK_CONTROL]) {
+        g_cam_eye[0] -= ux * spd; g_cam_eye[1] -= uy * spd; g_cam_eye[2] -= uz * spd;
+    }
     // Continuous SkyFly-style forward cruise (on by default; F toggles it).
     if (g_autofwd) {
         g_cam_eye[0] += fwd[0] * spd;
         g_cam_eye[1] += fwd[1] * spd;
         g_cam_eye[2] += fwd[2] * spd;
     }
-    if (g_cam_eye[1] < 0.5f) g_cam_eye[1] = 0.5f;  // soft floor so we don't dive far underground
+    // Soft floor: stay just above the actual displaced surface (sea or mountains).
+    er = sqrtf(g_cam_eye[0] * g_cam_eye[0] + g_cam_eye[1] * g_cam_eye[1] +
+               g_cam_eye[2] * g_cam_eye[2]);
+    ux = g_cam_eye[0] / er; uy = g_cam_eye[1] / er; uz = g_cam_eye[2] / er;
+    float gh = fl_terrH(ux, uy, uz);
+    if (gh < 0.0f) gh = 0.0f;  // water surface sits at sea level
+    float minr = FL_PR + gh + 1.6f;
+    if (er < minr) {
+        g_cam_eye[0] = ux * minr; g_cam_eye[1] = uy * minr; g_cam_eye[2] = uz * minr;
+    }
 }
 
 static int freelook_init(ID3D11Device *dev, ID3D11DeviceContext *ctx, int w, int h) {
@@ -3038,11 +3132,28 @@ static int freelook_init(ID3D11Device *dev, ID3D11DeviceContext *ctx, int w, int
     ID3D11Device_CreateRasterizerState(dev, &rd, &g_free.rs);
 
     // Reset the camera + input to a known state and arm the wndproc input path.
-    g_cam_eye[0] = 0.0f;
-    g_cam_eye[1] = 8.0f;
-    g_cam_eye[2] = 0.0f;
-    g_cam_yaw = 1.5707963f;
-    g_cam_pitch = -0.12f;
+    // Start standing on the globe's surface at a scenic spot, looking along the
+    // terrain toward the horizon.
+    {
+        float dx = 0.743f, dy = 0.210f, dz = 0.635f;
+        float dl = sqrtf(dx * dx + dy * dy + dz * dz);
+        dx /= dl; dy /= dl; dz /= dl;
+        float gh = fl_terrH(dx, dy, dz);
+        if (gh < 0.0f) gh = 0.0f;
+        float sr = FL_PR + gh + 6.0f;
+        g_cam_eye[0] = dx * sr;
+        g_cam_eye[1] = dy * sr;
+        g_cam_eye[2] = dz * sr;
+        // forward = a surface tangent, tilted slightly down toward the ground.
+        float tx = dz, ty = 0.0f, tz = -dx;  // cross(up,(0,1,0)) direction
+        float tl = sqrtf(tx * tx + tz * tz);
+        tx /= tl; tz /= tl;
+        float fx = tx - dx * 0.30f, fy = ty - dy * 0.30f, fz = tz - dz * 0.30f;
+        float fld = sqrtf(fx * fx + fy * fy + fz * fz);
+        fx /= fld; fy /= fld; fz /= fld;
+        g_cam_yaw = atan2f(fz, fx);
+        g_cam_pitch = asinf(fy);
+    }
     g_cam_speed = 22.0f;
     g_autofwd = 1;
     g_mousesteer = 1;
