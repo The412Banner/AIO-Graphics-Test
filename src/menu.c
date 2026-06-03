@@ -359,9 +359,10 @@ static void paint_dark_vscroll(HWND e) {
 
 static LRESULT CALLBACK edit_subproc(HWND e, UINT m, WPARAM w, LPARAM l) {
     if (m == WM_NCPAINT || m == WM_VSCROLL || m == WM_MOUSEWHEEL || m == WM_KEYUP ||
-        m == WM_LBUTTONUP) {
+        m == WM_LBUTTONUP || m == WM_NCMOUSEMOVE || m == WM_NCLBUTTONDOWN ||
+        m == WM_NCLBUTTONUP || m == WM_NCMOUSELEAVE) {
         LRESULT r = CallWindowProcA(g_edit_oldproc, e, m, w, l);
-        paint_dark_vscroll(e);  // overpaint the system scrollbar dark after it updates
+        paint_dark_vscroll(e);  // overpaint the system scrollbar dark after it (re)draws on hover/drag
         return r;
     }
     return CallWindowProcA(g_edit_oldproc, e, m, w, l);
@@ -1442,6 +1443,14 @@ static LRESULT CALLBACK shell_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         case WM_CTLCOLORBTN: {
             HWND ctl = (HWND)lParam;
             HDC hdc = (HDC)wParam;
+            // Read-only multiline EDITs report via WM_CTLCOLORSTATIC; they need an
+            // OPAQUE bg or selecting/scrolling text leaves it invisible.
+            if (msg == WM_CTLCOLORSTATIC && (ctl == g_edit_vk || ctl == g_edit_gl)) {
+                SetTextColor(hdc, DARK_TEXT);
+                SetBkColor(hdc, DARK_CTL);
+                SetBkMode(hdc, OPAQUE);
+                return (LRESULT)g_br_ctl;
+            }
             COLORREF txt = DARK_TEXT;
             if (ctl == g_foot_heart) txt = RGB(214, 69, 79);
             else if (ctl == g_foot_a || ctl == g_foot_b || ctl == g_version) txt = DARK_DIM;
