@@ -1764,17 +1764,23 @@ static const char *kCityHLSL =
     "float sdCyl(float3 p,float h,float r){float2 d=float2(length(p.xz)-r,abs(p.y)-h);return min(max(d.x,d.y),0.0)+length(max(d,0.0));}\n"
     "float2 mapCity(float3 p){float ax=abs(p.x);float2 res=float2(p.y,0.0);\n"  // road = ground
     "  float sw=sdBox(float3(ax-5.4,p.y-0.07,0.0),float3(1.6,0.07,2000.0));if(sw<res.x)res=float2(sw,1.0);\n"  // sidewalk
-    "  float side=(p.x>=0.0)?1.0:-1.0;float L=15.0;float k=floor(p.z/L+0.5);\n"  // distinct buildings: domain-repeat blocks along z, per side
-    "  float sd=h11(k*1.93+side*57.1);float H=11.0+frac(sd*7.0)*30.0;float setb=6.2+frac(sd*13.0)*3.2;float wdep=12.0+frac(sd*5.0)*4.0;\n"  // hashed height/setback/depth
-    "  float zc=k*L;float zh=L*0.5-0.7;float xc=side*(setb+wdep);\n"  // 1.4m alley gap between buildings
-    "  float bw=sdBox(float3(p.x-xc,p.y-H*0.5,p.z-zc),float3(wdep,H*0.5,zh));if(bw<res.x)res=float2(bw,2.0);\n"  // the building box
-    "  if(frac(sd*3.0)>0.45){float tank=sdCyl(float3(p.x-(xc-side*wdep*0.4),p.y-(H+1.3),p.z-(zc+zh*0.4)),1.3,1.5);if(tank<res.x)res=float2(tank,6.0);}\n"  // rooftop water tank (NYC)
-    "  if(frac(sd*9.0)>0.5){float ac=sdBox(float3(p.x-(xc+side*wdep*0.45),p.y-(H+0.5),p.z-(zc-zh*0.4)),float3(0.9,0.5,0.9));if(ac<res.x)res=float2(ac,6.0);}\n"  // rooftop AC unit
+    "  float side=(p.x>=0.0)?1.0:-1.0;float L=15.0;float kc=floor(p.z/L+0.5);\n"  // distinct buildings: domain-repeat blocks along z, per side
+    "  [unroll]for(int bi=-1;bi<=1;bi++){float k=kc+float(bi);\n"  // check nearest 3 blocks -> no sliver/seam artifacts
+    "    float sd=h11(k*1.93+side*57.1);float H=11.0+frac(sd*7.0)*30.0;float setb=6.2+frac(sd*13.0)*3.2;float wdep=12.0+frac(sd*5.0)*4.0;\n"  // hashed height/setback/depth
+    "    float zc=k*L;float zh=L*0.5-0.7;float xc=side*(setb+wdep);\n"  // 1.4m alley gap between buildings
+    "    float bw=sdBox(float3(p.x-xc,p.y-H*0.5,p.z-zc),float3(wdep,H*0.5,zh));if(bw<res.x)res=float2(bw,2.0);\n"  // the building box
+    "    if(frac(sd*3.0)>0.45){float tank=sdCyl(float3(p.x-(xc-side*wdep*0.4),p.y-(H+1.3),p.z-(zc+zh*0.4)),1.3,1.5);if(tank<res.x)res=float2(tank,6.0);}\n"  // rooftop water tank (NYC)
+    "    if(frac(sd*9.0)>0.5){float ac=sdBox(float3(p.x-(xc+side*wdep*0.45),p.y-(H+0.5),p.z-(zc-zh*0.4)),float3(0.9,0.5,0.9));if(ac<res.x)res=float2(ac,6.0);}}\n"  // rooftop AC unit
     "  float3 lp=float3(ax-5.3,p.y,fmod(p.z+6.0,12.0)-6.0);\n"  // street-lamp repeat every 12m, x=+/-5.3
     "  float pole=sdCyl(lp-float3(0.0,2.5,0.0),2.5,0.07);if(pole<res.x)res=float2(pole,3.0);\n"
     "  float head=length(lp-float3(0.0,5.1,0.0))-0.25;if(head<res.x)res=float2(head,4.0);\n"  // emissive lamp
-    "  float lane=(p.x>0.0?1.0:-1.0);float3 cq=float3(ax-2.1,p.y-0.52,fmod(p.z-iTime*6.0+lane*8.0,16.0)-8.0);\n"  // yellow taxis (both lanes, moving)
-    "  float car=sdBox(cq,float3(0.82,0.42,2.0))-0.1;if(car<res.x)res=float2(car,5.0);\n"
+    "  float lane=(p.x>0.0?1.0:-1.0);float3 cq=float3(ax-2.1,p.y-0.46,fmod(p.z-iTime*6.0+lane*9.0,18.0)-9.0);\n"  // yellow taxis (both lanes, moving)
+    "  float body=sdBox(cq,float3(0.78,0.3,1.85))-0.08;\n"  // lower body
+    "  float cab=sdBox(cq-float3(0.0,0.4,0.05),float3(0.64,0.28,1.0))-0.06;\n"  // cabin (set back, narrower)
+    "  float carb=min(body,cab);\n"
+    "  float2 wd2=float2(length(float2(cq.y+0.34,abs(cq.z)-1.25))-0.32,abs(abs(cq.x)-0.74)-0.13);\n"  // 4 wheels (axle along x)
+    "  float wheel=min(max(wd2.x,wd2.y),0.0)+length(max(wd2,0.0));carb=min(carb,wheel);\n"
+    "  if(carb<res.x)res=float2(carb,5.0);\n"
     "  return res;}\n"
     "float3 nrmCity(float3 p){float2 e=float2(0.008,0.0);return normalize(float3(mapCity(p+e.xyy).x-mapCity(p-e.xyy).x,mapCity(p+e.yxy).x-mapCity(p-e.yxy).x,mapCity(p+e.yyx).x-mapCity(p-e.yyx).x));}\n"
     "float marchCity(float3 ro,float3 rd,out float mid){float t=0.02;mid=-1.0;[loop]for(int i=0;i<150;i++){float2 r=mapCity(ro+rd*t);if(r.x<0.0015*t+0.001){mid=r.y;return t;}t+=r.x*0.9;if(t>150.0)break;}return -1.0;}\n"
@@ -1789,13 +1795,15 @@ static const char *kCityHLSL =
     "  float3 lit=float3(1.0,0.74,0.42)*10.0*atten*ndl*sh;\n"
     "  if(mid>5.5){float3 base=float3(0.16,0.17,0.185);base*=(0.7+0.3*n2(p.xy*6.0+p.z));\n"  // rooftop props (water tank / AC) - dull metal
     "    float spec=pow(saturate(dot(reflect(-L,n),-rd)),16.0)*sh*atten*3.0;return base*(amb*2.0+lit)+spec;}\n"
-    "  if(mid>4.5){float lane=(p.x>0.0?1.0:-1.0);float lz=fmod(p.z-iTime*6.0+lane*8.0,16.0)-8.0;float lxw=abs(p.x)-2.1;\n"  // TAXI
+    "  if(mid>4.5){float lane=(p.x>0.0?1.0:-1.0);float lz=fmod(p.z-iTime*6.0+lane*9.0,18.0)-9.0;float lxw=abs(p.x)-2.1;\n"  // TAXI
+    "    float tire=step(p.y,0.34)*step(abs(abs(lxw)-0.74),0.22)*step(abs(abs(lz)-1.25),0.45);\n"  // black tires at wheel positions
+    "    if(tire>0.5)return float3(0.02,0.02,0.024)*(amb*3.0+lit)+float3(0.2,0.2,0.22)*pow(saturate(dot(reflect(-L,n),-rd)),24.0)*sh*atten*2.0;\n"
     "    float3 body=float3(0.96,0.74,0.04);\n"  // cab yellow
-    "    float win=step(0.62,p.y)*smoothstep(1.55,1.35,abs(lz))*smoothstep(0.78,0.7,abs(lxw));body=lerp(body,float3(0.02,0.03,0.045),win);\n"  // glass
+    "    float win=step(0.7,p.y)*smoothstep(1.1,0.95,abs(lz))*smoothstep(0.72,0.62,abs(lxw));body=lerp(body,float3(0.02,0.03,0.045),win);\n"  // glass (cabin)
     "    float3 cem=float3(0,0,0);\n"
-    "    cem+=float3(1.0,0.04,0.02)*step(1.78,lz)*step(abs(lxw),0.72)*step(0.28,p.y)*step(p.y,0.5)*4.0;\n"  // taillights
-    "    cem+=float3(1.0,0.95,0.82)*step(lz,-1.78)*step(abs(lxw),0.72)*step(0.24,p.y)*step(p.y,0.46)*3.0;\n"  // headlights
-    "    cem+=float3(1.0,0.7,0.1)*step(0.92,p.y)*smoothstep(0.4,0.2,abs(lz))*smoothstep(0.3,0.15,abs(lxw))*2.0;\n"  // roof medallion
+    "    cem+=float3(1.0,0.04,0.02)*step(1.7,lz)*step(abs(lxw),0.7)*step(0.24,p.y)*step(p.y,0.48)*4.0;\n"  // taillights
+    "    cem+=float3(1.0,0.95,0.82)*step(lz,-1.7)*step(abs(lxw),0.7)*step(0.2,p.y)*step(p.y,0.44)*3.0;\n"  // headlights
+    "    cem+=float3(1.0,0.7,0.1)*step(1.05,p.y)*smoothstep(0.4,0.2,abs(lz))*smoothstep(0.3,0.15,abs(lxw))*2.0;\n"  // roof medallion
     "    float spec=pow(saturate(dot(reflect(-L,n),-rd)),32.0)*sh*atten*8.0;\n"
     "    return body*(amb*3.0+lit)+float3(1.0,0.9,0.7)*spec+cem;}\n"
     "  if(mid<0.5){float cx=abs(p.x);float3 base=float3(0.022,0.022,0.028);\n"  // ROAD + markings + litter
@@ -1835,15 +1843,27 @@ static const char *kCityHLSL =
     "        float tag=(s1+s2)*step(abs(gf.y),0.3);\n"
     "        float drip=smoothstep(0.04,0.0,abs(gf.x-0.2+0.4))*step(gf.y,0.0)*smoothstep(-0.4,0.0,gf.y)*0.5;\n"
     "        float3 gcol=0.55+0.45*cos(float3(0.0,2.1,4.2)+gg*40.0);base=lerp(base,gcol*0.7,saturate(tag+drip));}}\n"
-    "    if(p.y>2.8){float wd=0.42+0.22*bh;float2 g=floor(float2(fx*wd,p.y*0.42));float2 f=frac(float2(fx*wd,p.y*0.42));\n"  // windows (per-building density)
-    "      float win=step(0.12,f.x)*step(f.x,0.88)*step(0.14,f.y)*step(f.y,0.86);\n"
-    "      float onw=step(lerp(0.5,0.28,glass),h11(dot(g,float2(11.0,7.0))));\n"  // glass towers more lit
-    "      float3 wc=lerp(float3(1.0,0.7,0.32),float3(0.5,0.8,1.0),lerp(h11(dot(g,float2(3.0,9.0))),0.85,glass));\n"
-    "      emit=wc*win*onw*lerp(2.2,3.0,glass);\n"
-    "      if(bh3>0.55&&p.y>3.0&&p.y<8.0){float2 bb=frac(float2(fx*0.22,p.y*0.32));\n"  // NEON BILLBOARD (bigger, brighter, more frequent)
-    "        float bs=step(0.08,bb.x)*step(bb.x,0.92)*step(0.1,bb.y)*step(bb.y,0.9);\n"
-    "        float3 ncol=0.55+0.45*cos(float3(0.0,2.1,4.2)+bid*2.3+floor(p.y*0.32));\n"
-    "        emit=lerp(emit,ncol*4.5,bs);}}\n"
+    "    if(p.y>2.6){float wd=0.40+0.20*bh;float2 g=floor(float2(fx*wd,p.y*0.40));float2 f=frac(float2(fx*wd,p.y*0.40));\n"  // windows (per-building density)
+    "      float winrect=step(0.12,f.x)*step(f.x,0.88)*step(0.12,f.y)*step(f.y,0.88);\n"  // window opening (frame+glass)
+    "      float mull=step(0.46,f.x)*step(f.x,0.54)+step(0.46,f.y)*step(f.y,0.54);\n"  // mullion cross
+    "      float pane=step(0.18,f.x)*step(f.x,0.82)*step(0.20,f.y)*step(f.y,0.84)*(1.0-saturate(mull));\n"  // glass minus bars
+    "      float frame=saturate(winrect-pane);\n"  // dark frame ring + bars
+    "      float rnd=h11(dot(g,float2(3.0,9.0)));float onw=step(lerp(0.52,0.30,glass),h11(dot(g,float2(11.0,7.0))));\n"  // lit?
+    "      float3 warm=lerp(float3(1.0,0.62,0.24),float3(1.0,0.84,0.56),rnd);\n"  // interior warm light
+    "      float3 cool=lerp(float3(0.10,0.16,0.28),float3(0.20,0.30,0.46),rnd);\n"  // unlit = dark cool glass
+    "      float curtm=step(0.5,h11(dot(g,float2(7.0,13.0))))*smoothstep(0.86,0.40+0.4*rnd,f.y);\n"  // curtain drawn from top
+    "      float3 inside=lerp(warm,warm*0.5+float3(0.06,0.05,0.04),curtm*0.85);\n"
+    "      float sil=step(0.82,h11(dot(g,float2(5.0,17.0))))*step(abs(f.x-0.5),0.15)*step(0.2,f.y)*step(f.y,0.6);\n"  // occupant silhouette
+    "      inside=lerp(inside,float3(0.02,0.015,0.02),sil*(1.0-curtm));\n"
+    "      base=lerp(base,float3(0.045,0.045,0.055),frame);\n"  // dark window frame + mullions
+    "      base=lerp(base,cool,pane*(1.0-onw));\n"  // unlit panes = dark glass
+    "      emit=inside*pane*onw*lerp(1.7,2.5,glass);\n"  // lit panes glow
+    "      if(bh3>0.86&&p.y>3.2&&p.y<5.8){float2 bb=frac(float2(fx*0.42,p.y*0.5));\n"  // NEON SIGN (rare, smaller, bordered)
+    "        float panel=step(0.1,bb.x)*step(bb.x,0.9)*step(0.18,bb.y)*step(bb.y,0.82);\n"
+    "        float border=panel-step(0.16,bb.x)*step(bb.x,0.84)*step(0.26,bb.y)*step(bb.y,0.74);\n"  // tube outline
+    "        float txt=step(0.55,frac(bb.x*8.0+sin(bb.y*16.0+bid*3.0)))*step(0.34,bb.y)*step(bb.y,0.66);\n"  // faux lettering
+    "        float3 ncol=0.65+0.35*cos(float3(0.0,2.1,4.2)+bid*4.3);\n"
+    "        emit=lerp(emit,ncol*3.2,saturate(border+txt)*panel);}}\n"
     "    else{float lx=frac(fx*0.11);float dw=0.10+0.05*bh2;\n"  // DOOR per building (centered, unique color, optional window)
     "      float door=smoothstep(0.5-dw,0.5-dw+0.02,lx)*smoothstep(0.5+dw,0.5+dw-0.02,lx)*smoothstep(0.12,0.15,p.y)*smoothstep(2.1,2.05,p.y);\n"
     "      float outer=smoothstep(0.5-dw-0.03,0.5-dw-0.01,lx)*smoothstep(0.5+dw+0.03,0.5+dw+0.01,lx)*smoothstep(0.08,0.11,p.y)*smoothstep(2.2,2.16,p.y);\n"
