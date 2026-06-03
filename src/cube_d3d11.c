@@ -55,8 +55,35 @@ static float g_cam_yaw    = 1.5707963f;  // facing +Z
 static float g_cam_pitch  = -0.12f;
 static float g_cam_speed  = 22.0f;       // world units / second
 static unsigned char g_keys[256];        // WM_KEYDOWN/UP state, indexed by VK code
-static int   g_mouse_look = 0;           // true while dragging with the left button
+static int   g_mouse_look = 0;           // left button held (hold-to-look)
+static int   g_mouse_captured = 0;       // Tab toggle: mouse-look without holding
+static int   g_rmb_fwd = 0;              // right button held -> fly forward
+static int   g_autofwd = 0;              // F toggle: continuous auto-forward (SkyFly)
+static int   g_look_engaged = 0;         // current capture state (keeps ShowCursor balanced)
 static int   g_mouse_cx = 0, g_mouse_cy = 0;  // client-space recenter point for look
+
+// Engage/disengage relative mouse-look on state transitions only, so the
+// SetCapture/ShowCursor counter stays balanced no matter whether look was
+// requested by the left button (hold) or the Tab toggle.
+static void freelook_sync_capture(HWND h) {
+    int want = g_freelook && (g_mouse_look || g_mouse_captured);
+    if (want == g_look_engaged) return;
+    g_look_engaged = want;
+    if (want) {
+        RECT rc;
+        GetClientRect(h, &rc);
+        g_mouse_cx = (rc.right - rc.left) / 2;
+        g_mouse_cy = (rc.bottom - rc.top) / 2;
+        SetCapture(h);
+        ShowCursor(FALSE);
+        POINT c = {g_mouse_cx, g_mouse_cy};
+        ClientToScreen(h, &c);
+        SetCursorPos(c.x, c.y);
+    } else {
+        ReleaseCapture();
+        ShowCursor(TRUE);
+    }
+}
 
 static LRESULT CALLBACK d3d11_wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
     switch (m) {
@@ -65,6 +92,15 @@ static LRESULT CALLBACK d3d11_wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
                 g_quit = 1;
                 PostQuitMessage(0);
             }
+            // Toggles fire once per physical press (lparam bit 30 = key was already down).
+            if (g_freelook && !(l & 0x40000000)) {
+                if (w == VK_TAB) {
+                    g_mouse_captured = !g_mouse_captured;
+                    freelook_sync_capture(h);
+                } else if (w == 'F') {
+                    g_autofwd = !g_autofwd;
+                }
+            }
             if (w < 256) g_keys[w] = 1;
             return 0;
         case WM_KEYUP:
@@ -72,27 +108,22 @@ static LRESULT CALLBACK d3d11_wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
             return 0;
         case WM_LBUTTONDOWN:
             if (g_freelook) {
-                RECT rc;
-                GetClientRect(h, &rc);
-                g_mouse_cx = (rc.right - rc.left) / 2;
-                g_mouse_cy = (rc.bottom - rc.top) / 2;
                 g_mouse_look = 1;
-                SetCapture(h);
-                ShowCursor(FALSE);
-                POINT c = {g_mouse_cx, g_mouse_cy};
-                ClientToScreen(h, &c);
-                SetCursorPos(c.x, c.y);
+                freelook_sync_capture(h);
             }
             return 0;
         case WM_LBUTTONUP:
-            if (g_mouse_look) {
-                g_mouse_look = 0;
-                ReleaseCapture();
-                ShowCursor(TRUE);
-            }
+            g_mouse_look = 0;
+            freelook_sync_capture(h);
+            return 0;
+        case WM_RBUTTONDOWN:
+            if (g_freelook) g_rmb_fwd = 1;
+            return 0;
+        case WM_RBUTTONUP:
+            g_rmb_fwd = 0;
             return 0;
         case WM_MOUSEMOVE:
-            if (g_freelook && g_mouse_look) {
+            if (g_freelook && g_look_engaged) {
                 int dx = (int)(short)LOWORD(l) - g_mouse_cx;
                 int dy = (int)(short)HIWORD(l) - g_mouse_cy;
                 if (dx || dy) {
@@ -2954,6 +2985,12 @@ static void freelook_update(double t) {
     }
     if (g_keys['E'] || g_keys[VK_SPACE]) g_cam_eye[1] += spd;
     if (g_keys['Q'] || g_keys[VK_CONTROL]) g_cam_eye[1] -= spd;
+    // Right-button-hold flies forward; F toggles a continuous SkyFly-style cruise.
+    if (g_rmb_fwd || g_autofwd) {
+        g_cam_eye[0] += fwd[0] * spd;
+        g_cam_eye[1] += fwd[1] * spd;
+        g_cam_eye[2] += fwd[2] * spd;
+    }
     if (g_cam_eye[1] < 0.5f) g_cam_eye[1] = 0.5f;  // soft floor so we don't dive far underground
 }
 
@@ -2994,6 +3031,10 @@ static int freelook_init(ID3D11Device *dev, ID3D11DeviceContext *ctx, int w, int
     g_cam_pitch = -0.12f;
     g_cam_speed = 22.0f;
     g_mouse_look = 0;
+    g_mouse_captured = 0;
+    g_rmb_fwd = 0;
+    g_autofwd = 0;
+    g_look_engaged = 0;
     memset(g_keys, 0, sizeof(g_keys));
     g_freelook = 1;
     return (g_free.vs && g_free.ps && g_free.cbo && g_free.rs) ? 0 : 1;
@@ -3026,8 +3067,12 @@ static void freelook_frame(ID3D11DeviceContext *ctx, double t, float aspect) {
 
 static void freelook_cleanup(void) {
     g_freelook = 0;
-    if (g_mouse_look) {
-        g_mouse_look = 0;
+    g_mouse_look = 0;
+    g_mouse_captured = 0;
+    g_rmb_fwd = 0;
+    g_autofwd = 0;
+    if (g_look_engaged) {
+        g_look_engaged = 0;
         ReleaseCapture();
         ShowCursor(TRUE);
     }
@@ -3090,7 +3135,9 @@ int aio_run_d3d11_cube(HINSTANCE hinst, const char *scene_name) {
     char wtitle[160];
     if (strcmp(scene->name, "freelook") == 0)
         snprintf(wtitle, sizeof(wtitle),
-                 "AIO Graphics Test  -  %s   [WASD/arrows move - drag=look - wheel=speed - ESC]", api);
+                 "AIO Graphics Test  -  %s   [WASD/arrows - drag or Tab=look - RMB/F=fly fwd - "
+                 "wheel=speed - ESC]",
+                 api);
     else
         snprintf(wtitle, sizeof(wtitle), "AIO Graphics Test  -  %s", api);
     HWND hwnd = CreateWindowA(cls, wtitle, WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT,
@@ -3284,7 +3331,7 @@ int aio_run_d3d11_cube(HINSTANCE hinst, const char *scene_name) {
             aio_hud_update(hwnd, hud);
             if (strcmp(scene->name, "freelook") == 0)
                 snprintf(title, sizeof(title),
-                         "AIO  -  %s  -  %.0f FPS   [WASD/arrows - drag=look - wheel=speed - ESC]",
+                         "AIO  -  %s  -  %.0f FPS   [WASD - drag/Tab=look - RMB/F=fly - ESC]",
                          api, fps);
             else
                 snprintf(title, sizeof(title), "AIO Graphics Test  -  %s  -  %.0f FPS", api, fps);
