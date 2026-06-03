@@ -1782,7 +1782,7 @@ static const char *kCityHLSL =
     "  if(carb<res.x)res=float2(carb,5.0);\n"
     "  return res;}\n"
     "float3 nrmCity(float3 p){float2 e=float2(0.008,0.0);return normalize(float3(mapCity(p+e.xyy).x-mapCity(p-e.xyy).x,mapCity(p+e.yxy).x-mapCity(p-e.yxy).x,mapCity(p+e.yyx).x-mapCity(p-e.yyx).x));}\n"
-    "float marchCity(float3 ro,float3 rd,out float mid){float t=0.02;mid=-1.0;[loop]for(int i=0;i<150;i++){float2 r=mapCity(ro+rd*t);if(r.x<0.0015*t+0.001){mid=r.y;return t;}t+=r.x*0.9;if(t>150.0)break;}return -1.0;}\n"
+    "float marchCity(float3 ro,float3 rd,out float mid){float t=0.02;mid=-1.0;[loop]for(int i=0;i<180;i++){float2 r=mapCity(ro+rd*t);if(r.x<0.003*t+0.0018){mid=r.y;return t;}t+=r.x*0.92;if(t>160.0)break;}return -1.0;}\n"
     "float3 lampP(float3 p){float k=floor((p.z+6.0)/12.0+0.5);return float3((p.x>0.0?1.0:-1.0)*5.3,5.1,12.0*k-6.0);}\n"
     "float shad(float3 ro,float3 rd,float mx){float res=1.0,t=0.06;[loop]for(int i=0;i<22;i++){float h=mapCity(ro+rd*t).x;if(h<0.003)return 0.0;res=min(res,12.0*h/t);t+=clamp(h,0.06,0.5);if(t>mx)break;}return saturate(res);}\n"
     "float3 cityShade(float3 p,float3 n,float3 rd,float mid){\n"
