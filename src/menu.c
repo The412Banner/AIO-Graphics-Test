@@ -1444,12 +1444,19 @@ static LRESULT CALLBACK shell_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             HWND ctl = (HWND)lParam;
             HDC hdc = (HDC)wParam;
             // Read-only multiline EDITs report via WM_CTLCOLORSTATIC; they need an
-            // OPAQUE bg or selecting/scrolling text leaves it invisible.
-            if (msg == WM_CTLCOLORSTATIC && (ctl == g_edit_vk || ctl == g_edit_gl)) {
-                SetTextColor(hdc, DARK_TEXT);
-                SetBkColor(hdc, DARK_CTL);
-                SetBkMode(hdc, OPAQUE);
-                return (LRESULT)g_br_ctl;
+            // OPAQUE bg or the (unselected) text renders invisibly. Detect them by
+            // CLASS NAME, not pointer: the edit paints once at creation before
+            // g_edit_vk/g_edit_gl are assigned, and would otherwise cache the wrong
+            // (transparent label) colors until the user clicks it.
+            if (msg == WM_CTLCOLORSTATIC) {
+                char ccls[8];
+                GetClassNameA(ctl, ccls, (int)sizeof(ccls));
+                if (lstrcmpiA(ccls, "Edit") == 0) {
+                    SetTextColor(hdc, DARK_TEXT);
+                    SetBkColor(hdc, DARK_CTL);
+                    SetBkMode(hdc, OPAQUE);
+                    return (LRESULT)g_br_ctl;
+                }
             }
             COLORREF txt = DARK_TEXT;
             if (ctl == g_foot_heart) txt = RGB(214, 69, 79);
