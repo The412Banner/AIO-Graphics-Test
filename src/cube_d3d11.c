@@ -3109,6 +3109,36 @@ static void fl_rot(float *v, const float *ax, float c, float s) {
     v[2] = v[2] * c + cz * s + ax[2] * d * (1.0f - c);
 }
 
+// --- Gamepad (XInput), loaded dynamically so the app still runs without it. We declare
+//     the minimal structs ourselves to avoid an xinput.h dependency / extra link lib. ---
+typedef struct { unsigned short wButtons; unsigned char bLeftTrigger, bRightTrigger;
+                 short sThumbLX, sThumbLY, sThumbRX, sThumbRY; } FL_XPAD;
+typedef struct { DWORD dwPacketNumber; FL_XPAD Gamepad; } FL_XSTATE;
+typedef DWORD(WINAPI *FL_XGetState)(DWORD, FL_XSTATE *);
+static FL_XGetState g_xinput = NULL;
+static int g_xinput_tried = 0;
+#define FL_XB_LB 0x0100
+#define FL_XB_RB 0x0200
+static void fl_xinput_load(void) {
+    if (g_xinput_tried) return;
+    g_xinput_tried = 1;
+    const char *dlls[] = {"xinput1_4.dll", "xinput1_3.dll", "xinput9_1_0.dll"};
+    for (int i = 0; i < 3; i++) {
+        HMODULE h = LoadLibraryA(dlls[i]);
+        if (h) {
+            g_xinput = (FL_XGetState)GetProcAddress(h, "XInputGetState");
+            if (g_xinput) return;
+        }
+    }
+}
+// stick axis -> [-1,1] with a dead-zone, rescaled so motion starts smoothly at the edge.
+static float fl_axis(short v, short dz) {
+    float f = (float)v;
+    if (f > -dz && f < dz) return 0.0f;
+    f = (f - (f > 0 ? dz : -dz)) / (32767.0f - dz);
+    return f < -1.0f ? -1.0f : (f > 1.0f ? 1.0f : f);
+}
+
 static void freelook_update(double t) {
     // scene->frame() doesn't pass dt, so derive it from the monotonic elapsed t.
     static double last = -1.0;
@@ -3194,6 +3224,29 @@ static void freelook_update(double t) {
     if (g_keys[VK_UP]) pitch_d += look;
     if (g_keys[VK_DOWN]) pitch_d -= look;
 
+    // Gamepad (XInput): right stick looks, left stick moves, triggers throttle speed,
+    // RB/LB ascend/descend. padFwd/padStrafe/padUp feed the movement step below.
+    float padFwd = 0.0f, padStrafe = 0.0f, padUp = 0.0f;
+    if (g_xinput) {
+        FL_XSTATE st;
+        if (g_xinput(0, &st) == 0) {  // ERROR_SUCCESS -> a controller is connected
+            FL_XPAD gp = st.Gamepad;
+            float rx = fl_axis(gp.sThumbRX, 8689), ry = fl_axis(gp.sThumbRY, 8689);
+            float lx = fl_axis(gp.sThumbLX, 7849), ly = fl_axis(gp.sThumbLY, 7849);
+            yaw_d += rx * 2.4f * dt;    // right stick = look
+            pitch_d += ry * 2.0f * dt;
+            padFwd = ly; padStrafe = lx;  // left stick = move
+            float rt = gp.bRightTrigger / 255.0f, lt = gp.bLeftTrigger / 255.0f;
+            if (rt > 0.06f || lt > 0.06f) {  // triggers throttle the cruise speed (RT up / LT down)
+                g_cam_speed *= 1.0f + (rt - lt) * 1.6f * dt;
+                if (g_cam_speed < 1.5f) g_cam_speed = 1.5f;
+                if (g_cam_speed > 2500.0f) g_cam_speed = 2500.0f;
+            }
+            if (gp.wButtons & FL_XB_RB) padUp += 1.0f;  // RB ascend
+            if (gp.wButtons & FL_XB_LB) padUp -= 1.0f;  // LB descend
+        }
+    }
+
     // Joystick steering from the cursor's offset from the window centre (only while
     // the cursor is over the window) -- steer just by moving the mouse, no buttons.
     if (g_mousesteer && g_free_hwnd && g_w > 0 && g_h > 0) {
@@ -3265,6 +3318,12 @@ static void freelook_update(double t) {
     }
     if (g_keys['Q'] || g_keys[VK_CONTROL]) {
         g_cam_eye[0] -= up[0] * spd; g_cam_eye[1] -= up[1] * spd; g_cam_eye[2] -= up[2] * spd;
+    }
+    // Gamepad analog movement (left stick = forward/strafe, RB/LB = up/down).
+    if (padFwd != 0.0f || padStrafe != 0.0f || padUp != 0.0f) {
+        g_cam_eye[0] += (fwd[0] * padFwd + rgt[0] * padStrafe + up[0] * padUp) * spd;
+        g_cam_eye[1] += (fwd[1] * padFwd + rgt[1] * padStrafe + up[1] * padUp) * spd;
+        g_cam_eye[2] += (fwd[2] * padFwd + rgt[2] * padStrafe + up[2] * padUp) * spd;
     }
     // Continuous SkyFly-style forward cruise (on by default; F toggles it).
     if (g_autofwd) {
@@ -3342,6 +3401,7 @@ static int freelook_init(ID3D11Device *dev, ID3D11DeviceContext *ctx, int w, int
     g_autofwd = 1;
     g_mousesteer = 1;
     memset(g_keys, 0, sizeof(g_keys));
+    fl_xinput_load();  // arm controller support (no-op if no XInput / no pad)
     g_freelook = 1;
     return (g_free.vs && g_free.ps && g_free.cbo && g_free.rs) ? 0 : 1;
 }
