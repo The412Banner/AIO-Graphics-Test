@@ -57,6 +57,7 @@ static HFONT g_mono_font;
 #define DARK_DIM   RGB(150, 156, 166) // dim / secondary text
 static HBRUSH g_br_bg;
 static HBRUSH g_br_ctl;
+static WNDPROC g_btn_oldproc;  // saved system BUTTON proc (buttons are subclassed for dark paint)
 
 // Content views.
 static HWND g_tab;       // GPU Info tab control
@@ -967,8 +968,104 @@ static void launch_bench_row(HWND frame, int i) {
 // Rebuild a content view. The window is WS_EX_COMPOSITED, so the destroy-old +
 // create-many-children churn is double-buffered and presented atomically (no
 // top-to-bottom paint scan, no black unpainted boxes). Used for in-view rebuilds.
+// Dark-theme button painting. We SUBCLASS (not owner-draw) so the native BUTTON
+// keeps all its behaviour — auto-toggle, check state, focus, click — and we only
+// override WM_PAINT to draw a dark face / dark checkbox. Push buttons and the
+// stateful benchmark checkboxes both keep working; only the look changes.
+static LRESULT CALLBACK btn_subproc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_ERASEBKGND) return 1;  // fully painted in WM_PAINT
+    if (msg == WM_PAINT) {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(h, &ps);
+        RECT rc;
+        GetClientRect(h, &rc);
+        LONG_PTR style = GetWindowLongPtrA(h, GWL_STYLE);
+        UINT bt = (UINT)(style & 0x0F);
+        int isCheck = (bt == BS_CHECKBOX || bt == BS_AUTOCHECKBOX || bt == BS_3STATE ||
+                       bt == BS_AUTO3STATE || bt == BS_RADIOBUTTON || bt == BS_AUTORADIOBUTTON);
+        LRESULT bst = SendMessageA(h, BM_GETSTATE, 0, 0);
+        int pushed = (bst & BST_PUSHED) != 0;
+        int checked = (SendMessageA(h, BM_GETCHECK, 0, 0) == BST_CHECKED);
+        int enabled = IsWindowEnabled(h);
+        char txt[256];
+        GetWindowTextA(h, txt, (int)sizeof(txt));
+        HFONT f = (HFONT)SendMessageA(h, WM_GETFONT, 0, 0);
+        HFONT of = f ? (HFONT)SelectObject(dc, f) : NULL;
+        SetBkMode(dc, TRANSPARENT);
+        COLORREF txtc = enabled ? DARK_TEXT : DARK_DIM;
+        if (isCheck) {
+            FillRect(dc, &rc, g_br_bg);
+            int s = 16, by = (rc.bottom - s) / 2, bx = 2;
+            RECT box = {bx, by, bx + s, by + s};
+            HBRUSH boxbr = CreateSolidBrush(checked ? RGB(70, 130, 200) : DARK_CTL);
+            FillRect(dc, &box, boxbr);
+            DeleteObject(boxbr);
+            HPEN pen = CreatePen(PS_SOLID, 1, RGB(120, 126, 136));
+            HPEN op = (HPEN)SelectObject(dc, pen);
+            HBRUSH ob = (HBRUSH)SelectObject(dc, GetStockObject(NULL_BRUSH));
+            Rectangle(dc, box.left, box.top, box.right, box.bottom);
+            SelectObject(dc, ob);
+            SelectObject(dc, op);
+            DeleteObject(pen);
+            if (checked) {
+                HPEN cp = CreatePen(PS_SOLID, 2, RGB(240, 244, 250));
+                HPEN ocp = (HPEN)SelectObject(dc, cp);
+                MoveToEx(dc, box.left + 3, by + s / 2, NULL);
+                LineTo(dc, box.left + s / 2 - 1, box.bottom - 4);
+                LineTo(dc, box.right - 3, box.top + 3);
+                SelectObject(dc, ocp);
+                DeleteObject(cp);
+            }
+            SetTextColor(dc, txtc);
+            RECT tr = rc;
+            tr.left = bx + s + 6;
+            DrawTextA(dc, txt, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        } else {
+            COLORREF face = pushed ? RGB(34, 37, 44) : RGB(48, 52, 60);
+            HBRUSH fb = CreateSolidBrush(face);
+            FillRect(dc, &rc, fb);
+            DeleteObject(fb);
+            HPEN pen = CreatePen(PS_SOLID, 1, RGB(82, 88, 98));
+            HPEN op = (HPEN)SelectObject(dc, pen);
+            HBRUSH ob = (HBRUSH)SelectObject(dc, GetStockObject(NULL_BRUSH));
+            Rectangle(dc, rc.left, rc.top, rc.right, rc.bottom);
+            SelectObject(dc, ob);
+            SelectObject(dc, op);
+            DeleteObject(pen);
+            SetTextColor(dc, txtc);
+            RECT tr = rc;
+            if (pushed) {
+                tr.left += 1;
+                tr.top += 1;
+            }
+            DrawTextA(dc, txt, -1, &tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        }
+        if (of) SelectObject(dc, of);
+        EndPaint(h, &ps);
+        return 0;
+    }
+    return CallWindowProcA(g_btn_oldproc, h, msg, wp, lp);
+}
+
+static BOOL CALLBACK theme_btn_cb(HWND child, LPARAM lp) {
+    (void)lp;
+    char cls[16];
+    GetClassNameA(child, cls, (int)sizeof(cls));
+    if (lstrcmpiA(cls, "Button") == 0 &&
+        (WNDPROC)GetWindowLongPtrA(child, GWLP_WNDPROC) != btn_subproc) {
+        WNDPROC old = (WNDPROC)SetWindowLongPtrA(child, GWLP_WNDPROC, (LONG_PTR)btn_subproc);
+        if (!g_btn_oldproc) g_btn_oldproc = old;
+    }
+    return TRUE;
+}
+
+// Subclass every BUTTON under the frame for dark paint (idempotent: re-themes the
+// persistent sidebar + any freshly built content buttons each call).
+static void theme_buttons(HWND frame) { EnumChildWindows(frame, theme_btn_cb, 0); }
+
 static void rebuild_view(HWND frame, void (*build)(HWND)) {
     build(frame);
+    theme_buttons(frame);
     InvalidateRect(frame, NULL, TRUE);
 }
 
@@ -1039,6 +1136,7 @@ static void on_select(HWND frame, int action) {
         default:
             break;
     }
+    theme_buttons(frame);  // dark-theme any buttons the selected view just created
     InvalidateRect(frame, NULL, TRUE);  // WS_EX_COMPOSITED presents the new view atomically
 }
 
@@ -1074,6 +1172,7 @@ static LRESULT CALLBACK shell_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             show_placeholder(hwnd, "AIO Graphics Test",
                              "Select a test from the menu on the left.\n\n"
                              "GPU Info opens here; cube tests open in a new window.");
+            theme_buttons(hwnd);  // dark-theme the sidebar + initial view
             return 0;
         }
         case WM_COMMAND: {
