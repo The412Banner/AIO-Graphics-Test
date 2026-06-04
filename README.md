@@ -122,6 +122,10 @@ with optional CLI shortcuts:
     test file from the page cache, so the read happens *cold* and reflects true storage speed
     (slower; writes several extra GB, deleted afterwards). The **write** figure is always real
     (flushed straight to storage).
+  - **Storage class** — translates your sequential speed into a consumer tier
+    (eMMC / UFS 2.1 / UFS 3.1 / UFS 4.0 / SSD) so you don't have to read the raw MB/s. It's an
+    *in-container* floor (Wine overhead means the real chip may be a tier higher), so it's hedged
+    *"or better"*; based on write + the cold read.
   - **What's this?** — an in-app explainer of all of the above.
 - **Live HUD** — every cube window shows the active API + live FPS as an on-screen overlay.
 - **Hang watchdog** — if a backend deadlocks (e.g. a broken GL stack blocking in

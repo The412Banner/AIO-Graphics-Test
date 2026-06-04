@@ -60,6 +60,20 @@ static int write_file_blocks(const char *path, uint64_t bytes, const void *buf) 
     return ok;
 }
 
+// Map a sequential MB/s figure to a consumer storage class. Thresholds are set a
+// little below the raw-spec headline numbers because we measure in-container (Wine
+// + the container FS add overhead), so this is a floor - the real chip is often a
+// tier higher, hence the "or better" hedge in the report.
+static const char *disk_class_for(double seq_mbps) {
+    if (seq_mbps < 120) return "SD card / slow eMMC";
+    if (seq_mbps < 280) return "eMMC 5.x";
+    if (seq_mbps < 600) return "UFS 2.0-2.1";
+    if (seq_mbps < 1300) return "UFS 2.2 / UFS 3.0";
+    if (seq_mbps < 2600) return "UFS 3.1";
+    if (seq_mbps < 4200) return "UFS 4.0";
+    return "UFS 4.0+ / NVMe SSD";
+}
+
 char *aio_disk_run(int size_mb, int defeat_cache, aio_disk_progress_fn progress, void *user) {
     char *report = (char *)malloc(DISK_REPORT_CAP);
     if (!report) return NULL;
@@ -272,6 +286,14 @@ char *aio_disk_run(int size_mb, int defeat_cache, aio_disk_progress_fn progress,
                  "\"Real-Flash Read\" button for a true storage figure. (Write is always real.)");
     }
 
+    // Storage-class estimate: from sequential write (always real) and, in
+    // real-flash mode, the cold read (use whichever is higher - tiers are usually
+    // quoted by peak sequential). The cached quick-mode read and random are NOT
+    // used (they'd mis-rate the class).
+    double seq_signal = write_mbps;
+    if (defeat_cache && read_mbps > seq_signal) seq_signal = read_mbps;
+    const char *cls = disk_class_for(seq_signal);
+
     snprintf(report, DISK_REPORT_CAP,
              "Disk Read / Write Speed\r\n"
              "=======================\r\n\r\n"
@@ -280,8 +302,11 @@ char *aio_disk_run(int size_mb, int defeat_cache, aio_disk_progress_fn progress,
              "Sequential write : %7.1f MB/s   (%.2f s)\r\n"
              "Sequential read  : %7.1f MB/s   (%.2f s)\r\n"
              "Random 4K read   : %7.1f MB/s   (%.0f IOPS, %d reads)\r\n\r\n"
+             "Storage class    : ~ %s\r\n"
+             "                   (or better - in-container estimate%s)\r\n\r\n"
              "Throughput is decimal MB/s (1,000,000 bytes).\r\n%s",
              path, file_mib, write_mbps, t_write, read_mbps, t_read, rand_mbps, rand_iops,
-             DISK_RAND_CNT, note);
+             DISK_RAND_CNT, cls, defeat_cache ? "" : "; run Real-Flash Read for a read-based class",
+             note);
     return report;
 }

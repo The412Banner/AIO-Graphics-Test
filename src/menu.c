@@ -175,6 +175,17 @@ static const char kDiskHelpText[] =
     "  The WRITE number is always real - writes are flushed straight to storage\r\n"
     "  in both modes.\r\n"
     "\r\n"
+    "STORAGE CLASS\r\n"
+    "  The 'Storage class' line estimates what tier your storage is - eMMC, UFS\r\n"
+    "  2.1, UFS 3.1, UFS 4.0, etc. - from your sequential speed, so you don't have\r\n"
+    "  to know what the MB/s numbers mean. It uses the (always-real) write speed\r\n"
+    "  and, in Real-Flash mode, the cold read.\r\n"
+    "\r\n"
+    "  It says 'or better' because we measure INSIDE the container: Wine + the\r\n"
+    "  filesystem layer cost some speed, so a real UFS 4.0 chip can read here like\r\n"
+    "  a UFS 3.1. Treat the class as a floor - your actual chip may be a tier up.\r\n"
+    "  Run Real-Flash Read for the most accurate class.\r\n"
+    "\r\n"
     "TIP: pick a larger size for a steadier figure. If Real-Flash mode warns that\r\n"
     "the cache-buster was shrunk, free up some storage for an accurate read.";
 static HWND g_disk_edit;          // report readout (read-only multiline edit)
