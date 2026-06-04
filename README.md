@@ -7,8 +7,9 @@ into a container — it replaces `vkcube.exe`, `GPUInfo.exe`, and the whole `3d-
 the **same cube through every graphics API** so you can see exactly which translation layer
 is broken or slow. On top of the diagnostic cubes it bundles a gallery of detailed
 **procedural showcase scenes** (a photoreal planet, a neon-rain city, moonlit dunes, a
-volumetric nebula, a "Seascape" ocean) that double as fragment-heavy benchmarks, and a full
-**dark theme**.
+volumetric nebula, a "Seascape" ocean) that double as fragment-heavy benchmarks, two
+**interactive fly-cams** (a terrain flyer and an Earth→Mars orbital flyer with gamepad
+support), a **disk-speed benchmark**, and a full **dark theme**.
 
 Forked from Khronos [Vulkan-Tools `vkcube`](https://github.com/KhronosGroup/Vulkan-Tools)
 (`cube.c`, tag `sdk-1.3.239.0`, Apache-2.0). The self-contained pre-codegen base links
@@ -88,7 +89,12 @@ with optional CLI shortcuts:
   | **Desert** | a moonlit dune sea — rolling heightfield dunes, cool moonlight + soft terrain shadows, wind ripples, a craters moon and a star field |
   | **Detailed Nebula** | volumetric emission/absorption — glowing gas (red → magenta → reflection-blue temperature palette) + dark dust lanes, three embedded stars lighting the gas from within, dithered front-to-back march |
   | **Ocean v2** | a "Seascape" sea — choppy summed wave octaves, binary-search heightmap trace, Fresnel sky-reflection vs deep-water refraction, subsurface crest glow, sun specular + sun disk |
+  | **Free Look** 🎮 | the first **interactive** scene — a SkyFly-style fly-cam over a ridged-mountain + ocean heightfield with volumetric fly-through clouds, altitude atmosphere fading to a star field. Auto-cruises; steer with the cursor / **WASD** / arrows, wheel = speed |
+  | **Planet Fly (Earth + Mars)** 🎮 | leave the surface, watch the horizon **curve into a full globe** from orbit (oceans, ice caps, clouds, atmospheric limb), then fly **~2500 u to a second planet — Mars** (rusty dunes, CO₂ caps, thin sky) and descend onto it. Surface-relative 6-DOF camera with gravity re-orientation; **gamepad (XInput)** supported |
   | Showcase · Raymarch SDF · Mandelbulb · Volumetric nebula · Ocean · Cel · Matcap | the original lighter procedural scenes (reflections + soft shadows, a raw SDF march, a fractal, simple volumetrics, toon, chrome matcap) |
+
+  > 🎮 **Free Look** and **Planet Fly** are camera-controlled (keyboard / cursor-steer / gamepad); the
+  > rest of the gallery is auto-animated. Controls are shown in each window's title bar.
 
 - **Native-Vulkan scenes** — beyond the textured cube, the Vulkan backend has a **Phong-lit**
   cube (full ambient + diffuse + specular on the *native* VK path, no DXVK) and a
@@ -113,20 +119,29 @@ with optional CLI shortcuts:
   verdict (e.g. *"binary is 1.7× faster"*). (The binary path only differs on a DXVK build
   that honors `DXVK_DISABLE_TIMELINE_SEMAPHORES`.)
 - **Disk Speed** — a non-graphics view that measures **sequential write**, **sequential read**,
-  and **random 4 KB read** throughput (MB/s + IOPS) against a temp file in `%TEMP%` (created and
-  deleted each run), i.e. the *in-container* storage speed a game actually gets. Pick 128 / 256 /
-  512 MB, then:
-  - **Run (quick)** — fast, but Wine usually serves the read from the OS page cache (RAM), so the
-    read/random numbers are RAM-fast, not real flash. Good for seeing the cache benefit.
-  - **Real-Flash Read** — before reading, writes a RAM-sized **cache-buster** file to evict the
-    test file from the page cache, so the read happens *cold* and reflects true storage speed
-    (slower; writes several extra GB, deleted afterwards). The **write** figure is always real
-    (flushed straight to storage).
+  **random 4 KB read**, and **random 4 KB write** throughput (MB/s + IOPS) against a temp file in
+  `%TEMP%` (created and deleted each run), i.e. the *in-container* storage speed a game actually
+  gets. Pick **256 / 512 / 1024 / 2048 MB** (default **1024 MB**), then:
+  - **Run (quick)** — fast, but Wine usually serves the reads from the OS page cache (RAM), so the
+    read numbers are RAM-fast, not real flash. Good for seeing the cache benefit.
+  - **Real-Flash Read** — before *each* read it writes a RAM-sized **cache-buster** file to evict
+    the test file from the page cache, so both the sequential and random reads happen *cold* and
+    reflect true storage speed (slower; writes several extra GB, deleted afterwards). Both **write**
+    figures are always real (committed straight to storage).
+  - **CrossPlatformDiskTest-matched method** — both random tests run a fixed **7 s** over a
+    **shuffled set of unique 4 KB offsets** (each block is touched at most once, so a read is never
+    served from RAM), and the random write is **flushed per operation** (committed-write speed).
+    This mirrors the popular [CrossPlatformDiskTest](https://github.com/maxim-saplin/CrossPlatformDiskTest)
+    app's methodology, so the numbers line up with it on the same device — set both to a 1 GiB file
+    for an apples-to-apples comparison.
   - **Storage class** — translates your sequential speed into a consumer tier
     (eMMC / UFS 2.1 / UFS 3.1 / UFS 4.0 / SSD) so you don't have to read the raw MB/s. It's an
     *in-container* floor (Wine overhead means the real chip may be a tier higher), so it's hedged
     *"or better"*; based on write + the cold read.
-  - **What's this?** — an in-app explainer of all of the above.
+  - **Clear Temp Files** — a normal run deletes its files automatically, but if a run is interrupted
+    (app closed mid-test) the multi-GB test file / cache-buster can linger; this button deletes any
+    leftovers and reports the space freed.
+  - **What's this?** — a scrollable in-app explainer of all of the above.
 - **Live HUD** — every cube window shows the active API + live FPS as an on-screen overlay.
 - **Hang watchdog** — if a backend deadlocks (e.g. a broken GL stack blocking in
   `SwapBuffers`), it self-closes after ~12 s instead of locking up the container.
@@ -145,7 +160,7 @@ The menu is the primary interface, but every mode has a flag too:
 | `--cube vk\|gl\|dx7\|dx8\|dx9\|dx10\|dx11\|dx12` | Launch a backend directly in its own window |
 | `--cube ddraw2d` | Launch the pure-2D DirectDraw blit test (`dx7` = the DirectDraw 3D cube) |
 | `--cube vk --scene phong\|meshshader` | Native-VK Phong-lit cube, or the mesh-shader probe |
-| `--cube dx11 --scene <name>` | Pick a DX11 scene. **Pipeline tests:** `spin` `textured` `instanced` `tess` `compute` `dolphin` `gsexplode` `atomics` `drawstress`. **Showcases:** `space` `city` `desert` `nebula2` `ocean2` `showcase` `raymarch` `ocean` `mandelbulb` `nebula` `cel` `matcap` |
+| `--cube dx11 --scene <name>` | Pick a DX11 scene. **Pipeline tests:** `spin` `textured` `instanced` `tess` `compute` `dolphin` `gsexplode` `atomics` `drawstress`. **Showcases:** `space` `city` `desert` `nebula2` `ocean2` `showcase` `raymarch` `ocean` `mandelbulb` `nebula` `cel` `matcap`. **Interactive:** `freelook` `planet` |
 | `--cube dx11 --scene drawstress --draws <n>` | Draw-stress with N draws (128 / 256 / 512 / 1024 / 2048) |
 | `--bench <sec>` | Run the launched cube as a timed benchmark (avg/min/max/1%-low + CSV) |
 | `--vsync` | Present with vsync (default is uncapped) |
@@ -172,9 +187,10 @@ src/cube_ddraw.c      DirectDraw / legacy Direct3D backend (DX7 cube + 2D blit)
 src/cube_d3d8.c       Direct3D 8 backend (DXVK d3d8 wrapper)
 src/cube_d3d9.c       Direct3D 9 backend (DXVK)
 src/cube_d3d10.c      Direct3D 10 backend (DXVK)
-src/cube_d3d11.c      Direct3D 11 scene framework + 21 scenes (pipeline tests + procedural showcases)
+src/cube_d3d11.c      Direct3D 11 scene framework + scenes (pipeline tests, procedural showcases, interactive Free Look / Planet Fly flyers)
 src/cube_phong.frag   native-Vulkan Phong fragment shader (--scene phong)
 src/cube_d3d12.c      Direct3D 12 backend (VKD3D-Proton)
+src/disk.c, disk.h    Disk Speed benchmark (seq/random read+write, cache-buster, storage-class estimate, temp-file cleanup)
 src/gpuinfo.c         GL + VK adapter report
 src/bench.c           benchmark instrumentation (avg/min/max/1%-low + CSV, vsync flag)
 src/hud.c             in-window FPS/API overlay
