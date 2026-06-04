@@ -20,7 +20,8 @@ enum AioMode {
     AIO_MODE_CUBE_DX12,
     AIO_MODE_GPUINFO,
     AIO_MODE_BENCH,
-    AIO_MODE_SEMAPHORE
+    AIO_MODE_SEMAPHORE,
+    AIO_MODE_DISK  // disk (drive) read/write speed test
 };
 
 // Runs the app shell: a persistent left sidebar (the menu, always visible) plus

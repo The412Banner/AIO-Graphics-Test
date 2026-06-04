@@ -16,6 +16,7 @@
 
 #include "menu.h"
 #include "gpuinfo.h"
+#include "disk.h"
 
 #define SB_W 150
 #define HEADER_H 26
@@ -36,6 +37,7 @@ static SbItem g_items[] = {
     {"Cube  -  Direct3D 11", AIO_MODE_CUBE_DX11}, {"Cube  -  Direct3D 12", AIO_MODE_CUBE_DX12},
     {"GPU Info", AIO_MODE_GPUINFO},
     {"Benchmark", AIO_MODE_BENCH},             {"Semaphore Probe", AIO_MODE_SEMAPHORE},
+    {"Disk Speed", AIO_MODE_DISK},
     {"Exit", AIO_MODE_EXIT},
 };
 #define NITEMS ((int)(sizeof(g_items) / sizeof(g_items[0])))
@@ -133,6 +135,22 @@ static HWND g_selall_btn;  // "Select All" / "Clear All" toggle (Benchmark view)
 #define ID_DX11_DEMOS 3766  // "Demo Scenes ->" button (DX11 feature picker)
 #define ID_DX11_BACK 3767   // "<- Back" button (DX11 demo-scenes picker)
 
+// Disk Speed view (in-frame): a size picker + Run button + a report readout.
+#define ID_DISK_RUN 3800
+#define ID_DISK_SIZE_FIRST 3801  // 3801..3803 = 128 / 256 / 512 MiB
+static const int kDiskSizes[3] = {128, 256, 512};
+static HWND g_disk_edit;          // report readout (read-only multiline edit)
+static HWND g_disk_run;           // "Run Disk Test" button
+static HWND g_disk_size_label;    // "Size (256 MB):" caption
+static HWND g_disk_size_btn[3];   // 128 / 256 / 512 buttons
+static int g_disk_mb = 256;       // selected file size (MiB)
+static int g_disk_running;        // a benchmark thread is in flight
+static HANDLE g_disk_thread;      // worker handle (closed when it finishes)
+// Worker -> UI messages. _LINE carries a strdup'd cumulative report (live phase
+// update); _DONE carries the final strdup'd report. The UI frees the payload.
+#define WM_APP_DISK_LINE (WM_APP + 1)
+#define WM_APP_DISK_DONE (WM_APP + 2)
+
 static void get_content_rect(HWND frame, RECT *out) {
     RECT rc;
     GetClientRect(frame, &rc);
@@ -159,6 +177,14 @@ static void destroy_content(void) {
     if (g_selall_btn) { DestroyWindow(g_selall_btn); g_selall_btn = NULL; }
     if (g_results_combo) { DestroyWindow(g_results_combo); g_results_combo = NULL; }
     if (g_draw_label) { DestroyWindow(g_draw_label); g_draw_label = NULL; }
+    // Disk Speed view controls. A running worker thread (if any) keeps the frame
+    // HWND, so its WM_APP_DISK_DONE post still arrives and is handled safely after
+    // these go NULL (the handlers null-check g_disk_edit / g_disk_run).
+    if (g_disk_edit) { DestroyWindow(g_disk_edit); g_disk_edit = NULL; }
+    if (g_disk_run) { DestroyWindow(g_disk_run); g_disk_run = NULL; }
+    if (g_disk_size_label) { DestroyWindow(g_disk_size_label); g_disk_size_label = NULL; }
+    for (int i = 0; i < 3; i++)
+        if (g_disk_size_btn[i]) { DestroyWindow(g_disk_size_btn[i]); g_disk_size_btn[i] = NULL; }
     for (int i = 0; i < 4; i++)
         if (g_dur_btn[i]) { DestroyWindow(g_dur_btn[i]); g_dur_btn[i] = NULL; }
     g_is_probe = 0;
@@ -434,6 +460,69 @@ static void show_placeholder(HWND frame, const char *title, const char *msg) {
     g_placeholder = CreateWindowA("STATIC", msg, WS_CHILD | WS_VISIBLE | SS_LEFT, cr.left, cr.top,
                                   cr.right - cr.left, cr.bottom - cr.top, frame, NULL, g_hinst, NULL);
     if (g_ui_font) SendMessage(g_placeholder, WM_SETFONT, (WPARAM)g_ui_font, TRUE);
+}
+
+// ----- Disk Speed view ------------------------------------------------------
+
+static void update_disk_size_label(void) {
+    if (!g_disk_size_label) return;
+    char s[32];
+    snprintf(s, sizeof(s), "Size (%d MB):", g_disk_mb);
+    SetWindowTextA(g_disk_size_label, s);
+}
+
+// Called on the worker thread after each phase; hands a copy of the cumulative
+// report to the UI thread (which owns and frees it).
+static void disk_progress_cb(void *user, const char *text) {
+    HWND hwnd = (HWND)user;
+    if (!hwnd || !text) return;
+    char *copy = _strdup(text);
+    if (copy) PostMessageA(hwnd, WM_APP_DISK_LINE, 0, (LPARAM)copy);
+}
+
+// Runs the (blocking) disk benchmark off the UI thread, then posts the final
+// report back. g_disk_mb is read once at launch and not changed mid-run.
+static DWORD WINAPI disk_worker(LPVOID p) {
+    HWND hwnd = (HWND)p;
+    char *rep = aio_disk_run(g_disk_mb, disk_progress_cb, hwnd);
+    PostMessageA(hwnd, WM_APP_DISK_DONE, 0, (LPARAM)rep);
+    return 0;
+}
+
+static void show_disk(HWND frame) {
+    destroy_content();
+    SetWindowTextA(g_header, "Disk Read / Write Speed");
+    RECT cr;
+    get_content_rect(frame, &cr);
+    int x = cr.left, y = cr.top;
+
+    g_disk_size_label = CreateWindowA("STATIC", "", WS_CHILD | WS_VISIBLE | SS_LEFT, x, y + 5, 110, 20,
+                                      frame, NULL, g_hinst, NULL);
+    if (g_ui_font) SendMessage(g_disk_size_label, WM_SETFONT, (WPARAM)g_ui_font, TRUE);
+    int bx = x + 116;
+    for (int i = 0; i < 3; i++) {
+        char lbl[16];
+        snprintf(lbl, sizeof(lbl), "%d MB", kDiskSizes[i]);
+        g_disk_size_btn[i] =
+            CreateWindowA("BUTTON", lbl, WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, bx, y, 78, 26, frame,
+                          (HMENU)(INT_PTR)(ID_DISK_SIZE_FIRST + i), g_hinst, NULL);
+        if (g_ui_font) SendMessage(g_disk_size_btn[i], WM_SETFONT, (WPARAM)g_ui_font, TRUE);
+        bx += 86;
+    }
+    g_disk_run = CreateWindowA("BUTTON", "Run Disk Test", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                               bx + 12, y, 130, 26, frame, (HMENU)(INT_PTR)ID_DISK_RUN, g_hinst, NULL);
+    if (g_ui_font) SendMessage(g_disk_run, WM_SETFONT, (WPARAM)g_ui_font, TRUE);
+
+    RECT er = cr;
+    er.top = y + 36;
+    const char *intro =
+        "Sequential write, sequential read, and random 4 KB read of a temp file\r\n"
+        "in your %TEMP% folder (created and deleted each run).\r\n\r\n"
+        "Pick a size and press Run Disk Test.";
+    g_disk_edit = make_report_edit(frame, &er, g_disk_running ? "Running disk benchmark..." : intro);
+
+    update_disk_size_label();
+    if (g_disk_running && g_disk_run) EnableWindow(g_disk_run, FALSE);
 }
 
 // The benchmark rows. The contiguous run with d3d11==1 is the collapsible group;
@@ -981,6 +1070,9 @@ static void layout_content(HWND frame) {
     if (g_edit_vk) layout_gpuinfo(&cr);
     if (g_placeholder)
         MoveWindow(g_placeholder, cr.left, cr.top, cr.right - cr.left, cr.bottom - cr.top, TRUE);
+    if (g_disk_edit)  // size row stays pinned top-left; the report fills the rest
+        MoveWindow(g_disk_edit, cr.left, cr.top + 36, cr.right - cr.left, cr.bottom - cr.top - 36,
+                   TRUE);
 }
 
 #define FOOT_A "Built with "
@@ -1222,6 +1314,9 @@ static void on_select(HWND frame, int action) {
         case AIO_MODE_SEMAPHORE:
             show_semaphore_probe(frame);
             break;
+        case AIO_MODE_DISK:
+            show_disk(frame);
+            break;
         default:
             break;
     }
@@ -1357,6 +1452,29 @@ static LRESULT CALLBACK shell_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
                 rebuild_view(hwnd, show_dx11_scenes);
                 return 0;
             }
+            if (id >= ID_DISK_SIZE_FIRST && id < ID_DISK_SIZE_FIRST + 3) {  // disk file size
+                g_disk_mb = kDiskSizes[id - ID_DISK_SIZE_FIRST];
+                update_disk_size_label();
+                return 0;
+            }
+            if (id == ID_DISK_RUN) {  // start the disk benchmark on a worker thread
+                if (!g_disk_running) {
+                    g_disk_running = 1;
+                    if (g_disk_run) EnableWindow(g_disk_run, FALSE);
+                    if (g_disk_edit)
+                        SetWindowTextA(g_disk_edit,
+                                       "Running disk benchmark...\r\n\r\n"
+                                       "Writing then reading the temp file - please wait.");
+                    g_disk_thread = CreateThread(NULL, 0, disk_worker, (LPVOID)hwnd, 0, NULL);
+                    if (!g_disk_thread) {  // couldn't spawn - revert to idle
+                        g_disk_running = 0;
+                        if (g_disk_run) EnableWindow(g_disk_run, TRUE);
+                        if (g_disk_edit)
+                            SetWindowTextA(g_disk_edit, "Could not start the benchmark thread.");
+                    }
+                }
+                return 0;
+            }
             int cb = id - ID_CB_FIRST;
             if (cb >= 0 && cb < g_cbtn_n) {  // content-area buttons
                 if (g_cb_bench) {            // Benchmark/probe view: poll for a result file
@@ -1425,6 +1543,26 @@ static LRESULT CALLBACK shell_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
                     }
                 }
             }
+            return 0;
+        }
+        case WM_APP_DISK_LINE: {  // live phase update from the disk worker
+            char *t = (char *)lParam;
+            if (t) {
+                if (g_disk_edit) SetWindowTextA(g_disk_edit, t);
+                free(t);
+            }
+            return 0;
+        }
+        case WM_APP_DISK_DONE: {  // disk benchmark finished
+            char *t = (char *)lParam;
+            if (g_disk_edit) SetWindowTextA(g_disk_edit, t ? t : "Disk benchmark failed.");
+            if (t) free(t);
+            if (g_disk_thread) {
+                CloseHandle(g_disk_thread);
+                g_disk_thread = NULL;
+            }
+            g_disk_running = 0;
+            if (g_disk_run) EnableWindow(g_disk_run, TRUE);
             return 0;
         }
         case WM_CTLCOLORSTATIC:

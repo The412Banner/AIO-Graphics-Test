@@ -112,6 +112,11 @@ with optional CLI shortcuts:
   semaphores to measure the Turnip-kgsl timeline-semaphore regression, and prints a plain
   verdict (e.g. *"binary is 1.7× faster"*). (The binary path only differs on a DXVK build
   that honors `DXVK_DISABLE_TIMELINE_SEMAPHORES`.)
+- **Disk Speed** — a non-graphics view that measures **sequential write**, **sequential read**,
+  and **random 4 KB read** throughput (MB/s + IOPS) against a temp file in `%TEMP%` (created and
+  deleted each run). Pick 128 / 256 / 512 MB; the read pass uses unbuffered I/O to dodge the OS
+  page cache where the platform allows it. Handy for seeing how fast a Winlator container's
+  mapped Android storage really is for game I/O.
 - **Live HUD** — every cube window shows the active API + live FPS as an on-screen overlay.
 - **Hang watchdog** — if a backend deadlocks (e.g. a broken GL stack blocking in
   `SwapBuffers`), it self-closes after ~12 s instead of locking up the container.

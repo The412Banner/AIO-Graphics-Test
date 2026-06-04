@@ -58,7 +58,7 @@ jobs:
 
       - name: Compile objects
         run: |
-          for f in cube gpuinfo menu bench hud cube_gl cube_d3d11 cube_d3d12 \
+          for f in cube gpuinfo menu bench hud disk cube_gl cube_d3d11 cube_d3d12 \
                    cube_d3d10 cube_d3d9 cube_d3d8 cube_ddraw watchdog; do
             ${{ matrix.prefix }}-gcc -c src/$f.c \
               -I src -I vk/include \
@@ -95,7 +95,7 @@ jobs:
       - name: Link ${{ matrix.out }}
         run: |
           ${{ matrix.prefix }}-gcc \
-            cube.o gpuinfo.o menu.o bench.o hud.o cube_gl.o cube_d3d11.o cube_d3d12.o \
+            cube.o gpuinfo.o menu.o bench.o hud.o disk.o cube_gl.o cube_d3d11.o cube_d3d12.o \
             cube_d3d10.o cube_d3d9.o cube_d3d8.o cube_ddraw.o watchdog.o app_res.o \
             -mwindows \
             -L vk/lib \
