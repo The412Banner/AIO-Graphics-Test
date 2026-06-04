@@ -1,8 +1,8 @@
 // AIO Graphics Test - disk (drive) read/write speed test.
 //
-// Measures sequential write, sequential read, and random 4 KB read throughput
-// against a temporary file, then reports MB/s + IOPS. Useful on Winlator/Wine
-// to see how fast the mapped Android storage actually is for game I/O.
+// Measures sequential write, sequential read, random 4 KB read, and random 4 KB
+// write throughput against a temporary file, then reports MB/s + IOPS. Useful on
+// Winlator/Wine to see how fast the mapped Android storage is for game I/O.
 #ifndef AIO_DISK_H
 #define AIO_DISK_H
 
