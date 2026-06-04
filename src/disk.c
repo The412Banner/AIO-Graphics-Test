@@ -28,10 +28,12 @@
 //   - Random read/write visit a SHUFFLED set of UNIQUE 4 KiB block offsets (each
 //     block touched at most once, so a repeat can't be served from RAM), and run
 //     for a fixed 7-second window rather than a fixed op count.
-//   - The random WRITE handle is opened WRITE_THROUGH and is NOT flushed per op.
-//     CPDT deliberately avoids a per-op device flush (on Windows that forces a
-//     device-buffer flush and reads "significantly lower"); WRITE_THROUGH alone is
-//     the comparable durability level. It runs last so it doesn't dirty the file
+//   - The random WRITE is flushed PER OP (FlushFileBuffers). On the Android device
+//     CPDT runs with write-buffering off, which makes it fsync() every write; under
+//     Wine FlushFileBuffers is the analog. Without it, Wine ignores WRITE_THROUGH,
+//     lets the scattered writes coalesce in the page cache, and the figure balloons
+//     to RAM speed (measured 1.7 GB/s vs CPDT's 40 MB/s). The per-op flush gives the
+//     committed-write speed CPDT reports. It runs last so it doesn't dirty the file
 //     before the reads.
 //
 // Copyright (c) 2026 The412Banner. Licensed under Apache-2.0 (see LICENSE).
@@ -312,13 +314,14 @@ char *aio_disk_run(int size_mb, int defeat_cache, aio_disk_progress_fn progress,
         }
     }
 
-    // ---- Random 4 KB write (LAST; WRITE_THROUGH, no per-op flush; 7 s window) -
-    // CPDT-matched: the handle is opened FILE_FLAG_WRITE_THROUGH and each scattered
-    // 4 KiB write just writes - NO FlushFileBuffers per op. CPDT deliberately skips
-    // a per-op device flush (on Windows it forces a device-buffer flush that reads
-    // "significantly lower"); WRITE_THROUGH alone is the comparable level. Writes
-    // hit a shuffled set of unique offsets for a fixed 7 s. Runs after the reads so
-    // it doesn't dirty the file beforehand.
+    // ---- Random 4 KB write (LAST; WRITE_THROUGH + per-op flush; 7 s window) ----
+    // Each scattered 4 KiB write is committed to the device before the next
+    // (WRITE_THROUGH handle + a FlushFileBuffers per op). That's the Wine analog of
+    // CPDT's per-op fsync on Android (write-buffering off) and gives the same
+    // committed-write speed (~tens of MB/s). Without the per-op flush, Wine ignores
+    // WRITE_THROUGH and the writes coalesce in cache, reporting RAM speed. Writes hit
+    // a shuffled set of unique offsets for up to 7 s. Runs after the reads so it
+    // doesn't dirty the file beforehand.
     if (!err) {
         HANDLE h = CreateFileA(path, GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
                                FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_WRITE_THROUGH, NULL);
@@ -337,11 +340,11 @@ char *aio_disk_run(int size_mb, int defeat_cache, aio_disk_progress_fn progress,
                     if (!WriteFile(h, buf, DISK_RAND_SZ, &wrote, NULL) || wrote != DISK_RAND_SZ) {
                         err = "Random write failed."; break;
                     }
+                    FlushFileBuffers(h);  // commit THIS write before timing the next
                     randw_ops++;
-                    if ((i & 255) == 0 && now_sec(freq) - t0 >= DISK_RAND_SECS) break;
+                    if ((randw_ops & 31) == 0 && now_sec(freq) - t0 >= DISK_RAND_SECS) break;
                 }
                 double t1 = now_sec(freq);
-                FlushFileBuffers(h);  // single trailing flush so the buster/delete is clean
                 free(plan);
                 if (!err) {
                     t_randw = t1 - t0;
