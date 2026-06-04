@@ -137,10 +137,10 @@ static HWND g_selall_btn;  // "Select All" / "Clear All" toggle (Benchmark view)
 
 // Disk Speed view (in-frame): a size picker + Run buttons + a report readout.
 #define ID_DISK_RUN 3800          // "Run (quick)" - cached read, fast
-#define ID_DISK_SIZE_FIRST 3801   // 3801..3803 = 128 / 256 / 512 MiB
+#define ID_DISK_SIZE_FIRST 3801   // 3801..3803 = 256 / 512 / 1024 MiB
 #define ID_DISK_RUN2 3804         // "Real-Flash Read" - defeats the page cache
 #define ID_DISK_HELP 3805         // "What's this?" explainer popup
-static const int kDiskSizes[3] = {128, 256, 512};
+static const int kDiskSizes[3] = {256, 512, 1024};
 
 // "What's this?" text for the Disk Speed page.
 static const char kDiskHelpText[] =
@@ -195,9 +195,9 @@ static HWND g_disk_edit;          // report readout (read-only multiline edit)
 static HWND g_disk_run;           // "Run (quick)" button
 static HWND g_disk_run2;          // "Real-Flash Read" button (cache-defeating)
 static HWND g_disk_help;          // "What's this?" button
-static HWND g_disk_size_label;    // "Size (256 MB):" caption
-static HWND g_disk_size_btn[3];   // 128 / 256 / 512 buttons
-static int g_disk_mb = 256;       // selected file size (MiB)
+static HWND g_disk_size_label;    // "Size (512 MB):" caption
+static HWND g_disk_size_btn[3];   // 256 / 512 / 1024 buttons
+static int g_disk_mb = 512;       // selected file size (MiB)
 static int g_disk_running;        // a benchmark thread is in flight
 static int g_disk_defeat;         // mode of the in-flight run (1 = real-flash)
 static HANDLE g_disk_thread;      // worker handle (closed when it finishes)
