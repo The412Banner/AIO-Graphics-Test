@@ -21,9 +21,18 @@
 // hint, the kernel's async readahead loads neighbour pages the random reads never
 // reuse (so the random average stays honestly cold) yet leaves the file fully
 // resident for a following sequential pass. Two flushes is the only reliable fix
-// on Wine, where FILE_FLAG_NO_BUFFERING is ignored. The random WRITE runs last,
-// flushed per-op (committed-write speed) so it's "real" in both modes and doesn't
-// dirty the file before the reads.
+// on Wine, where FILE_FLAG_NO_BUFFERING is ignored.
+//
+// Method matches CrossPlatformDiskTest (CPDT, com.Saplin.CPDT) so the numbers are
+// comparable to that on-device benchmark:
+//   - Random read/write visit a SHUFFLED set of UNIQUE 4 KiB block offsets (each
+//     block touched at most once, so a repeat can't be served from RAM), and run
+//     for a fixed 7-second window rather than a fixed op count.
+//   - The random WRITE handle is opened WRITE_THROUGH and is NOT flushed per op.
+//     CPDT deliberately avoids a per-op device flush (on Windows that forces a
+//     device-buffer flush and reads "significantly lower"); WRITE_THROUGH alone is
+//     the comparable durability level. It runs last so it doesn't dirty the file
+//     before the reads.
 //
 // Copyright (c) 2026 The412Banner. Licensed under Apache-2.0 (see LICENSE).
 
@@ -37,10 +46,10 @@
 
 #include "disk.h"
 
-#define DISK_BLOCK    (4u * 1024u * 1024u)  // sequential block: 4 MiB
-#define DISK_RAND_SZ  4096u                  // random read/write size: 4 KiB
-#define DISK_RAND_CNT 4096                    // number of random reads (~16 MiB)
-#define DISK_RANDW_CNT 1024                   // random 4 KiB writes (per-op flushed, so fewer)
+#define DISK_BLOCK    (4u * 1024u * 1024u)  // sequential block: 4 MiB (CPDT bigBlock)
+#define DISK_RAND_SZ  4096u                  // random read/write size: 4 KiB (CPDT smallBlock)
+#define DISK_RAND_SECS 7.0                    // CPDT runs each random test for a fixed 7 s window
+#define DISK_RAND_CAP (1u << 20)              // cap on shuffled unique positions (CPDT maxBlocksInTest)
 #define DISK_REPORT_CAP 2560                  // report buffer (room for a long path + notes)
 
 static double now_sec(LARGE_INTEGER freq) {
@@ -56,6 +65,26 @@ static void *aligned_alloc_pages(size_t n) {
 }
 static void aligned_free_pages(void *p) {
     if (p) VirtualFree(p, 0, MEM_RELEASE);
+}
+
+// Build a Fisher-Yates-shuffled array of unique 4 KiB block offsets covering the
+// file (capped at DISK_RAND_CAP blocks, like CPDT). Visiting each block at most
+// once is what keeps random reads honest - a repeated offset could be served from
+// the page cache. Caller frees with free(). Sets *out_n; returns NULL on OOM.
+static uint64_t *make_shuffled_offsets(uint64_t slots, uint64_t *out_n) {
+    uint64_t n = slots < DISK_RAND_CAP ? slots : DISK_RAND_CAP;
+    if (n == 0) { *out_n = 0; return NULL; }
+    uint64_t *a = (uint64_t *)malloc((size_t)n * sizeof(uint64_t));
+    if (!a) { *out_n = 0; return NULL; }
+    for (uint64_t i = 0; i < n; i++) a[i] = i * (uint64_t)DISK_RAND_SZ;
+    uint32_t s = 0x2545f491u;
+    for (uint64_t i = n - 1; i > 0; i--) {
+        s = s * 1664525u + 1013904223u;
+        uint64_t j = (uint64_t)(s % (uint32_t)(i + 1));
+        uint64_t t = a[i]; a[i] = a[j]; a[j] = t;
+    }
+    *out_n = n;
+    return a;
 }
 
 // Write `bytes` of `buf` (DISK_BLOCK each) to `path`, write-through + flushed so
@@ -155,6 +184,7 @@ char *aio_disk_run(int size_mb, int defeat_cache, aio_disk_progress_fn progress,
     double write_mbps = 0.0, read_mbps = 0.0, rand_mbps = 0.0, rand_iops = 0.0;
     double randw_mbps = 0.0, randw_iops = 0.0;
     double t_write = 0.0, t_read = 0.0, t_rand = 0.0, t_randw = 0.0;
+    uint64_t rand_ops = 0, randw_ops = 0;  // 4 KiB ops completed in the 7 s window
     const char *err = NULL;
 
     // ---- Sequential write (write-through, timed) ---------------------------
@@ -250,66 +280,78 @@ char *aio_disk_run(int size_mb, int defeat_cache, aio_disk_progress_fn progress,
             h = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
                             FILE_FLAG_RANDOM_ACCESS, NULL);
         if (h != INVALID_HANDLE_VALUE) {
-            uint64_t slots = total / DISK_RAND_SZ;  // number of 4 KiB-aligned offsets
-            uint32_t rng = 0x9e3779b9u;
-            double t0 = now_sec(freq);
-            for (int i = 0; i < DISK_RAND_CNT && !err; i++) {
-                rng = rng * 1664525u + 1013904223u;
-                uint64_t off = (uint64_t)(rng % (uint32_t)slots) * DISK_RAND_SZ;
-                LARGE_INTEGER li;
-                li.QuadPart = (LONGLONG)off;
-                if (!SetFilePointerEx(h, li, NULL, FILE_BEGIN)) { err = "Seek failed."; break; }
-                DWORD got = 0;
-                if (!ReadFile(h, buf, DISK_RAND_SZ, &got, NULL) || got != DISK_RAND_SZ)
-                    err = "Random read failed.";
-            }
-            double t1 = now_sec(freq);
-            CloseHandle(h);
-            if (!err) {
-                t_rand = t1 - t0;
-                if (t_rand > 0.0) {
-                    rand_iops = (double)DISK_RAND_CNT / t_rand;
-                    rand_mbps = (double)DISK_RAND_CNT * DISK_RAND_SZ / 1e6 / t_rand;
+            uint64_t plan_n = 0;
+            uint64_t *plan = make_shuffled_offsets(total / DISK_RAND_SZ, &plan_n);
+            if (!plan) {
+                err = "Out of memory building the random-access plan.";
+            } else {
+                double t0 = now_sec(freq);
+                for (uint64_t i = 0; i < plan_n && !err; i++) {
+                    LARGE_INTEGER li;
+                    li.QuadPart = (LONGLONG)plan[i];
+                    if (!SetFilePointerEx(h, li, NULL, FILE_BEGIN)) { err = "Seek failed."; break; }
+                    DWORD got = 0;
+                    if (!ReadFile(h, buf, DISK_RAND_SZ, &got, NULL) || got != DISK_RAND_SZ) {
+                        err = "Random read failed."; break;
+                    }
+                    rand_ops++;
+                    // CPDT-style fixed window: stop after 7 s (check every 256 ops).
+                    if ((i & 255) == 0 && now_sec(freq) - t0 >= DISK_RAND_SECS) break;
+                }
+                double t1 = now_sec(freq);
+                free(plan);
+                if (!err) {
+                    t_rand = t1 - t0;
+                    if (t_rand > 0.0 && rand_ops > 0) {
+                        rand_iops = (double)rand_ops / t_rand;
+                        rand_mbps = (double)rand_ops * DISK_RAND_SZ / 1e6 / t_rand;
+                    }
                 }
             }
+            CloseHandle(h);
         }
     }
 
-    // ---- Random 4 KB write (LAST; per-op flush = committed-write speed) -----
-    // Each scattered 4 KiB write is committed to the device before the next
-    // (write-through + a FlushFileBuffers per op). That makes this queue-depth-1
-    // *durable* random write - the worst case that matters for save-game and
-    // shader-cache commits, and the figure external benchmarks report. A single
-    // trailing flush (bulk) over-reports ~10x on Wine: the scattered writes stay
-    // in RAM and coalesce into one sequential flush. Runs after the reads so it
-    // doesn't dirty the file beforehand.
+    // ---- Random 4 KB write (LAST; WRITE_THROUGH, no per-op flush; 7 s window) -
+    // CPDT-matched: the handle is opened FILE_FLAG_WRITE_THROUGH and each scattered
+    // 4 KiB write just writes - NO FlushFileBuffers per op. CPDT deliberately skips
+    // a per-op device flush (on Windows it forces a device-buffer flush that reads
+    // "significantly lower"); WRITE_THROUGH alone is the comparable level. Writes
+    // hit a shuffled set of unique offsets for a fixed 7 s. Runs after the reads so
+    // it doesn't dirty the file beforehand.
     if (!err) {
         HANDLE h = CreateFileA(path, GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
                                FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_WRITE_THROUGH, NULL);
         if (h != INVALID_HANDLE_VALUE) {
-            uint64_t slots = total / DISK_RAND_SZ;
-            uint32_t rng = 0x85ebca6bu;
-            double t0 = now_sec(freq);
-            for (int i = 0; i < DISK_RANDW_CNT && !err; i++) {
-                rng = rng * 1664525u + 1013904223u;
-                uint64_t off = (uint64_t)(rng % (uint32_t)slots) * DISK_RAND_SZ;
-                LARGE_INTEGER li;
-                li.QuadPart = (LONGLONG)off;
-                if (!SetFilePointerEx(h, li, NULL, FILE_BEGIN)) { err = "Seek failed."; break; }
-                DWORD wrote = 0;
-                if (!WriteFile(h, buf, DISK_RAND_SZ, &wrote, NULL) || wrote != DISK_RAND_SZ)
-                    err = "Random write failed.";
-                FlushFileBuffers(h);  // commit THIS write before timing the next
-            }
-            double t1 = now_sec(freq);
-            CloseHandle(h);
-            if (!err) {
-                t_randw = t1 - t0;
-                if (t_randw > 0.0) {
-                    randw_iops = (double)DISK_RANDW_CNT / t_randw;
-                    randw_mbps = (double)DISK_RANDW_CNT * DISK_RAND_SZ / 1e6 / t_randw;
+            uint64_t plan_n = 0;
+            uint64_t *plan = make_shuffled_offsets(total / DISK_RAND_SZ, &plan_n);
+            if (!plan) {
+                err = "Out of memory building the random-access plan.";
+            } else {
+                double t0 = now_sec(freq);
+                for (uint64_t i = 0; i < plan_n && !err; i++) {
+                    LARGE_INTEGER li;
+                    li.QuadPart = (LONGLONG)plan[i];
+                    if (!SetFilePointerEx(h, li, NULL, FILE_BEGIN)) { err = "Seek failed."; break; }
+                    DWORD wrote = 0;
+                    if (!WriteFile(h, buf, DISK_RAND_SZ, &wrote, NULL) || wrote != DISK_RAND_SZ) {
+                        err = "Random write failed."; break;
+                    }
+                    randw_ops++;
+                    if ((i & 255) == 0 && now_sec(freq) - t0 >= DISK_RAND_SECS) break;
+                }
+                double t1 = now_sec(freq);
+                FlushFileBuffers(h);  // single trailing flush so the buster/delete is clean
+                free(plan);
+                if (!err) {
+                    t_randw = t1 - t0;
+                    if (t_randw > 0.0 && randw_ops > 0) {
+                        randw_iops = (double)randw_ops / t_randw;
+                        randw_mbps = (double)randw_ops * DISK_RAND_SZ / 1e6 / t_randw;
+                    }
                 }
             }
+            CloseHandle(h);
         }
     }
 
@@ -367,14 +409,16 @@ char *aio_disk_run(int size_mb, int defeat_cache, aio_disk_progress_fn progress,
              "File size : %u MiB   (block 4 MiB)\r\n\r\n"
              "Sequential write : %7.1f MB/s   (%.2f s)\r\n"
              "Sequential read  : %7.1f MB/s   (%.2f s)\r\n"
-             "Random 4K read   : %7.1f MB/s   (%.0f IOPS, %d reads)\r\n"
-             "Random 4K write  : %7.1f MB/s   (%.0f IOPS, %d writes)\r\n\r\n"
+             "Random 4K read   : %7.1f MB/s   (%.0f IOPS, %llu reads / %.1fs)\r\n"
+             "Random 4K write  : %7.1f MB/s   (%.0f IOPS, %llu writes / %.1fs)\r\n\r\n"
              "Storage class    : ~ %s\r\n"
              "                   (or better - in-container estimate%s)\r\n\r\n"
-             "Throughput is decimal MB/s (1,000,000 bytes).\r\n%s",
-             path, file_mib, write_mbps, t_write, read_mbps, t_read, rand_mbps, rand_iops,
-             DISK_RAND_CNT, randw_mbps, randw_iops, DISK_RANDW_CNT,
+             "Throughput is decimal MB/s (1,000,000 bytes). Random tests run a fixed\r\n"
+             "%.0f s over shuffled unique 4 KiB offsets (CPDT-matched).\r\n%s",
+             path, file_mib, write_mbps, t_write, read_mbps, t_read,
+             rand_mbps, rand_iops, (unsigned long long)rand_ops, t_rand,
+             randw_mbps, randw_iops, (unsigned long long)randw_ops, t_randw,
              cls, defeat_cache ? "" : "; run Real-Flash Read for a read-based class",
-             note);
+             DISK_RAND_SECS, note);
     return report;
 }
