@@ -135,16 +135,57 @@ static HWND g_selall_btn;  // "Select All" / "Clear All" toggle (Benchmark view)
 #define ID_DX11_DEMOS 3766  // "Demo Scenes ->" button (DX11 feature picker)
 #define ID_DX11_BACK 3767   // "<- Back" button (DX11 demo-scenes picker)
 
-// Disk Speed view (in-frame): a size picker + Run button + a report readout.
-#define ID_DISK_RUN 3800
-#define ID_DISK_SIZE_FIRST 3801  // 3801..3803 = 128 / 256 / 512 MiB
+// Disk Speed view (in-frame): a size picker + Run buttons + a report readout.
+#define ID_DISK_RUN 3800          // "Run (quick)" - cached read, fast
+#define ID_DISK_SIZE_FIRST 3801   // 3801..3803 = 128 / 256 / 512 MiB
+#define ID_DISK_RUN2 3804         // "Real-Flash Read" - defeats the page cache
+#define ID_DISK_HELP 3805         // "What's this?" explainer popup
 static const int kDiskSizes[3] = {128, 256, 512};
+
+// "What's this?" text for the Disk Speed page.
+static const char kDiskHelpText[] =
+    "DISK SPEED - what it measures\r\n"
+    "\r\n"
+    "This tests how fast files read and write from INSIDE the container - the\r\n"
+    "speed a Windows game running here actually gets. The test file is created in\r\n"
+    "%TEMP% (on your container's C: drive), measured, and deleted.\r\n"
+    "\r\n"
+    "It is NOT a raw hardware benchmark of the Android storage chip. Everything\r\n"
+    "goes through Wine + the container's filesystem, so these numbers include that\r\n"
+    "overhead - which is exactly what matters for game load times.\r\n"
+    "\r\n"
+    "THE THREE RESULTS\r\n"
+    "  - Sequential write : large continuous write (e.g. installing/extracting).\r\n"
+    "  - Sequential read  : large continuous read (e.g. loading a big level).\r\n"
+    "  - Random 4K read   : many tiny scattered reads (shader cache, small assets).\r\n"
+    "    Reported in MB/s and IOPS (I/O operations per second).\r\n"
+    "\r\n"
+    "WHY TWO RUN BUTTONS\r\n"
+    "  When a file is read right after being written, the system serves it from\r\n"
+    "  the OS cache in RAM, not the storage - so the read looks many times faster\r\n"
+    "  than the drive really is (often several GB/s, which no phone flash can do).\r\n"
+    "\r\n"
+    "  - Run (quick): fast, but the read/random numbers are this cached RAM speed.\r\n"
+    "    Handy to see the cache benefit; not the real disk.\r\n"
+    "  - Real-Flash Read: before reading, it writes a second file about the size\r\n"
+    "    of your device's RAM. That pushes the test file out of the cache, so the\r\n"
+    "    read happens 'cold' from actual storage. Slower and writes several extra\r\n"
+    "    GB (deleted afterwards), but the read reflects true flash speed.\r\n"
+    "\r\n"
+    "  The WRITE number is always real - writes are flushed straight to storage\r\n"
+    "  in both modes.\r\n"
+    "\r\n"
+    "TIP: pick a larger size for a steadier figure. If Real-Flash mode warns that\r\n"
+    "the cache-buster was shrunk, free up some storage for an accurate read.";
 static HWND g_disk_edit;          // report readout (read-only multiline edit)
-static HWND g_disk_run;           // "Run Disk Test" button
+static HWND g_disk_run;           // "Run (quick)" button
+static HWND g_disk_run2;          // "Real-Flash Read" button (cache-defeating)
+static HWND g_disk_help;          // "What's this?" button
 static HWND g_disk_size_label;    // "Size (256 MB):" caption
 static HWND g_disk_size_btn[3];   // 128 / 256 / 512 buttons
 static int g_disk_mb = 256;       // selected file size (MiB)
 static int g_disk_running;        // a benchmark thread is in flight
+static int g_disk_defeat;         // mode of the in-flight run (1 = real-flash)
 static HANDLE g_disk_thread;      // worker handle (closed when it finishes)
 // Worker -> UI messages. _LINE carries a strdup'd cumulative report (live phase
 // update); _DONE carries the final strdup'd report. The UI frees the payload.
@@ -182,6 +223,8 @@ static void destroy_content(void) {
     // these go NULL (the handlers null-check g_disk_edit / g_disk_run).
     if (g_disk_edit) { DestroyWindow(g_disk_edit); g_disk_edit = NULL; }
     if (g_disk_run) { DestroyWindow(g_disk_run); g_disk_run = NULL; }
+    if (g_disk_run2) { DestroyWindow(g_disk_run2); g_disk_run2 = NULL; }
+    if (g_disk_help) { DestroyWindow(g_disk_help); g_disk_help = NULL; }
     if (g_disk_size_label) { DestroyWindow(g_disk_size_label); g_disk_size_label = NULL; }
     for (int i = 0; i < 3; i++)
         if (g_disk_size_btn[i]) { DestroyWindow(g_disk_size_btn[i]); g_disk_size_btn[i] = NULL; }
@@ -481,12 +524,19 @@ static void disk_progress_cb(void *user, const char *text) {
 }
 
 // Runs the (blocking) disk benchmark off the UI thread, then posts the final
-// report back. g_disk_mb is read once at launch and not changed mid-run.
+// report back. g_disk_mb / g_disk_defeat are read once at launch (a run is in
+// flight, so they don't change mid-run).
 static DWORD WINAPI disk_worker(LPVOID p) {
     HWND hwnd = (HWND)p;
-    char *rep = aio_disk_run(g_disk_mb, disk_progress_cb, hwnd);
+    char *rep = aio_disk_run(g_disk_mb, g_disk_defeat, disk_progress_cb, hwnd);
     PostMessageA(hwnd, WM_APP_DISK_DONE, 0, (LPARAM)rep);
     return 0;
+}
+
+// Enable/disable both Run buttons together (disabled while a run is in flight).
+static void disk_buttons_enable(int on) {
+    if (g_disk_run) EnableWindow(g_disk_run, on);
+    if (g_disk_run2) EnableWindow(g_disk_run2, on);
 }
 
 static void show_disk(HWND frame) {
@@ -496,6 +546,7 @@ static void show_disk(HWND frame) {
     get_content_rect(frame, &cr);
     int x = cr.left, y = cr.top;
 
+    // Row 1: size picker.
     g_disk_size_label = CreateWindowA("STATIC", "", WS_CHILD | WS_VISIBLE | SS_LEFT, x, y + 5, 110, 20,
                                       frame, NULL, g_hinst, NULL);
     if (g_ui_font) SendMessage(g_disk_size_label, WM_SETFONT, (WPARAM)g_ui_font, TRUE);
@@ -509,20 +560,37 @@ static void show_disk(HWND frame) {
         if (g_ui_font) SendMessage(g_disk_size_btn[i], WM_SETFONT, (WPARAM)g_ui_font, TRUE);
         bx += 86;
     }
-    g_disk_run = CreateWindowA("BUTTON", "Run Disk Test", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                               bx + 12, y, 130, 26, frame, (HMENU)(INT_PTR)ID_DISK_RUN, g_hinst, NULL);
-    if (g_ui_font) SendMessage(g_disk_run, WM_SETFONT, (WPARAM)g_ui_font, TRUE);
+
+    // Row 2: the two Run buttons. Quick = cached read; Real-Flash defeats the
+    // page cache for a true storage figure.
+    int y2 = y + 34;
+    g_disk_run = CreateWindowA("BUTTON", "Run (quick)", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, x, y2,
+                               120, 26, frame, (HMENU)(INT_PTR)ID_DISK_RUN, g_hinst, NULL);
+    g_disk_run2 = CreateWindowA("BUTTON", "Real-Flash Read", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                x + 130, y2, 160, 26, frame, (HMENU)(INT_PTR)ID_DISK_RUN2, g_hinst,
+                                NULL);
+    g_disk_help = CreateWindowA("BUTTON", "What's this?", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                x + 300, y2, 120, 26, frame, (HMENU)(INT_PTR)ID_DISK_HELP, g_hinst,
+                                NULL);
+    if (g_ui_font) {
+        SendMessage(g_disk_run, WM_SETFONT, (WPARAM)g_ui_font, TRUE);
+        SendMessage(g_disk_run2, WM_SETFONT, (WPARAM)g_ui_font, TRUE);
+        SendMessage(g_disk_help, WM_SETFONT, (WPARAM)g_ui_font, TRUE);
+    }
 
     RECT er = cr;
-    er.top = y + 36;
+    er.top = y2 + 36;
     const char *intro =
         "Sequential write, sequential read, and random 4 KB read of a temp file\r\n"
         "in your %TEMP% folder (created and deleted each run).\r\n\r\n"
-        "Pick a size and press Run Disk Test.";
+        "Run (quick): fast, but the read is served from the OS cache (RAM-fast).\r\n"
+        "Real-Flash Read: writes a RAM-sized cache-buster first so the read is\r\n"
+        "cold and reflects true storage speed (slower; writes several extra GB).\r\n\r\n"
+        "Pick a size, then press a Run button.";
     g_disk_edit = make_report_edit(frame, &er, g_disk_running ? "Running disk benchmark..." : intro);
 
     update_disk_size_label();
-    if (g_disk_running && g_disk_run) EnableWindow(g_disk_run, FALSE);
+    if (g_disk_running) disk_buttons_enable(FALSE);
 }
 
 // The benchmark rows. The contiguous run with d3d11==1 is the collapsible group;
@@ -1070,8 +1138,8 @@ static void layout_content(HWND frame) {
     if (g_edit_vk) layout_gpuinfo(&cr);
     if (g_placeholder)
         MoveWindow(g_placeholder, cr.left, cr.top, cr.right - cr.left, cr.bottom - cr.top, TRUE);
-    if (g_disk_edit)  // size row stays pinned top-left; the report fills the rest
-        MoveWindow(g_disk_edit, cr.left, cr.top + 36, cr.right - cr.left, cr.bottom - cr.top - 36,
+    if (g_disk_edit)  // size + run rows stay pinned top-left; the report fills the rest
+        MoveWindow(g_disk_edit, cr.left, cr.top + 70, cr.right - cr.left, cr.bottom - cr.top - 70,
                    TRUE);
 }
 
@@ -1457,22 +1525,33 @@ static LRESULT CALLBACK shell_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
                 update_disk_size_label();
                 return 0;
             }
-            if (id == ID_DISK_RUN) {  // start the disk benchmark on a worker thread
+            if (id == ID_DISK_RUN || id == ID_DISK_RUN2) {  // start a disk benchmark run
                 if (!g_disk_running) {
                     g_disk_running = 1;
-                    if (g_disk_run) EnableWindow(g_disk_run, FALSE);
+                    g_disk_defeat = (id == ID_DISK_RUN2) ? 1 : 0;  // real-flash vs quick
+                    disk_buttons_enable(FALSE);
                     if (g_disk_edit)
                         SetWindowTextA(g_disk_edit,
-                                       "Running disk benchmark...\r\n\r\n"
-                                       "Writing then reading the temp file - please wait.");
+                                       g_disk_defeat
+                                           ? "Running real-flash benchmark...\r\n\r\n"
+                                             "Writing the test file, then a RAM-sized cache-buster to\r\n"
+                                             "evict it, then reading cold. This writes several GB and\r\n"
+                                             "takes a while - please wait."
+                                           : "Running disk benchmark...\r\n\r\n"
+                                             "Writing then reading the temp file - please wait.");
                     g_disk_thread = CreateThread(NULL, 0, disk_worker, (LPVOID)hwnd, 0, NULL);
                     if (!g_disk_thread) {  // couldn't spawn - revert to idle
                         g_disk_running = 0;
-                        if (g_disk_run) EnableWindow(g_disk_run, TRUE);
+                        disk_buttons_enable(TRUE);
                         if (g_disk_edit)
                             SetWindowTextA(g_disk_edit, "Could not start the benchmark thread.");
                     }
                 }
+                return 0;
+            }
+            if (id == ID_DISK_HELP) {  // "What's this?" explainer
+                MessageBoxA(hwnd, kDiskHelpText, "Disk Speed - What's this?",
+                            MB_OK | MB_ICONINFORMATION);
                 return 0;
             }
             int cb = id - ID_CB_FIRST;
@@ -1562,7 +1641,7 @@ static LRESULT CALLBACK shell_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
                 g_disk_thread = NULL;
             }
             g_disk_running = 0;
-            if (g_disk_run) EnableWindow(g_disk_run, TRUE);
+            disk_buttons_enable(TRUE);
             return 0;
         }
         case WM_CTLCOLORSTATIC:

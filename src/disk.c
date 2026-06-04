@@ -1,10 +1,15 @@
 // AIO Graphics Test - disk (drive) read/write speed test.
 //
 // Writes a temp file sequentially (write-through, then FlushFileBuffers so the
-// data really lands on the device), reads it back sequentially with unbuffered
-// I/O to dodge the OS page cache where the platform allows it, then does a burst
-// of random 4 KB reads for an IOPS figure. Reports MB/s (decimal, 1e6 bytes) and
-// IOPS, the units drive benchmarks conventionally use.
+// data really lands on the device), reads it back, then does a burst of random
+// 4 KB reads for an IOPS figure. Reports MB/s (decimal, 1e6 bytes) and IOPS, the
+// units drive benchmarks conventionally use.
+//
+// The catch on Wine/Winlator: FILE_FLAG_NO_BUFFERING is usually ignored, so a
+// read right after the write is served from the Linux page cache (RAM) and looks
+// absurdly fast. In real-flash mode we defeat that by writing a second file the
+// size of the device's RAM between the write and the read - that evicts the test
+// file's pages from the cache (LRU), so the read pass hits the storage cold.
 //
 // Copyright (c) 2026 The412Banner. Licensed under Apache-2.0 (see LICENSE).
 
@@ -21,7 +26,7 @@
 #define DISK_BLOCK    (4u * 1024u * 1024u)  // sequential block: 4 MiB
 #define DISK_RAND_SZ  4096u                  // random read size: 4 KiB
 #define DISK_RAND_CNT 4096                    // number of random reads (~16 MiB)
-#define DISK_REPORT_CAP 1536                  // report buffer (room for a long temp path)
+#define DISK_REPORT_CAP 2048                  // report buffer (room for a long path + notes)
 
 static double now_sec(LARGE_INTEGER freq) {
     LARGE_INTEGER c;
@@ -38,7 +43,24 @@ static void aligned_free_pages(void *p) {
     if (p) VirtualFree(p, 0, MEM_RELEASE);
 }
 
-char *aio_disk_run(int size_mb, aio_disk_progress_fn progress, void *user) {
+// Write `bytes` of `buf` (DISK_BLOCK each) to `path`, write-through + flushed so
+// it really hits the device. Used for both the (timed) test file and the
+// (untimed) cache-buster. Returns 1 on success, 0 on failure.
+static int write_file_blocks(const char *path, uint64_t bytes, const void *buf) {
+    HANDLE h = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                           FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_WRITE_THROUGH, NULL);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    int ok = 1;
+    for (uint64_t off = 0; off < bytes; off += DISK_BLOCK) {
+        DWORD wrote = 0;
+        if (!WriteFile(h, buf, DISK_BLOCK, &wrote, NULL) || wrote != DISK_BLOCK) { ok = 0; break; }
+    }
+    FlushFileBuffers(h);
+    CloseHandle(h);
+    return ok;
+}
+
+char *aio_disk_run(int size_mb, int defeat_cache, aio_disk_progress_fn progress, void *user) {
     char *report = (char *)malloc(DISK_REPORT_CAP);
     if (!report) return NULL;
     report[0] = '\0';
@@ -51,19 +73,43 @@ char *aio_disk_run(int size_mb, aio_disk_progress_fn progress, void *user) {
     uint64_t nblocks = total / DISK_BLOCK;
     unsigned file_mib = (unsigned)(total / (1024u * 1024u));
 
-    // Temp file path: %TEMP%\AIO-Graphics-Test_disk.tmp, falling back to the
-    // current directory if GetTempPath fails.
-    char dir[MAX_PATH], path[MAX_PATH];
+    // Temp file paths: %TEMP%\AIO-Graphics-Test_disk{,_buster}.tmp.
+    char dir[MAX_PATH], path[MAX_PATH], buster[MAX_PATH];
     DWORD dn = GetTempPathA(sizeof(dir), dir);
     if (dn == 0 || dn >= sizeof(dir)) strcpy(dir, ".\\");
     snprintf(path, sizeof(path), "%sAIO-Graphics-Test_disk.tmp", dir);
+    snprintf(buster, sizeof(buster), "%sAIO-Graphics-Test_buster.tmp", dir);
+
+    // Physical RAM + free space - used to size the cache-buster in real-flash mode.
+    MEMORYSTATUSEX ms;
+    ms.dwLength = sizeof(ms);
+    uint64_t ram = GlobalMemoryStatusEx(&ms) ? (uint64_t)ms.ullTotalPhys : 0;
+    ULARGE_INTEGER freeb;
+    freeb.QuadPart = 0;
+    GetDiskFreeSpaceExA(dir, &freeb, NULL, NULL);
+
+    // Cache-buster size: ~1.1x RAM so the test file is fully evicted, rounded to a
+    // block. Capped so test + buster + a 512 MiB margin still fit in free space.
+    uint64_t buster_bytes = 0;
+    int buster_short = 0;  // had to shrink the buster (read may be partly cached)
+    if (defeat_cache && ram > 0) {
+        buster_bytes = ram + ram / 10;
+        buster_bytes -= buster_bytes % DISK_BLOCK;
+        uint64_t margin = 512ull * 1024 * 1024;
+        if (freeb.QuadPart > 0 && total + buster_bytes + margin > freeb.QuadPart) {
+            uint64_t avail = (freeb.QuadPart > total + margin) ? freeb.QuadPart - total - margin : 0;
+            avail -= avail % DISK_BLOCK;
+            if (avail < buster_bytes) { buster_bytes = avail; buster_short = 1; }
+        }
+    }
 
     LARGE_INTEGER freq;
     QueryPerformanceFrequency(&freq);
 
     void *buf = aligned_alloc_pages(DISK_BLOCK);
     if (!buf) {
-        snprintf(report, DISK_REPORT_CAP, "Disk Read / Write Speed\r\n\r\nCould not allocate the I/O buffer.");
+        snprintf(report, DISK_REPORT_CAP,
+                 "Disk Read / Write Speed\r\n\r\nCould not allocate the I/O buffer.");
         return report;
     }
     // Fill with non-trivial data so compression / sparse-file optimisations can't
@@ -81,7 +127,7 @@ char *aio_disk_run(int size_mb, aio_disk_progress_fn progress, void *user) {
     double t_write = 0.0, t_read = 0.0, t_rand = 0.0;
     const char *err = NULL;
 
-    // ---- Sequential write (write-through) ----------------------------------
+    // ---- Sequential write (write-through, timed) ---------------------------
     {
         HANDLE h = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
                                FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_WRITE_THROUGH, NULL);
@@ -112,21 +158,32 @@ char *aio_disk_run(int size_mb, aio_disk_progress_fn progress, void *user) {
                  "Test file : %s\r\n"
                  "File size : %u MiB   (block 4 MiB)\r\n\r\n"
                  "Sequential write : %7.1f MB/s   (%.2f s)\r\n"
-                 "Sequential read  : reading...\r\n",
-                 path, file_mib, write_mbps, t_write);
+                 "Sequential read  : %s\r\n",
+                 path, file_mib, write_mbps, t_write,
+                 (defeat_cache && buster_bytes > 0) ? "flushing cache, then reading cold..."
+                                                    : "reading...");
         progress(user, report);
     }
 
-    // ---- Sequential read (unbuffered if the platform allows it) -------------
+    // ---- Cache-buster: evict the test file from the page cache --------------
+    // Real-flash mode only. Writing a file ~= RAM pushes the just-written test
+    // file out of the cache (LRU on clean pages), so the read below hits flash.
+    if (!err && defeat_cache && buster_bytes > 0) {
+        if (!write_file_blocks(buster, buster_bytes, buf)) {
+            // Non-fatal: if the buster can't be written, fall back to a (cached)
+            // read rather than failing the whole run.
+            buster_short = 1;
+            buster_bytes = 0;
+        }
+    }
+
+    // ---- Sequential read (cold in real-flash mode) -------------------------
     if (!err) {
         HANDLE h = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
                                FILE_FLAG_NO_BUFFERING | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
-        int unbuffered = 1;
-        if (h == INVALID_HANDLE_VALUE) {  // Wine/Winlator may reject NO_BUFFERING
+        if (h == INVALID_HANDLE_VALUE)  // Wine/Winlator may reject NO_BUFFERING
             h = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
                             FILE_FLAG_SEQUENTIAL_SCAN, NULL);
-            unbuffered = 0;
-        }
         if (h == INVALID_HANDLE_VALUE) {
             err = "Could not reopen the temp file for reading.";
         } else {
@@ -142,7 +199,6 @@ char *aio_disk_run(int size_mb, aio_disk_progress_fn progress, void *user) {
                 t_read = t1 - t0;
                 if (t_read > 0.0) read_mbps = (double)total / 1e6 / t_read;
             }
-            (void)unbuffered;
         }
     }
 
@@ -179,7 +235,8 @@ char *aio_disk_run(int size_mb, aio_disk_progress_fn progress, void *user) {
         }
     }
 
-    DeleteFileA(path);  // clean up the temp file
+    DeleteFileA(path);    // clean up the temp files
+    DeleteFileA(buster);
     aligned_free_pages(buf);
 
     if (err) {
@@ -192,6 +249,29 @@ char *aio_disk_run(int size_mb, aio_disk_progress_fn progress, void *user) {
         return report;
     }
 
+    // Build the per-mode footnote about read accuracy.
+    char note[768];
+    double ram_gb = (double)ram / (1024.0 * 1024.0 * 1024.0);
+    if (defeat_cache) {
+        if (buster_bytes > 0 && !buster_short)
+            snprintf(note, sizeof(note),
+                     "Mode: real flash. The read pass ran cold - a %llu MiB cache-buster file\r\n"
+                     "(device RAM ~= %.1f GB) was written first to evict the test file from the\r\n"
+                     "OS page cache, so read + random reflect actual storage, not RAM.",
+                     (unsigned long long)(buster_bytes / (1024 * 1024)), ram_gb);
+        else
+            snprintf(note, sizeof(note),
+                     "Mode: real flash (PARTIAL). Not enough free space to write a full\r\n"
+                     "RAM-sized cache-buster (device RAM ~= %.1f GB), so the read may still be\r\n"
+                     "partly cached and reads higher than real flash. Free up space to fix this.",
+                     ram_gb);
+    } else {
+        snprintf(note, sizeof(note),
+                 "Mode: quick. The read pass is served from the OS page cache (the file was\r\n"
+                 "just written), so read + random are RAM-fast, not real flash. Use the\r\n"
+                 "\"Real-Flash Read\" button for a true storage figure. (Write is always real.)");
+    }
+
     snprintf(report, DISK_REPORT_CAP,
              "Disk Read / Write Speed\r\n"
              "=======================\r\n\r\n"
@@ -200,10 +280,8 @@ char *aio_disk_run(int size_mb, aio_disk_progress_fn progress, void *user) {
              "Sequential write : %7.1f MB/s   (%.2f s)\r\n"
              "Sequential read  : %7.1f MB/s   (%.2f s)\r\n"
              "Random 4K read   : %7.1f MB/s   (%.0f IOPS, %d reads)\r\n\r\n"
-             "Throughput is decimal MB/s (1,000,000 bytes). The read pass uses\r\n"
-             "unbuffered I/O to bypass the OS cache where the platform allows it;\r\n"
-             "on some Wine/Winlator setups the cache can still inflate it.",
+             "Throughput is decimal MB/s (1,000,000 bytes).\r\n%s",
              path, file_mib, write_mbps, t_write, read_mbps, t_read, rand_mbps, rand_iops,
-             DISK_RAND_CNT);
+             DISK_RAND_CNT, note);
     return report;
 }

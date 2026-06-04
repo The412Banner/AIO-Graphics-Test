@@ -114,9 +114,15 @@ with optional CLI shortcuts:
   that honors `DXVK_DISABLE_TIMELINE_SEMAPHORES`.)
 - **Disk Speed** — a non-graphics view that measures **sequential write**, **sequential read**,
   and **random 4 KB read** throughput (MB/s + IOPS) against a temp file in `%TEMP%` (created and
-  deleted each run). Pick 128 / 256 / 512 MB; the read pass uses unbuffered I/O to dodge the OS
-  page cache where the platform allows it. Handy for seeing how fast a Winlator container's
-  mapped Android storage really is for game I/O.
+  deleted each run), i.e. the *in-container* storage speed a game actually gets. Pick 128 / 256 /
+  512 MB, then:
+  - **Run (quick)** — fast, but Wine usually serves the read from the OS page cache (RAM), so the
+    read/random numbers are RAM-fast, not real flash. Good for seeing the cache benefit.
+  - **Real-Flash Read** — before reading, writes a RAM-sized **cache-buster** file to evict the
+    test file from the page cache, so the read happens *cold* and reflects true storage speed
+    (slower; writes several extra GB, deleted afterwards). The **write** figure is always real
+    (flushed straight to storage).
+  - **What's this?** — an in-app explainer of all of the above.
 - **Live HUD** — every cube window shows the active API + live FPS as an on-screen overlay.
 - **Hang watchdog** — if a backend deadlocks (e.g. a broken GL stack blocking in
   `SwapBuffers`), it self-closes after ~12 s instead of locking up the container.
