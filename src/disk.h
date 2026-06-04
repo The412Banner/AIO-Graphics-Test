@@ -26,4 +26,9 @@ typedef void (*aio_disk_progress_fn)(void *user, const char *text);
 // progress/user may be NULL.
 char *aio_disk_run(int size_mb, int defeat_cache, aio_disk_progress_fn progress, void *user);
 
+// Delete any leftover temp files (test file + cache-buster) from an interrupted
+// run and report how much space was freed. Normal runs clean up automatically;
+// this is the manual safety net. Returns a heap report the caller must free().
+char *aio_disk_cleanup(void);
+
 #endif  // AIO_DISK_H

@@ -425,3 +425,46 @@ char *aio_disk_run(int size_mb, int defeat_cache, aio_disk_progress_fn progress,
              DISK_RAND_SECS, note);
     return report;
 }
+
+// Delete any leftover temp files from a previous run and report how much was freed.
+// A normal run already deletes the test file + cache-buster, but if the app was
+// closed (or a backend hung and the watchdog killed the process) mid-run, the
+// (possibly multi-GB) files can be left behind. This is the manual safety net.
+char *aio_disk_cleanup(void) {
+    char *report = (char *)malloc(320);
+    if (!report) return NULL;
+
+    char dir[MAX_PATH], path[MAX_PATH], buster[MAX_PATH];
+    DWORD dn = GetTempPathA(sizeof(dir), dir);
+    if (dn == 0 || dn >= sizeof(dir)) strcpy(dir, ".\\");
+    snprintf(path, sizeof(path), "%sAIO-Graphics-Test_disk.tmp", dir);
+    snprintf(buster, sizeof(buster), "%sAIO-Graphics-Test_buster.tmp", dir);
+
+    const char *files[2] = { path, buster };
+    uint64_t freed = 0;
+    int deleted = 0;
+    for (int i = 0; i < 2; i++) {
+        WIN32_FILE_ATTRIBUTE_DATA fad;
+        if (GetFileAttributesExA(files[i], GetFileExInfoStandard, &fad)) {
+            uint64_t sz = ((uint64_t)fad.nFileSizeHigh << 32) | fad.nFileSizeLow;
+            if (DeleteFileA(files[i])) { freed += sz; deleted++; }
+        }
+    }
+
+    if (deleted == 0)
+        snprintf(report, 320,
+                 "Disk Read / Write Speed\r\n"
+                 "=======================\r\n\r\n"
+                 "No leftover temp files found.\r\n\r\n"
+                 "A normal run already deletes its files automatically; this only\r\n"
+                 "matters if a run was interrupted (app closed mid-test).");
+    else
+        snprintf(report, 320,
+                 "Disk Read / Write Speed\r\n"
+                 "=======================\r\n\r\n"
+                 "Cleaned up %d leftover temp file%s - freed %.1f MiB.\r\n\r\n"
+                 "Folder: %s",
+                 deleted, deleted == 1 ? "" : "s",
+                 (double)freed / (1024.0 * 1024.0), dir);
+    return report;
+}

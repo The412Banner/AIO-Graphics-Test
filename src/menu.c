@@ -137,67 +137,87 @@ static HWND g_selall_btn;  // "Select All" / "Clear All" toggle (Benchmark view)
 
 // Disk Speed view (in-frame): a size picker + Run buttons + a report readout.
 #define ID_DISK_RUN 3800          // "Run (quick)" - cached read, fast
-#define ID_DISK_SIZE_FIRST 3801   // 3801..3803 = 256 / 512 / 1024 MiB
-#define ID_DISK_RUN2 3804         // "Real-Flash Read" - defeats the page cache
-#define ID_DISK_HELP 3805         // "What's this?" explainer popup
-static const int kDiskSizes[3] = {256, 512, 1024};
+#define ID_DISK_SIZE_FIRST 3801   // 3801..3804 = 256 / 512 / 1024 / 2048 MiB
+#define ID_DISK_RUN2 3810         // "Real-Flash Read" - defeats the page cache
+#define ID_DISK_HELP 3811         // "What's this?" explainer popup
+#define ID_DISK_CLEAN 3812        // "Clear Temp Files" - delete leftover temp files
+static const int kDiskSizes[4] = {256, 512, 1024, 2048};
 
-// "What's this?" text for the Disk Speed page.
+// "What's this?" text for the Disk Speed page. Shown in a scrollable popup
+// (show_help_popup), which word-wraps - the lines below are kept short anyway.
 static const char kDiskHelpText[] =
     "DISK SPEED - what it measures\r\n"
     "\r\n"
-    "This tests how fast files read and write from INSIDE the container - the\r\n"
-    "speed a Windows game running here actually gets. The test file is created in\r\n"
-    "%TEMP% (on your container's C: drive), measured, and deleted.\r\n"
+    "How fast files read and write from INSIDE the container - the\r\n"
+    "speed a Windows game running here actually gets. A temp file is\r\n"
+    "created in %TEMP% (your container's C: drive), measured, and\r\n"
+    "deleted at the end of the run.\r\n"
     "\r\n"
-    "It is NOT a raw hardware benchmark of the Android storage chip. Everything\r\n"
-    "goes through Wine + the container's filesystem, so these numbers include that\r\n"
-    "overhead - which is exactly what matters for game load times.\r\n"
+    "It is NOT a raw benchmark of the Android storage chip: everything\r\n"
+    "goes through Wine + the container filesystem, so the numbers\r\n"
+    "include that overhead - which is what matters for game load times.\r\n"
     "\r\n"
     "THE FOUR RESULTS\r\n"
-    "  - Sequential write : large continuous write (e.g. installing/extracting).\r\n"
-    "  - Sequential read  : large continuous read (e.g. loading a big level).\r\n"
-    "  - Random 4K read   : many tiny scattered reads (shader cache, small assets).\r\n"
-    "  - Random 4K write  : many tiny scattered writes (save files, shader compile).\r\n"
-    "    Reported in MB/s and IOPS (I/O operations per second).\r\n"
+    "  - Sequential write: one big continuous write\r\n"
+    "    (installing / extracting a game).\r\n"
+    "  - Sequential read: one big continuous read\r\n"
+    "    (loading a large level).\r\n"
+    "  - Random 4K read: thousands of tiny scattered reads\r\n"
+    "    (shader cache, many small assets).\r\n"
+    "  - Random 4K write: thousands of tiny scattered writes\r\n"
+    "    (save files, shader compile).\r\n"
+    "  Shown in MB/s and IOPS (I/O operations per second).\r\n"
+    "\r\n"
+    "Both random tests run for a fixed 7 seconds over a shuffled set\r\n"
+    "of unique 4 KB spots, so a block is never re-read from RAM. This\r\n"
+    "matches the CrossPlatformDiskTest (CPDT) app's method, so the\r\n"
+    "numbers line up with it. The random write is committed to storage\r\n"
+    "after every write (no buffering), so it is a real flash figure.\r\n"
     "\r\n"
     "WHY TWO RUN BUTTONS\r\n"
-    "  When a file is read right after being written, the system serves it from\r\n"
-    "  the OS cache in RAM, not the storage - so the read looks many times faster\r\n"
-    "  than the drive really is (often several GB/s, which no phone flash can do).\r\n"
+    "When a file is read right after it was written, the system serves\r\n"
+    "it from the RAM cache, not the storage - so the read looks many\r\n"
+    "times faster than the drive really is (several GB/s, which no\r\n"
+    "phone flash can do).\r\n"
     "\r\n"
-    "  - Run (quick): fast, but the READ numbers are this cached RAM speed.\r\n"
-    "    Handy to see the cache benefit; not the real disk.\r\n"
-    "  - Real-Flash Read: before reading, it writes a second file about the size\r\n"
-    "    of your device's RAM. That pushes the test file out of the cache, so the\r\n"
-    "    reads happen 'cold' from actual storage. The random read runs first (a\r\n"
-    "    sequential pass would re-warm the cache), so it stays genuinely cold.\r\n"
-    "    Slower and writes several extra GB (deleted afterwards), but the reads\r\n"
-    "    reflect true flash speed.\r\n"
+    "  - Run (quick): fast, but the READ numbers are that cached RAM\r\n"
+    "    speed. Handy to see the cache benefit; not the real disk.\r\n"
+    "  - Real-Flash Read: before EACH read it writes a RAM-sized\r\n"
+    "    'cache-buster' file that pushes the test file out of the\r\n"
+    "    cache, so both the sequential and the random read happen cold\r\n"
+    "    from actual storage. Slower and writes several extra GB (all\r\n"
+    "    deleted afterwards), but the reads reflect true flash speed.\r\n"
     "\r\n"
-    "  Both WRITE numbers are always real - writes are flushed straight to\r\n"
-    "  storage in both modes.\r\n"
+    "Both WRITE numbers are always real - writes are committed straight\r\n"
+    "to storage in both modes.\r\n"
     "\r\n"
     "STORAGE CLASS\r\n"
-    "  The 'Storage class' line estimates what tier your storage is - eMMC, UFS\r\n"
-    "  2.1, UFS 3.1, UFS 4.0, etc. - from your sequential speed, so you don't have\r\n"
-    "  to know what the MB/s numbers mean. It uses the (always-real) write speed\r\n"
-    "  and, in Real-Flash mode, the cold read.\r\n"
+    "Estimates your storage tier - eMMC, UFS 2.1 / 3.1 / 4.0, etc. -\r\n"
+    "from the sequential speed, so you don't have to know what the\r\n"
+    "MB/s mean. It uses the (always-real) write speed and, in\r\n"
+    "Real-Flash mode, the cold read.\r\n"
     "\r\n"
-    "  It says 'or better' because we measure INSIDE the container: Wine + the\r\n"
-    "  filesystem layer cost some speed, so a real UFS 4.0 chip can read here like\r\n"
-    "  a UFS 3.1. Treat the class as a floor - your actual chip may be a tier up.\r\n"
-    "  Run Real-Flash Read for the most accurate class.\r\n"
+    "It says 'or better' because we measure INSIDE the container: Wine\r\n"
+    "+ the filesystem cost some speed, so a real UFS 4.0 chip can read\r\n"
+    "here like a UFS 3.1. Treat the class as a floor - your chip may\r\n"
+    "be a tier higher. Run Real-Flash Read for the best estimate.\r\n"
     "\r\n"
-    "TIP: pick a larger size for a steadier figure. If Real-Flash mode warns that\r\n"
-    "the cache-buster was shrunk, free up some storage for an accurate read.";
+    "BUTTONS\r\n"
+    "  - Size: the test file size (256 / 512 / 1024 / 2048 MB).\r\n"
+    "    Bigger = steadier figures, but slower and more space used.\r\n"
+    "  - Clear Temp Files: deletes leftover temp files if a run was\r\n"
+    "    interrupted (a normal run cleans up on its own).\r\n"
+    "\r\n"
+    "TIP: if Real-Flash mode warns the cache-buster was shrunk, free\r\n"
+    "up some storage for an accurate read.";
 static HWND g_disk_edit;          // report readout (read-only multiline edit)
 static HWND g_disk_run;           // "Run (quick)" button
 static HWND g_disk_run2;          // "Real-Flash Read" button (cache-defeating)
 static HWND g_disk_help;          // "What's this?" button
-static HWND g_disk_size_label;    // "Size (512 MB):" caption
-static HWND g_disk_size_btn[3];   // 256 / 512 / 1024 buttons
-static int g_disk_mb = 512;       // selected file size (MiB)
+static HWND g_disk_clean;         // "Clear Temp Files" button
+static HWND g_disk_size_label;    // "Size (1024 MB):" caption
+static HWND g_disk_size_btn[4];   // 256 / 512 / 1024 / 2048 buttons
+static int g_disk_mb = 1024;      // selected file size (MiB), default 1 GiB
 static int g_disk_running;        // a benchmark thread is in flight
 static int g_disk_defeat;         // mode of the in-flight run (1 = real-flash)
 static HANDLE g_disk_thread;      // worker handle (closed when it finishes)
@@ -239,8 +259,9 @@ static void destroy_content(void) {
     if (g_disk_run) { DestroyWindow(g_disk_run); g_disk_run = NULL; }
     if (g_disk_run2) { DestroyWindow(g_disk_run2); g_disk_run2 = NULL; }
     if (g_disk_help) { DestroyWindow(g_disk_help); g_disk_help = NULL; }
+    if (g_disk_clean) { DestroyWindow(g_disk_clean); g_disk_clean = NULL; }
     if (g_disk_size_label) { DestroyWindow(g_disk_size_label); g_disk_size_label = NULL; }
-    for (int i = 0; i < 3; i++)
+    for (int i = 0; i < 4; i++)
         if (g_disk_size_btn[i]) { DestroyWindow(g_disk_size_btn[i]); g_disk_size_btn[i] = NULL; }
     for (int i = 0; i < 4; i++)
         if (g_dur_btn[i]) { DestroyWindow(g_dur_btn[i]); g_dur_btn[i] = NULL; }
@@ -468,6 +489,70 @@ static HWND make_report_edit(HWND frame, const RECT *r, const char *text) {
     return e;
 }
 
+// Scrollable help popup. A MessageBox clips long lines and can't scroll under
+// Wine (the "What's this?" text came out cut off), so the explainer gets its own
+// resizable window with a word-wrapping, scrollable read-only edit filling it.
+static LRESULT CALLBACK help_wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    switch (m) {
+        case WM_SIZE: {
+            HWND edit = GetWindow(h, GW_CHILD);  // this popup's own edit
+            if (edit) {
+                RECT rc; GetClientRect(h, &rc);
+                MoveWindow(edit, 0, 0, rc.right, rc.bottom, TRUE);
+            }
+            return 0;
+        }
+        case WM_CLOSE:
+            DestroyWindow(h);
+            return 0;
+    }
+    return DefWindowProcA(h, m, w, l);
+}
+
+static void show_help_popup(HWND owner, const char *title, const char *text) {
+    static int registered = 0;
+    const char *cls = "AIOHelpPopup";
+    if (!registered) {
+        WNDCLASSA wc;
+        ZeroMemory(&wc, sizeof(wc));
+        wc.lpfnWndProc = help_wndproc;
+        wc.hInstance = g_hinst;
+        wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+        wc.lpszClassName = cls;
+        if (!RegisterClassA(&wc)) {  // fall back to a (clipping) MessageBox
+            MessageBoxA(owner, text, title, MB_OK | MB_ICONINFORMATION);
+            return;
+        }
+        registered = 1;
+    }
+    // Center over the owner, ~640x520, clamped to the owner if it's smaller.
+    RECT orc;
+    GetWindowRect(owner, &orc);
+    int ow = orc.right - orc.left, oh = orc.bottom - orc.top;
+    int w = (ow < 660) ? (ow - 20) : 640;
+    int hgt = (oh < 540) ? (oh - 20) : 520;
+    if (w < 300) w = 300;
+    if (hgt < 220) hgt = 220;
+    int px = orc.left + (ow - w) / 2, py = orc.top + (oh - hgt) / 2;
+    HWND pop = CreateWindowExA(WS_EX_DLGMODALFRAME, cls, title,
+                               WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
+                               px, py, w, hgt, owner, NULL, g_hinst, NULL);
+    if (!pop) {
+        MessageBoxA(owner, text, title, MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    RECT rc;
+    GetClientRect(pop, &rc);
+    // ES_MULTILINE without ES_AUTOHSCROLL word-wraps; WS_VSCROLL gives the scrollbar.
+    HWND edit = CreateWindowA("EDIT", "",
+                              WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY,
+                              0, 0, rc.right, rc.bottom, pop, NULL, g_hinst, NULL);
+    SendMessage(edit, EM_SETLIMITTEXT, 0, 0);
+    if (g_ui_font) SendMessage(edit, WM_SETFONT, (WPARAM)g_ui_font, TRUE);
+    if (text) SetWindowTextA(edit, text);
+}
+
 // GPU Info layout: two stacked panes (Vulkan on top, OpenGL below), each a
 // caption + an independently-scrollable report edit, split 50/50. No tabs.
 static void layout_gpuinfo(const RECT *cr) {
@@ -565,7 +650,7 @@ static void show_disk(HWND frame) {
                                       frame, NULL, g_hinst, NULL);
     if (g_ui_font) SendMessage(g_disk_size_label, WM_SETFONT, (WPARAM)g_ui_font, TRUE);
     int bx = x + 116;
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 4; i++) {
         char lbl[16];
         snprintf(lbl, sizeof(lbl), "%d MB", kDiskSizes[i]);
         g_disk_size_btn[i] =
@@ -583,24 +668,30 @@ static void show_disk(HWND frame) {
     g_disk_run2 = CreateWindowA("BUTTON", "Real-Flash Read", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                                 x + 130, y2, 160, 26, frame, (HMENU)(INT_PTR)ID_DISK_RUN2, g_hinst,
                                 NULL);
+    // Row 3: explainer + temp-file cleanup.
+    int y3 = y2 + 32;
     g_disk_help = CreateWindowA("BUTTON", "What's this?", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                x + 300, y2, 120, 26, frame, (HMENU)(INT_PTR)ID_DISK_HELP, g_hinst,
-                                NULL);
+                                x, y3, 120, 26, frame, (HMENU)(INT_PTR)ID_DISK_HELP, g_hinst, NULL);
+    g_disk_clean = CreateWindowA("BUTTON", "Clear Temp Files", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                 x + 130, y3, 160, 26, frame, (HMENU)(INT_PTR)ID_DISK_CLEAN, g_hinst,
+                                 NULL);
     if (g_ui_font) {
         SendMessage(g_disk_run, WM_SETFONT, (WPARAM)g_ui_font, TRUE);
         SendMessage(g_disk_run2, WM_SETFONT, (WPARAM)g_ui_font, TRUE);
         SendMessage(g_disk_help, WM_SETFONT, (WPARAM)g_ui_font, TRUE);
+        SendMessage(g_disk_clean, WM_SETFONT, (WPARAM)g_ui_font, TRUE);
     }
 
     RECT er = cr;
-    er.top = y2 + 36;
+    er.top = y3 + 36;
     const char *intro =
-        "Sequential write, sequential read, and random 4 KB read of a temp file\r\n"
-        "in your %TEMP% folder (created and deleted each run).\r\n\r\n"
-        "Run (quick): fast, but the read is served from the OS cache (RAM-fast).\r\n"
-        "Real-Flash Read: writes a RAM-sized cache-buster first so the read is\r\n"
-        "cold and reflects true storage speed (slower; writes several extra GB).\r\n\r\n"
-        "Pick a size, then press a Run button.";
+        "Sequential + random 4 KB read/write of a temp file in your %TEMP%\r\n"
+        "folder (created and deleted each run).\r\n\r\n"
+        "Run (quick): fast, but the reads are served from the OS cache (RAM-fast).\r\n"
+        "Real-Flash Read: writes a RAM-sized cache-buster first so the reads are\r\n"
+        "cold and reflect true storage speed (slower; writes several extra GB).\r\n\r\n"
+        "Random tests run a fixed 7 s (CPDT-matched). Default size is 1024 MB.\r\n"
+        "Pick a size, then press a Run button. 'What's this?' explains the rest.";
     g_disk_edit = make_report_edit(frame, &er, g_disk_running ? "Running disk benchmark..." : intro);
 
     update_disk_size_label();
@@ -1534,7 +1625,7 @@ static LRESULT CALLBACK shell_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
                 rebuild_view(hwnd, show_dx11_scenes);
                 return 0;
             }
-            if (id >= ID_DISK_SIZE_FIRST && id < ID_DISK_SIZE_FIRST + 3) {  // disk file size
+            if (id >= ID_DISK_SIZE_FIRST && id < ID_DISK_SIZE_FIRST + 4) {  // disk file size
                 g_disk_mb = kDiskSizes[id - ID_DISK_SIZE_FIRST];
                 update_disk_size_label();
                 return 0;
@@ -1563,9 +1654,16 @@ static LRESULT CALLBACK shell_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
                 }
                 return 0;
             }
-            if (id == ID_DISK_HELP) {  // "What's this?" explainer
-                MessageBoxA(hwnd, kDiskHelpText, "Disk Speed - What's this?",
-                            MB_OK | MB_ICONINFORMATION);
+            if (id == ID_DISK_HELP) {  // "What's this?" explainer (scrollable popup)
+                show_help_popup(hwnd, "Disk Speed - What's this?", kDiskHelpText);
+                return 0;
+            }
+            if (id == ID_DISK_CLEAN) {  // delete leftover temp files from an interrupted run
+                if (!g_disk_running) {
+                    char *rep = aio_disk_cleanup();
+                    if (g_disk_edit && rep) SetWindowTextA(g_disk_edit, rep);
+                    free(rep);
+                }
                 return 0;
             }
             int cb = id - ID_CB_FIRST;
