@@ -73,7 +73,7 @@ void aio_bench_begin(int seconds) {
     g_cap = 4096;
     g_warmup_ms = AIO_BENCH_WARMUP_MS;
     g_elapsed_ms = 0.0;
-    g_ft = (double *)malloc(g_cap * sizeof(double));
+    g_ft = (double *)calloc(g_cap, sizeof(double));
 }
 
 int aio_bench_active(void) { return g_active; }
@@ -92,6 +92,7 @@ void aio_bench_add(double frame_ms) {
     if (frame_ms < AIO_BENCH_MIN_FT_MS) return;  // drop impossible sub-frame outliers
     if (g_n >= g_cap) {
         size_t nc = g_cap * 2;
+        if (nc < g_cap || nc > SIZE_MAX / sizeof(double)) return;
         double *p = (double *)realloc(g_ft, nc * sizeof(double));
         if (!p) return;
         g_ft = p;
@@ -113,7 +114,7 @@ char *aio_bench_finish(const char *api_label, double total_seconds) {
         g_active = 0;
         if (g_ft) { free(g_ft); g_ft = NULL; }
         char *s = (char *)malloc(64);
-        if (s) strcpy(s, "No frames were captured.");
+        if (s) snprintf(s, 64, "No frames were captured.");
         return s;
     }
 
@@ -134,7 +135,7 @@ char *aio_bench_finish(const char *api_label, double total_seconds) {
 
     // 1% low: average FPS over the slowest 1% of frames. Also use the sorted
     // frametimes to make Max robust.
-    double *sorted = (double *)malloc(g_n * sizeof(double));
+    double *sorted = (double *)calloc(g_n, sizeof(double));
     double low1_fps = 0.0;
     if (sorted) {
         memcpy(sorted, g_ft, g_n * sizeof(double));
