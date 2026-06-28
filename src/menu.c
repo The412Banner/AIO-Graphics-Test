@@ -85,6 +85,7 @@ static float g_probe_avg[2];  // [0] = timeline avg FPS, [1] = binary avg FPS
 static HWND g_verdict;        // probe verdict label
 #define ID_RUN_ALL 3500
 static HWND g_run_all;        // "Run All" sweep button (Benchmark view)
+static HWND g_run_all2;       // 2nd persistent button ("Scaling Tests >" on the DX11 picker)
 static int g_sweep_active;    // sequential run-selected sweep in progress
 #define ID_DUR_FIRST 3600     // duration buttons (15/30/45/60 s)
 #define ID_VSYNC 3620
@@ -134,6 +135,8 @@ static int g_run_list[MAX_CB], g_run_n, g_run_pos;  // "Run Selected" sweep list
 static HWND g_selall_btn;  // "Select All" / "Clear All" toggle (Benchmark view)
 #define ID_DX11_DEMOS 3766  // "Demo Scenes ->" button (DX11 feature picker)
 #define ID_DX11_BACK 3767   // "<- Back" button (DX11 demo-scenes picker)
+#define ID_DX11_SCALING 3768       // "Scaling Tests ->" button (DX11 feature picker)
+#define ID_DX11_SCALING_BACK 3769  // "<- Back" button (DX11 scaling-tests picker)
 
 // Disk Speed view (in-frame): a size picker + Run buttons + a report readout.
 #define ID_DISK_RUN 3800          // "Run (quick)" - cached read, fast
@@ -244,6 +247,7 @@ static void destroy_content(void) {
     if (g_placeholder) { DestroyWindow(g_placeholder); g_placeholder = NULL; }
     if (g_verdict) { DestroyWindow(g_verdict); g_verdict = NULL; }
     if (g_run_all) { DestroyWindow(g_run_all); g_run_all = NULL; }
+    if (g_run_all2) { DestroyWindow(g_run_all2); g_run_all2 = NULL; }
     if (g_dur_label) { DestroyWindow(g_dur_label); g_dur_label = NULL; }
     if (g_vsync_chk) { DestroyWindow(g_vsync_chk); g_vsync_chk = NULL; }
     if (g_d3d11_chk) { DestroyWindow(g_d3d11_chk); g_d3d11_chk = NULL; }
@@ -1056,6 +1060,11 @@ static void show_dx11_scenes(HWND frame) {
                               cr.left, y + 44, 220, 32, frame, (HMENU)(INT_PTR)ID_DX11_DEMOS, g_hinst,
                               NULL);
     if (g_ui_font) SendMessage(g_run_all, WM_SETFONT, (WPARAM)g_ui_font, TRUE);
+    // Link to the scaling/upscaler torture-card gallery (compositor A/B tests).
+    g_run_all2 = CreateWindowA("BUTTON", "Scaling Tests  >", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                               cr.left, y + 80, 220, 32, frame, (HMENU)(INT_PTR)ID_DX11_SCALING,
+                               g_hinst, NULL);
+    if (g_ui_font) SendMessage(g_run_all2, WM_SETFONT, (WPARAM)g_ui_font, TRUE);
 }
 
 // Direct3D 11 demo-scene gallery: the procedural showpieces (raymarched), each
@@ -1109,6 +1118,62 @@ static void show_dx11_demos(HWND frame) {
     y += ((g_cbtn_n + 1) / 2) * rowh + 12;
     g_run_all = CreateWindowA("BUTTON", "<  Back to D3D11 tests", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                               cr.left, y, 220, 32, frame, (HMENU)(INT_PTR)ID_DX11_BACK, g_hinst, NULL);
+    if (g_ui_font) SendMessage(g_run_all, WM_SETFONT, (WPARAM)g_ui_font, TRUE);
+}
+
+// Direct3D 11 scaling/upscaler torture cards: static, no-AA, pixel-exact,
+// high-frequency content rendered at the container's render-res. THIS APP does
+// not scale -- set a sub-native container render-res, launch one card, then flip
+// the Bannerlator compositor's Scaling mode (None/Linear/Nearest/SGSR/FSR/FSR-
+// Fit/Sharpen/NIS) in the in-game drawer and compare. Reached from the DX11
+// feature picker's "Scaling Tests" button.
+static void show_dx11_scaling(HWND frame) {
+    destroy_content();
+    g_cb_bench = 0;
+    SetWindowTextA(g_header, "Direct3D 11 - Scaling Tests");
+    RECT cr;
+    get_content_rect(frame, &cr);
+
+    g_placeholder = CreateWindowA(
+        "STATIC",
+        "Scaling/upscaler torture cards - set a sub-native container render-res, launch one,\n"
+        "then flip the compositor's Scaling mode and compare. Keys in-test: C cycle card,\n"
+        "K toggle color, A toggle 4:3 aspect. Esc to close.",
+        WS_CHILD | WS_VISIBLE | SS_LEFT, cr.left, cr.top, cr.right - cr.left, 70, frame, NULL, g_hinst,
+        NULL);
+    if (g_ui_font) SendMessage(g_placeholder, WM_SETFONT, (WPARAM)g_ui_font, TRUE);
+
+    static const char *labels[] = {"Combo card (zone/grid/checker/wedge)",
+                                   "Zone plate",
+                                   "Resolution wedge / siemens",
+                                   "Lines & diagonals (1px)",
+                                   "Checkerboard (1/2/4px)",
+                                   "Hard edges"};
+    static const char *args[] = {"dx11 --scene scaletest_combo",
+                                 "dx11 --scene scaletest_zoneplate",
+                                 "dx11 --scene scaletest_wedge",
+                                 "dx11 --scene scaletest_grid",
+                                 "dx11 --scene scaletest_checker",
+                                 "dx11 --scene scaletest_edges"};
+    g_cbtn_n = (int)(sizeof(args) / sizeof(args[0]));
+    int y = cr.top + 84;
+    const int colw = 260, rowh = 38;
+    for (int i = 0; i < g_cbtn_n; i++) {
+        int col = i % 2, row = i / 2;
+        g_cbtn_arg[i] = args[i];
+        g_cbtn_label[i] = NULL;
+        g_cbtn_proc[i] = NULL;
+        g_cbtn_result[i] = NULL;
+        g_cbtn_avg[i] = NULL;
+        g_cbtn[i] = CreateWindowA("BUTTON", labels[i], WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                  cr.left + col * (colw + 12), y + row * rowh, colw, 30, frame,
+                                  (HMENU)(INT_PTR)(ID_CB_FIRST + i), g_hinst, NULL);
+        if (g_ui_font) SendMessage(g_cbtn[i], WM_SETFONT, (WPARAM)g_ui_font, TRUE);
+    }
+    y += ((g_cbtn_n + 1) / 2) * rowh + 12;
+    g_run_all = CreateWindowA("BUTTON", "<  Back to D3D11 tests", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                              cr.left, y, 220, 32, frame, (HMENU)(INT_PTR)ID_DX11_SCALING_BACK, g_hinst,
+                              NULL);
     if (g_ui_font) SendMessage(g_run_all, WM_SETFONT, (WPARAM)g_ui_font, TRUE);
 }
 
@@ -1624,6 +1689,14 @@ static LRESULT CALLBACK shell_wndproc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
                 return 0;
             }
             if (id == ID_DX11_BACK) {  // back to the DX11 feature picker
+                rebuild_view(hwnd, show_dx11_scenes);
+                return 0;
+            }
+            if (id == ID_DX11_SCALING) {  // open the scaling/upscaler torture cards
+                rebuild_view(hwnd, show_dx11_scaling);
+                return 0;
+            }
+            if (id == ID_DX11_SCALING_BACK) {  // back to the DX11 feature picker
                 rebuild_view(hwnd, show_dx11_scenes);
                 return 0;
             }

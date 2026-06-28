@@ -3821,6 +3821,228 @@ static void band_cleanup(void) {
     g_scene_hud[0] = '\0';
 }
 
+// ====================== Scaling Tests (compositor torture) ==================
+// A set of static, no-AA, pixel-exact, high-frequency cards. THIS APP DOES NOT
+// SCALE -- it only renders crisp content at the swapchain (= container render-)
+// resolution; the Bannerlator host compositor upscales to the panel and the
+// user A/Bs scaling modes (None/Linear/Nearest/SGSR/FSR/FSR-Fit/Sharpen/NIS)
+// in the in-game drawer. High-frequency 1px detail is what makes the upscalers
+// diverge (a smooth scene looks identical under every mode).
+//
+// One unified pixel shader switches on iCard (0..5):
+//   0 combo       4 tiled quadrants: zone TL / grid TR / checker BL / wedge BR
+//   1 zoneplate   full-screen 0.5+0.5*cos(k*r^2), k tuned so rings hit Nyquist
+//   2 wedge       full-screen ~64-spoke siemens star + top freq-sweep bar
+//   3 grid        1px lines on a 4px pitch + thin diagonals at several slopes
+//   4 checker     1/2/4px checkerboard zones (left/middle/right thirds)
+//   5 edges       4x4 grid of hard-edged shapes at many orientations (halos)
+//
+// Rules: no AA / no MSAA / no smoothstep; static (iTime plumbed but unused);
+// pixel-exact via int2 p = (int2)inp.pos.xy; fullscreen triangle; CULL_NONE;
+// 8-bit R8G8B8A8_UNORM, no post. Keys: C cycle card, K toggle color, A aspect.
+static const char *kScaleHLSL =
+    "cbuffer CB:register(b0){float iTime;float iAspect;float2 iResolution;"
+    "float iCard;float iColor;float iAspectMode;float pad;}\n"
+    "struct VSOut{float4 pos:SV_POSITION;float2 ndc:TEXCOORD0;};\n"
+    "VSOut VSMain(uint vid:SV_VertexID){VSOut o;float2 q=float2((vid<<1)&2,vid&2);"
+    "o.pos=float4(q*2.0-1.0,0.0,1.0);o.ndc=o.pos.xy;return o;}\n"
+    "float4 PSMain(VSOut inp):SV_TARGET{\n"
+    "  int2  p   = (int2)inp.pos.xy;\n"          // exact device pixel at render-res
+    "  float2 res = iResolution;\n"
+    "  const float PI = 3.14159265;\n"
+    // Optional 4:3 letterbox: render content into a centered res.y*4/3 region so
+    // the render-res aspect != panel aspect (exercises FSR fill vs FSR-Fit).
+    "  if(iAspectMode>0.5){\n"
+    "    float target=res.y*(4.0/3.0);\n"
+    "    float x0=(res.x-target)*0.5;\n"
+    "    if(inp.pos.x<x0||inp.pos.x>x0+target) return float4(0,0,0,1);\n"
+    "  }\n"
+    "  int card=(int)(iCard+0.5);\n"
+    "  float v=0.0;\n"
+    "  if(card==0){\n"                            // ---- 0: COMBO (4 quadrants) ----
+    "    bool right =inp.pos.x>res.x*0.5;\n"
+    "    bool bottom=inp.pos.y>res.y*0.5;\n"
+    "    if(!right&&!bottom){\n"                  // TL: zone plate (rings -> Nyquist at quad corner)
+    "      float2 c=inp.pos.xy-res*0.25;\n"
+    "      float r2=dot(c,c);\n"
+    "      float Rq=length(res*0.25);\n"
+    "      float k=1.5708/max(Rq,1.0);\n"
+    "      v=0.5+0.5*cos(k*r2);\n"
+    "    } else if(right&&!bottom){\n"            // TR: 1px grid + diagonals
+    "      v=((p.x%4)==0||(p.y%4)==0)?1.0:0.0;\n"
+    "      if(((p.x+p.y)%8)==0)   v=1.0;\n"        // 45 deg
+    "      if(((p.x-p.y)%8)==0)   v=1.0;\n"        // -45 deg
+    "      if(((p.x+2*p.y)%12)==0)v=1.0;\n"        // ~26.5 deg
+    "    } else if(!right&&bottom){\n"            // BL: 1px/2px checkerboard
+    "      int cell=(inp.pos.x<res.x*0.25)?1:2;\n"
+    "      v=(((p.x/cell)^(p.y/cell))&1)?1.0:0.0;\n"
+    "    } else {\n"                              // BR: resolution wedge (period shrinks toward right)
+    "      float lx=inp.pos.x-res.x*0.5;\n"
+    "      float period=lerp(16.0,2.0,saturate(lx/(res.x*0.5)));\n"
+    "      v=(frac(inp.pos.x/period)<0.5)?1.0:0.0;\n"
+    "    }\n"
+    "  } else if(card==1){\n"                     // ---- 1: ZONE PLATE (full) ----
+    "    float2 c=inp.pos.xy-res*0.5;\n"
+    "    float r2=dot(c,c);\n"
+    "    float R=length(res*0.5);\n"              // center -> corner distance
+    "    float k=1.5708/max(R,1.0);\n"            // rings approach ~1px (Nyquist) at the corners
+    "    v=0.5+0.5*cos(k*r2);\n"
+    "  } else if(card==2){\n"                     // ---- 2: RESOLUTION WEDGE / SIEMENS ----
+    "    if(inp.pos.y<res.y*0.12){\n"             // top ~12%: horizontal frequency sweep (16px -> ~1.5px)
+    "      float period=lerp(16.0,1.5,saturate(inp.pos.x/res.x));\n"
+    "      v=(frac(inp.pos.x/period)<0.5)?1.0:0.0;\n"
+    "    } else {\n"                              // siemens star: spokes converge sub-pixel toward center
+    "      float cx=res.x*0.5, cy=res.y*0.5;\n"
+    "      float ang=atan2(inp.pos.y-cy,inp.pos.x-cx);\n"
+    "      v=(frac(ang/(2.0*PI)*64.0)<0.5)?1.0:0.0;\n"
+    "    }\n"
+    "  } else if(card==3){\n"                     // ---- 3: LINES & DIAGONALS (1px) ----
+    "    v=((p.x%4)==0||(p.y%4)==0)?1.0:0.0;\n"   // 1px lines on a 4px pitch
+    "    if(((p.x+p.y)%8)==0)   v=1.0;\n"          // 45 deg
+    "    if(((p.x-p.y)%8)==0)   v=1.0;\n"          // -45 deg
+    "    if(((p.x+2*p.y)%12)==0)v=1.0;\n"          // ~26.5 deg
+    "    if(((2*p.x+p.y)%12)==0)v=1.0;\n"          // ~63.4 deg
+    "  } else if(card==4){\n"                     // ---- 4: CHECKERBOARD (1/2/4px zones) ----
+    "    int t1=(int)(res.x/3.0), t2=(int)(res.x*2.0/3.0);\n"
+    "    int cell=(p.x<t1)?1:((p.x<t2)?2:4);\n"   // 1px left third, 2px middle, 4px right
+    "    v=(((p.x/cell)^(p.y/cell))&1)?1.0:0.0;\n"
+    "  } else {\n"                                // ---- 5: HARD EDGES (overshoot/halo torture) ----
+    "    float2 csz=res/4.0;\n"                   // 4x4 grid of cells
+    "    int cxi=(int)(inp.pos.x/csz.x), cyi=(int)(inp.pos.y/csz.y);\n"
+    "    float2 lc=frac(inp.pos.xy/csz)-0.5;\n"   // -0.5..0.5 within the cell
+    "    float a=(float)((cxi+2*cyi)&7)*(PI/8.0);\n" // per-cell orientation (multiples of 22.5 deg)
+    "    float s=sin(a), co=cos(a);\n"
+    "    float2 r=float2(lc.x*co-lc.y*s, lc.x*s+lc.y*co);\n"
+    "    int shape=(cxi+cyi)&3;\n"
+    "    if(shape==0)      v=step(length(lc),0.36);\n"               // circle (rotation-invariant)
+    "    else if(shape==1) v=step(max(abs(r.x),abs(r.y)),0.34);\n"   // square (rotated)
+    "    else if(shape==2) v=(r.y>-0.4 && abs(r.x)<(r.y+0.4)*0.45)?1.0:0.0;\n" // triangle (rotated)
+    "    else              v=step(abs(r.x)+abs(r.y),0.40);\n"        // diamond (rotated)
+    "  }\n"
+    "  float3 col=(iColor>0.5)? v*float3(1.0,0.15,0.5) : v.xxx;\n"   // grayscale vs saturated chroma edges
+    "  return float4(col,1.0);\n"
+    "}\n";
+
+typedef struct {
+    float iTime, iAspect;
+    float resx, resy;
+    float iCard, iColor, iAspectMode, pad;
+} ScaleCB;
+
+static struct {
+    ID3D11VertexShader *vs;
+    ID3D11PixelShader *ps;
+    ID3D11Buffer *cbo;
+    ID3D11RasterizerState *rs;
+    int w, h;
+    int card, color, aspectMode;
+    unsigned char prevC, prevK, prevA;
+} g_scale;
+
+// Shared init: compiles the unified shader, builds the dynamic cbuffer + a
+// solid CULL_NONE rasterizer, stashes the render-res (w,h) for iResolution,
+// and opens on startcard. The six scz_*_init wrappers below just pick the card.
+static int scale_init_card(ID3D11Device *dev, ID3D11DeviceContext *ctx, int w, int h, int startcard) {
+    (void)ctx;
+    ID3DBlob *vsb = compile_hlsl(kScaleHLSL, "VSMain", "vs_4_0");
+    ID3DBlob *psb = compile_hlsl(kScaleHLSL, "PSMain", "ps_4_0");
+    if (!vsb || !psb) return 1;
+    ID3D11Device_CreateVertexShader(dev, ID3D10Blob_GetBufferPointer(vsb),
+                                    ID3D10Blob_GetBufferSize(vsb), NULL, &g_scale.vs);
+    ID3D11Device_CreatePixelShader(dev, ID3D10Blob_GetBufferPointer(psb),
+                                   ID3D10Blob_GetBufferSize(psb), NULL, &g_scale.ps);
+    ID3D10Blob_Release(vsb);
+    ID3D10Blob_Release(psb);
+    D3D11_BUFFER_DESC cbd;
+    memset(&cbd, 0, sizeof(cbd));
+    cbd.ByteWidth = sizeof(ScaleCB);
+    cbd.Usage = D3D11_USAGE_DYNAMIC;
+    cbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    cbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    ID3D11Device_CreateBuffer(dev, &cbd, NULL, &g_scale.cbo);
+    D3D11_RASTERIZER_DESC rd;
+    memset(&rd, 0, sizeof(rd));
+    rd.FillMode = D3D11_FILL_SOLID;
+    rd.CullMode = D3D11_CULL_NONE;
+    rd.DepthClipEnable = TRUE;
+    ID3D11Device_CreateRasterizerState(dev, &rd, &g_scale.rs);
+    g_scale.w = w;
+    g_scale.h = h;
+    g_scale.card = startcard;
+    g_scale.color = 0;
+    g_scale.aspectMode = 0;
+    g_scale.prevC = g_scale.prevK = g_scale.prevA = 0;
+    g_scene_hud[0] = '\0';
+    return (g_scale.vs && g_scale.ps && g_scale.cbo && g_scale.rs) ? 0 : 1;
+}
+
+static int scz_combo_init(ID3D11Device *dev, ID3D11DeviceContext *ctx, int w, int h) {
+    return scale_init_card(dev, ctx, w, h, 0);
+}
+static int scz_zone_init(ID3D11Device *dev, ID3D11DeviceContext *ctx, int w, int h) {
+    return scale_init_card(dev, ctx, w, h, 1);
+}
+static int scz_wedge_init(ID3D11Device *dev, ID3D11DeviceContext *ctx, int w, int h) {
+    return scale_init_card(dev, ctx, w, h, 2);
+}
+static int scz_grid_init(ID3D11Device *dev, ID3D11DeviceContext *ctx, int w, int h) {
+    return scale_init_card(dev, ctx, w, h, 3);
+}
+static int scz_checker_init(ID3D11Device *dev, ID3D11DeviceContext *ctx, int w, int h) {
+    return scale_init_card(dev, ctx, w, h, 4);
+}
+static int scz_edges_init(ID3D11Device *dev, ID3D11DeviceContext *ctx, int w, int h) {
+    return scale_init_card(dev, ctx, w, h, 5);
+}
+
+static void scale_frame(ID3D11DeviceContext *ctx, double t, float aspect) {
+    // Edge-detected key toggles (g_keys is held-state; track the previous frame).
+    unsigned char c_now = g_keys['C'] ? 1 : 0;
+    unsigned char k_now = g_keys['K'] ? 1 : 0;
+    unsigned char a_now = g_keys['A'] ? 1 : 0;
+    if (c_now && !g_scale.prevC) g_scale.card = (g_scale.card + 1) % 6;
+    if (k_now && !g_scale.prevK) g_scale.color = !g_scale.color;
+    if (a_now && !g_scale.prevA) g_scale.aspectMode = !g_scale.aspectMode;
+    g_scale.prevC = c_now;
+    g_scale.prevK = k_now;
+    g_scale.prevA = a_now;
+
+    snprintf(g_scene_hud, sizeof(g_scene_hud), "Card %d  color:%s  aspect:%s  [C/K/A]",
+             g_scale.card, g_scale.color ? "on" : "off",
+             g_scale.aspectMode ? "4:3" : "fill");
+
+    D3D11_MAPPED_SUBRESOURCE m;
+    if (SUCCEEDED(ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)g_scale.cbo, 0,
+                                          D3D11_MAP_WRITE_DISCARD, 0, &m))) {
+        ScaleCB *cb = (ScaleCB *)m.pData;
+        cb->iTime = (float)t;          // plumbed but unused (static scene)
+        cb->iAspect = aspect;
+        cb->resx = (float)g_scale.w;
+        cb->resy = (float)g_scale.h;
+        cb->iCard = (float)g_scale.card;
+        cb->iColor = g_scale.color ? 1.0f : 0.0f;
+        cb->iAspectMode = g_scale.aspectMode ? 1.0f : 0.0f;
+        cb->pad = 0.0f;
+        ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)g_scale.cbo, 0);
+    }
+    ID3D11DeviceContext_RSSetState(ctx, g_scale.rs);
+    ID3D11DeviceContext_IASetInputLayout(ctx, NULL);
+    ID3D11DeviceContext_IASetPrimitiveTopology(ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ID3D11DeviceContext_VSSetShader(ctx, g_scale.vs, NULL, 0);
+    ID3D11DeviceContext_PSSetShader(ctx, g_scale.ps, NULL, 0);
+    ID3D11DeviceContext_PSSetConstantBuffers(ctx, 0, 1, &g_scale.cbo);
+    ID3D11DeviceContext_Draw(ctx, 3, 0);
+}
+
+static void scale_cleanup(void) {
+    if (g_scale.rs) ID3D11RasterizerState_Release(g_scale.rs);
+    if (g_scale.cbo) ID3D11Buffer_Release(g_scale.cbo);
+    if (g_scale.ps) ID3D11PixelShader_Release(g_scale.ps);
+    if (g_scale.vs) ID3D11VertexShader_Release(g_scale.vs);
+    memset(&g_scale, 0, sizeof(g_scale));
+    g_scene_hud[0] = '\0';
+}
+
 // ============================== scene registry ==============================
 static const D3D11Scene kScenes[] = {
     {"spin", "D3D11 Cube", spin_init, spin_frame, spin_cleanup},
@@ -3845,6 +4067,12 @@ static const D3D11Scene kScenes[] = {
     {"atomics", "D3D11 Atomics", atom_init, atom_frame, atom_cleanup},
     {"drawstress", "D3D11 Draw Stress", ds_init, ds_frame, ds_cleanup},
     {"banding", "D3D11 Banding Test", band_init, band_frame, band_cleanup},
+    {"scaletest_combo", "D3D11 Scaling: Combo Card", scz_combo_init, scale_frame, scale_cleanup},
+    {"scaletest_zoneplate", "D3D11 Scaling: Zone Plate", scz_zone_init, scale_frame, scale_cleanup},
+    {"scaletest_wedge", "D3D11 Scaling: Resolution Wedge", scz_wedge_init, scale_frame, scale_cleanup},
+    {"scaletest_grid", "D3D11 Scaling: Lines & Diagonals", scz_grid_init, scale_frame, scale_cleanup},
+    {"scaletest_checker", "D3D11 Scaling: Checkerboard", scz_checker_init, scale_frame, scale_cleanup},
+    {"scaletest_edges", "D3D11 Scaling: Hard Edges", scz_edges_init, scale_frame, scale_cleanup},
     {"freelook", "D3D11 Free Look", freelook_init, freelook_frame, freelook_cleanup},
     {"planet", "D3D11 Planet Fly", planet_init, planet_frame, planet_cleanup},
 };
