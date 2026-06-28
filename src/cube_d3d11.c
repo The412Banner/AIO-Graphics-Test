@@ -4017,8 +4017,13 @@ static void scale_frame(ID3D11DeviceContext *ctx, double t, float aspect) {
         ScaleCB *cb = (ScaleCB *)m.pData;
         cb->iTime = (float)t;          // plumbed but unused (static scene)
         cb->iAspect = aspect;
-        cb->resx = (float)g_scale.w;
-        cb->resy = (float)g_scale.h;
+        // Use the LIVE backbuffer size (the resize handler updates g_w/g_h before
+        // each frame), NOT the size stashed at init -- otherwise every
+        // resolution-dependent pattern (combo split, zone-plate center, wedge,
+        // siemens, checker zones, hard-edge tiling, 4:3 letterbox) would be
+        // misplaced after the window is maximized / resized to fullscreen.
+        cb->resx = (float)g_w;
+        cb->resy = (float)g_h;
         cb->iCard = (float)g_scale.card;
         cb->iColor = g_scale.color ? 1.0f : 0.0f;
         cb->iAspectMode = g_scale.aspectMode ? 1.0f : 0.0f;
