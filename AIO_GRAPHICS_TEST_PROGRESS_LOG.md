@@ -44,3 +44,15 @@ too cleanly (no banding in the "before" to fix). Added a deliberate banding tort
 - Branch feat/dx11-banding-test (881f39e), pushed. CI workflow_dispatch run 28326348018
   GREEN both arches (64+32). C compiles clean; HLSL compiles at runtime (device-untested).
 - NEXT: stage .exe on device, launch scene, A/B with compositor debander OFF vs ON.
+
+## 2026-06-28 — RELEASE v1.6.1 (banding + scaling test scenes)
+- Merged feat/dx11-scaling-tests -> main (ff, brought banding + scaling + fullscreen fix).
+- Bumped AIO_VERSION "v1.6.0" -> "v1.6.1" (src/menu.h:9); shown bottom-right of the shell
+  via the dynamically-sized g_version label (layout_footer measures AIO_VERSION each layout,
+  so the footer reads v1.6.1 with no clipping). main HEAD = 928e83a.
+- CI run 28327668514 GREEN (built 928e83a, both arches).
+- GitHub Release /releases/tag/v1.6.1 — tagged at 928e83a, Latest, NOT prerelease/draft.
+  Assets = CI exes (64bit 2372292 B + 32bit 2344186 B) from run 28327668514.
+- NOTE: the new DX11 scenes (banding + 6 scaling cards) are CI-green but the HLSL compiles
+  at runtime on-device and is NOT yet device-verified. Scenes degrade gracefully (a shader
+  compile failure shows a fail-box, no app crash). Device A/B test still owed.
