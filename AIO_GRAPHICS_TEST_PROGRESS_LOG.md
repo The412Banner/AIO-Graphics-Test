@@ -1,4 +1,35 @@
 
+## 2026-06-28 — DX11 SCALING TESTS scene set (compositor upscaler torture cards)
+Why: A/B the Bannerlator compositor's scaling modes (None/Linear/Nearest/SGSR/FSR/
+FSR-Fit/Sharpen/NIS). This app does NOT scale — it only renders crisp, native,
+high-freq, pixel-exact content at the swapchain (= container render-) resolution;
+the user sets a sub-native container render-res and the compositor upscales to the
+panel, then flips modes in the in-game drawer. High-freq 1px detail is what makes
+the upscalers diverge (a smooth scene looks identical under every mode).
+- New unified DX11 scene (cube_d3d11.c, ~after band_cleanup): one PS switches on
+  iCard 0..5 — 0 combo (zone TL / grid TR / checker BL / wedge BR), 1 zone plate,
+  2 resolution wedge + ~64-spoke siemens star + top freq-sweep bar, 3 1px lines on
+  a 4px pitch + diagonals at 4 slopes, 4 checkerboard 1/2/4px zones, 5 4x4 hard-edge
+  shapes (circle/square/triangle/diamond) at many rotations for overshoot/halo test.
+- Cloned the Banding structure: custom ScaleCB cbuffer {iTime,iAspect,res.xy,iCard,
+  iColor,iAspectMode,pad} (32B), fullscreen-triangle VS, SV_POSITION int2 pixel math.
+  Shared scale_init_card/scale_frame/scale_cleanup + 6 thin scz_*_init wrappers so
+  each menu entry opens on its card. No AA / no MSAA / no smoothstep; static (iTime
+  plumbed, unused). Zone-plate k = 1.5708 / center-to-corner dist -> rings ~Nyquist
+  at the edges.
+- Keys (edge-detected, g_keys): C cycle card (wrap 0..5), K toggle color (grayscale
+  vs v*float3(1,0.15,0.5)), A toggle 4:3 letterbox (exercises FSR vs FSR-Fit). HUD:
+  "Card N  color:on/off  aspect:fill/4:3  [C/K/A]".
+- Registered 6 entries in kScenes[] after "banding": scaletest_combo / _zoneplate /
+  _wedge / _grid / _checker / _edges. CLI e.g. dx11 --scene scaletest_combo.
+- menu.c: new "Scaling Tests >" sub-page (show_dx11_scaling) mirroring "Demo Scenes",
+  reached via a 2nd persistent button (g_run_all2, ID_DX11_SCALING) on the DX11
+  picker; "< Back" = ID_DX11_SCALING_BACK; both wired in WM_COMMAND + destroy_content.
+- Branch feat/dx11-scaling-tests, pushed. CI workflow_dispatch run 28327163981 GREEN
+  both arches (64+32). C compiles clean; HLSL compiles at runtime (device-untested).
+- NEXT: stage .exe on device, set sub-native container render-res, launch a card,
+  flip compositor Scaling mode and compare. Verify Nyquist tuning + ps_4_0 int/%/^.
+
 ## 2026-06-28 — DX11 BANDING TEST scene (debanding test fixture)
 Why: prior compositor debanding test stalled — existing AIO scenes render gradients
 too cleanly (no banding in the "before" to fix). Added a deliberate banding torture card.
