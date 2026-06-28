@@ -70,6 +70,7 @@ static float g_cam_rgt[3] = {0.0f, 0.0f, 1.0f};   // derived screen-right (world
 static float g_cam_upv[3] = {0.0f, 1.0f, 0.0f};   // derived screen-up (world)
 static float g_cam_speed  = 22.0f;       // world units / second
 static unsigned char g_keys[256];        // WM_KEYDOWN/UP state, indexed by VK code
+static char  g_scene_hud[64] = "";       // optional per-scene status appended to the HUD (set by interactive scenes)
 static int   g_autofwd = 1;              // SkyFly cruise: auto-fly forward (F toggles)
 static int   g_mousesteer = 1;           // cursor-position steering on (M toggles)
 
@@ -3685,6 +3686,141 @@ static void freelook_cleanup(void) {
     memset(&g_free, 0, sizeof(g_free));
 }
 
+// ------------------------------ BANDING test --------------------------------
+// A deliberate colour-banding torture card for testing debanding/dithering in
+// the host compositor (and as a reference for what "fixed" looks like).
+//
+// The pixel shader writes smooth float gradients which the 8-bit R8G8B8A8_UNORM
+// swapchain quantises to 256 levels -> visible Mach-band steps. Several strips
+// stress different cases; the dark ramp (0..16/255) shows the worst banding.
+//
+//   D = toggle in-app dither ON/OFF   (OFF = raw banding "before";
+//                                       ON  = sub-LSB dither "after")
+//   M = cycle dither pattern: IGN (interleaved-gradient noise) / white noise /
+//       Bayer 8x8 ordered
+//
+// When dither is ON the shader adds +/-0.5 LSB before the hardware rounds to
+// 8-bit, which breaks the bands the same way a debander does. Static (no time
+// animation) so frozen-frame A/B captures compare cleanly.
+static const char *kBandingHLSL =
+    "cbuffer CB:register(b0){float iTime;float iAspect;float iDither;float iMethod;}\n"
+    "struct VSOut{float4 pos:SV_POSITION;float2 ndc:TEXCOORD0;};\n"
+    "VSOut VSMain(uint vid:SV_VertexID){VSOut o;float2 p=float2((vid<<1)&2,vid&2);"
+    "o.pos=float4(p*2.0-1.0,0.0,1.0);o.ndc=o.pos.xy;return o;}\n"
+    "float3 hsv2rgb(float3 c){float3 q=abs(frac(c.xxx+float3(1.0,2.0/3.0,1.0/3.0))*6.0-3.0);"
+    "return c.z*lerp(float3(1.0,1.0,1.0),saturate(q-1.0),c.y);}\n"
+    // Interleaved-gradient noise (Jimenez) in [0,1) -- a cheap ordered dither.
+    "float ign(float2 p){return frac(52.9829189*frac(dot(p,float2(0.06711056,0.00583715))));}\n"
+    // White-noise hash in [0,1).
+    "float hash21(float2 p){p=frac(p*float2(123.34,456.21));p+=dot(p,p+45.32);return frac(p.x*p.y);}\n"
+    // Recursive Bayer 8x8 ordered matrix in [0,1).
+    "float bayer2(float2 a){a=floor(a);return frac(a.x*0.5+a.y*a.y*0.75);}\n"
+    "float bayer4(float2 a){return bayer2(0.5*a)*0.25+bayer2(a);}\n"
+    "float bayer8(float2 a){return bayer4(0.5*a)*0.25+bayer2(a);}\n"
+    "float4 PSMain(VSOut inp):SV_TARGET{\n"
+    "  float u=inp.ndc.x*0.5+0.5;\n"             // 0 left .. 1 right
+    "  float v=1.0-(inp.ndc.y*0.5+0.5);\n"       // 0 top .. 1 bottom
+    "  int strip=(int)(v*6.0);\n"
+    "  float3 col;\n"
+    "  if(strip==0)      col=float3(u,u,u);\n"            // full grayscale 0..1
+    "  else if(strip==1) col=float3(u,u,u)*0.0625;\n"     // dark ramp 0..16/255 (worst bands)
+    "  else if(strip==2) col=float3(u,0.0,0.0);\n"        // red ramp
+    "  else if(strip==3) col=float3(0.0,u,0.0);\n"        // green ramp
+    "  else if(strip==4) col=float3(0.0,0.0,u);\n"        // blue ramp
+    "  else              col=hsv2rgb(float3(u,0.55,0.45));\n"  // dark hue sweep (chroma bands)
+    "  if(iDither>0.5){\n"
+    "    float d=(iMethod<0.5)?ign(inp.pos.xy):(iMethod<1.5)?hash21(inp.pos.xy):bayer8(inp.pos.xy);\n"
+    "    col+=(d-0.5)/255.0;\n"                  // +/-0.5 LSB before the 8-bit round
+    "  }\n"
+    "  return float4(col,1.0);\n"
+    "}\n";
+
+typedef struct {
+    float iTime;
+    float iAspect;
+    float iDither;
+    float iMethod;
+} BandCB;
+
+static struct {
+    ID3D11VertexShader *vs;
+    ID3D11PixelShader *ps;
+    ID3D11Buffer *cbo;
+    ID3D11RasterizerState *rs;
+} g_band;
+
+static int band_init(ID3D11Device *dev, ID3D11DeviceContext *ctx, int w, int h) {
+    (void)ctx;
+    (void)w;
+    (void)h;
+    ID3DBlob *vsb = compile_hlsl(kBandingHLSL, "VSMain", "vs_4_0");
+    ID3DBlob *psb = compile_hlsl(kBandingHLSL, "PSMain", "ps_4_0");
+    if (!vsb || !psb) return 1;
+    ID3D11Device_CreateVertexShader(dev, ID3D10Blob_GetBufferPointer(vsb),
+                                    ID3D10Blob_GetBufferSize(vsb), NULL, &g_band.vs);
+    ID3D11Device_CreatePixelShader(dev, ID3D10Blob_GetBufferPointer(psb),
+                                   ID3D10Blob_GetBufferSize(psb), NULL, &g_band.ps);
+    ID3D10Blob_Release(vsb);
+    ID3D10Blob_Release(psb);
+    D3D11_BUFFER_DESC cbd;
+    memset(&cbd, 0, sizeof(cbd));
+    cbd.ByteWidth = sizeof(BandCB);
+    cbd.Usage = D3D11_USAGE_DYNAMIC;
+    cbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    cbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    ID3D11Device_CreateBuffer(dev, &cbd, NULL, &g_band.cbo);
+    D3D11_RASTERIZER_DESC rd;
+    memset(&rd, 0, sizeof(rd));
+    rd.FillMode = D3D11_FILL_SOLID;
+    rd.CullMode = D3D11_CULL_NONE;
+    rd.DepthClipEnable = TRUE;
+    ID3D11Device_CreateRasterizerState(dev, &rd, &g_band.rs);
+    g_scene_hud[0] = '\0';
+    return (g_band.vs && g_band.ps && g_band.cbo && g_band.rs) ? 0 : 1;
+}
+
+static void band_frame(ID3D11DeviceContext *ctx, double t, float aspect) {
+    // Edge-detected key toggles (g_keys is held-state; track the previous frame).
+    static int prev_d = 0, prev_m = 0;
+    static int dither = 0, method = 0;
+    int d_now = g_keys['D'] ? 1 : 0, m_now = g_keys['M'] ? 1 : 0;
+    if (d_now && !prev_d) dither = !dither;
+    if (m_now && !prev_m) method = (method + 1) % 3;
+    prev_d = d_now;
+    prev_m = m_now;
+
+    const char *mn = (method == 0) ? "IGN" : (method == 1) ? "Noise" : "Bayer8";
+    snprintf(g_scene_hud, sizeof(g_scene_hud), "Dither %s (%s)  [D/M]",
+             dither ? "ON" : "OFF", mn);
+
+    D3D11_MAPPED_SUBRESOURCE m;
+    if (SUCCEEDED(ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)g_band.cbo, 0,
+                                          D3D11_MAP_WRITE_DISCARD, 0, &m))) {
+        BandCB *cb = (BandCB *)m.pData;
+        cb->iTime = (float)t;
+        cb->iAspect = aspect;
+        cb->iDither = dither ? 1.0f : 0.0f;
+        cb->iMethod = (float)method;
+        ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)g_band.cbo, 0);
+    }
+    ID3D11DeviceContext_RSSetState(ctx, g_band.rs);
+    ID3D11DeviceContext_IASetInputLayout(ctx, NULL);
+    ID3D11DeviceContext_IASetPrimitiveTopology(ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ID3D11DeviceContext_VSSetShader(ctx, g_band.vs, NULL, 0);
+    ID3D11DeviceContext_PSSetShader(ctx, g_band.ps, NULL, 0);
+    ID3D11DeviceContext_PSSetConstantBuffers(ctx, 0, 1, &g_band.cbo);
+    ID3D11DeviceContext_Draw(ctx, 3, 0);
+}
+
+static void band_cleanup(void) {
+    if (g_band.rs) ID3D11RasterizerState_Release(g_band.rs);
+    if (g_band.cbo) ID3D11Buffer_Release(g_band.cbo);
+    if (g_band.ps) ID3D11PixelShader_Release(g_band.ps);
+    if (g_band.vs) ID3D11VertexShader_Release(g_band.vs);
+    memset(&g_band, 0, sizeof(g_band));
+    g_scene_hud[0] = '\0';
+}
+
 // ============================== scene registry ==============================
 static const D3D11Scene kScenes[] = {
     {"spin", "D3D11 Cube", spin_init, spin_frame, spin_cleanup},
@@ -3708,6 +3844,7 @@ static const D3D11Scene kScenes[] = {
     {"matcap", "D3D11 Matcap", mat_init, mat_frame, mat_cleanup},
     {"atomics", "D3D11 Atomics", atom_init, atom_frame, atom_cleanup},
     {"drawstress", "D3D11 Draw Stress", ds_init, ds_frame, ds_cleanup},
+    {"banding", "D3D11 Banding Test", band_init, band_frame, band_cleanup},
     {"freelook", "D3D11 Free Look", freelook_init, freelook_frame, freelook_cleanup},
     {"planet", "D3D11 Planet Fly", planet_init, planet_frame, planet_cleanup},
 };
@@ -3931,7 +4068,8 @@ int aio_run_d3d11_cube(HINSTANCE hinst, const char *scene_name) {
             double secs = (double)(now_ms - last_ms) / 1000.0;
             double fps = (secs > 0.0) ? (double)(frames - last_frame) / secs : 0.0;
             char hud[96], title[160];
-            snprintf(hud, sizeof(hud), "%s   %.0f FPS", api, fps);
+            snprintf(hud, sizeof(hud), "%s   %.0f FPS%s%s", api, fps,
+                     g_scene_hud[0] ? "    " : "", g_scene_hud);
             aio_hud_update(hwnd, hud);
             if (strcmp(scene->name, "freelook") == 0 || strcmp(scene->name, "planet") == 0)
                 snprintf(title, sizeof(title),
