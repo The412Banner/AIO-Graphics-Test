@@ -75,6 +75,7 @@ once before the render loop.
   released in cleanup.
 - src/cube_d3d10.c: same (D3D10_CULL_NONE) after OMSetRenderTargets; released in cleanup.
 - Pushed to main (65a98ff). CI build-windows run 28344205408 GREEN both arches
-  (x86_64 49s + i686 59s). C clean; DEVICE-UNPROVEN (eyeball spin+grid = solid cube owed).
-- NEXT: confirm CI green, get exes on-device, eyeball spin + grid = solid cube. Then
-  (optional) re-bundle exes into Bannerlator container_pattern_common.tzst like v1.6.1.
+  (x86_64 49s + i686 59s). C clean. ✅DEVICE-PROVEN 2026-06-29: user staged the run
+  exes to /sdcard/Download, ran them, DX cubes render SOLID now (no longer inside-out).
+- DONE. Optional follow-up: re-bundle rebuilt exes into Bannerlator
+  container_pattern_common.tzst like v1.6.1 (existing containers need reinstall/root push).
