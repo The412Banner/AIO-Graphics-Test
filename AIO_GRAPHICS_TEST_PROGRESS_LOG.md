@@ -74,7 +74,7 @@ once before the render loop.
 - src/cube_d3d11.c: rs_default (D3D11_CULL_NONE, DepthClipEnable) after OMSetRenderTargets;
   released in cleanup.
 - src/cube_d3d10.c: same (D3D10_CULL_NONE) after OMSetRenderTargets; released in cleanup.
-- Pushed to main. CI build-windows triggered. C mirrors the existing make_cullnone_rs
-  pattern; NO local toolchain here so CI-green unverified at push, device-unproven.
+- Pushed to main (65a98ff). CI build-windows run 28344205408 GREEN both arches
+  (x86_64 49s + i686 59s). C clean; DEVICE-UNPROVEN (eyeball spin+grid = solid cube owed).
 - NEXT: confirm CI green, get exes on-device, eyeball spin + grid = solid cube. Then
   (optional) re-bundle exes into Bannerlator container_pattern_common.tzst like v1.6.1.
