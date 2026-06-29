@@ -56,3 +56,25 @@ too cleanly (no banding in the "before" to fix). Added a deliberate banding tort
 - NOTE: the new DX11 scenes (banding + 6 scaling cards) are CI-green but the HLSL compiles
   at runtime on-device and is NOT yet device-verified. Scenes degrade gracefully (a shader
   compile failure shows a fail-box, no app crash). Device A/B test still owed.
+
+## 2026-06-28 — FIX: DX10/DX11 cube scenes rendered inside-out (winding vs cull)
+Symptom (user): the plain spinning cube + cube-grid render the INSIDE of the cube
+(hollow / back walls) instead of a solid outside cube. GL and Vulkan cubes look fine.
+Root cause: the cube mesh is wound CCW-front (OpenGL convention; cube_d3d11.c kFace +
+kQuadIdx). The GL cube enables GL_DEPTH_TEST but NEVER GL_CULL_FACE (cube_gl.c:63) so it
+draws both sides and the depth buffer sorts them -> always solid (Vulkan cube likewise).
+The DX11 spin_frame + inst_frame (and the DX10 cube) never call RSSetState, so they fell
+to D3D's default rasterizer = CULL_BACK + FrontCounterClockwise=FALSE (CW=front). With
+CCW geometry that culls the OUTWARD faces -> only inner back walls draw -> inside-out.
+Other DX11 scenes dodged it because they each force CULL_NONE (dolphin/ray/atom/planet/
+banding/etc). Swept the whole DX family: d3d8/d3d9/d3d12/ddraw already set CULL_NONE;
+only D3D10 + D3D11 had the gap.
+Fix (match GL/Vulkan = no culling, depth decides): bind a global CULL_NONE rasterizer
+once before the render loop.
+- src/cube_d3d11.c: rs_default (D3D11_CULL_NONE, DepthClipEnable) after OMSetRenderTargets;
+  released in cleanup.
+- src/cube_d3d10.c: same (D3D10_CULL_NONE) after OMSetRenderTargets; released in cleanup.
+- Pushed to main. CI build-windows triggered. C mirrors the existing make_cullnone_rs
+  pattern; NO local toolchain here so CI-green unverified at push, device-unproven.
+- NEXT: confirm CI green, get exes on-device, eyeball spin + grid = solid cube. Then
+  (optional) re-bundle exes into Bannerlator container_pattern_common.tzst like v1.6.1.

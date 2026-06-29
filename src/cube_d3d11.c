@@ -4196,6 +4196,20 @@ int aio_run_d3d11_cube(HINSTANCE hinst, const char *scene_name) {
     ID3D11DeviceContext_OMSetDepthStencilState(ctx, dss, 1);
     ID3D11DeviceContext_OMSetRenderTargets(ctx, 1, &rtv, dsv);
 
+    // Default rasterizer = CULL_NONE so the depth buffer alone decides visibility,
+    // matching the GL/Vulkan cubes (which never enable face culling). Our cube
+    // geometry is wound CCW-front (GL convention); D3D's factory default rasterizer
+    // is CULL_BACK + CW-front, which would cull the outward faces of any scene that
+    // doesn't set its own state (spin, grid) and render the cube inside-out.
+    D3D11_RASTERIZER_DESC rsd;
+    memset(&rsd, 0, sizeof(rsd));
+    rsd.FillMode = D3D11_FILL_SOLID;
+    rsd.CullMode = D3D11_CULL_NONE;
+    rsd.DepthClipEnable = TRUE;
+    ID3D11RasterizerState *rs_default = NULL;
+    ID3D11Device_CreateRasterizerState(dev, &rsd, &rs_default);
+    ID3D11DeviceContext_RSSetState(ctx, rs_default);
+
     D3D11_VIEWPORT vp;
     memset(&vp, 0, sizeof(vp));
     vp.Width = (float)g_w;
@@ -4332,6 +4346,7 @@ int aio_run_d3d11_cube(HINSTANCE hinst, const char *scene_name) {
     aio_hud_destroy();
     scene->cleanup();
 
+    if (rs_default) ID3D11RasterizerState_Release(rs_default);
     if (dss) ID3D11DepthStencilState_Release(dss);
     if (dsv) ID3D11DepthStencilView_Release(dsv);
     if (depth_tex) ID3D11Texture2D_Release(depth_tex);

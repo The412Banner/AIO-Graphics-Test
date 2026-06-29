@@ -279,6 +279,18 @@ int aio_run_d3d10_cube(HINSTANCE hinst) {
     ID3D10Device_OMSetDepthStencilState(dev, dss, 1);
     ID3D10Device_OMSetRenderTargets(dev, 1, &rtv, dsv);
 
+    // CULL_NONE like the GL/Vulkan cubes: the cube is wound CCW-front (GL
+    // convention), but D3D's default rasterizer is CULL_BACK + CW-front, which
+    // would cull the outward faces and render the cube inside-out.
+    D3D10_RASTERIZER_DESC rsd;
+    memset(&rsd, 0, sizeof(rsd));
+    rsd.FillMode = D3D10_FILL_SOLID;
+    rsd.CullMode = D3D10_CULL_NONE;
+    rsd.DepthClipEnable = TRUE;
+    ID3D10RasterizerState *rs_default = NULL;
+    ID3D10Device_CreateRasterizerState(dev, &rsd, &rs_default);
+    ID3D10Device_RSSetState(dev, rs_default);
+
     D3D10_VIEWPORT vp;
     memset(&vp, 0, sizeof(vp));
     vp.Width = (UINT)g_w;
@@ -438,6 +450,7 @@ int aio_run_d3d10_cube(HINSTANCE hinst) {
     if (layout) ID3D10InputLayout_Release(layout);
     if (ps) ID3D10PixelShader_Release(ps);
     if (vs) ID3D10VertexShader_Release(vs);
+    if (rs_default) ID3D10RasterizerState_Release(rs_default);
     if (dss) ID3D10DepthStencilState_Release(dss);
     if (dsv) ID3D10DepthStencilView_Release(dsv);
     if (depth_tex) ID3D10Texture2D_Release(depth_tex);
