@@ -1,4 +1,29 @@
 
+## 2026-07-27 — Bionic-FG validation harness (new standalone exe + analyzer)
+Why: prove the Bionic-FG Vulkan layer isn't just running but is EFFECTIVE — extra
+frames really on-screen, genuinely interpolated (not duplicated), spatially correct,
+and smoothly paced. Fresh, ground-up (NOT derived from the WinNative "Frame-Gen-Tester"
+binary we inspected — clean-room, ours).
+- New standalone `src/fgtest.c` -> `AIO-FGTest-{32,64}bit.exe`. Self-contained; no
+  dep on the main suite. D3D11, dynamically loaded (runs under Wine+DXVK), COBJMACROS,
+  runtime HLSL — same idioms as cube_d3d11.c so it builds on the existing mingw path.
+- It is a *source*, not a measurer: Bionic-FG sits BELOW the app in the swapchain, so
+  the app can't see generated frames. It renders REAL frames at a precise known cap and
+  bakes signals that are a pure function of the integer real-frame index `fi`:
+  FLICKER block (full invert/frame -> ~50% grey = a generated frame), BARCODE (start +
+  20-bit fi + parity + stop -> real/gen/duplicate), PHASE hue swatch, constant-VELOCITY
+  marker (interp accuracy = marker vs true midpoint), plus ROTOR/BARS/OCCLUDER stressors.
+  Scenes: verify/motion/stress/full. Writes `fgtest_results.json` (cadence stats + exact
+  geometry so the analyzer can reconstruct expected positions). Args: --cap --duration
+  --scene --width --height --vsync --selftest --out. Keys: [ ] cap, V, Space, 1-4, Esc.
+- New host analyzer `tools/fg_analyze.py` (opencv+numpy): decodes a high-speed capture
+  vs the results json -> generation ratio (~mult), real/gen counts, duplicate rate,
+  interpolation px RMSE (vs half-step), throughput/authenticity PASS/FAIL -> fg_analysis.json.
+- New workflow `.github/workflows/build-fgtest.yml` (32+64-bit mingw; links
+  user32/gdi32/dxguid/winmm; no import libs — d3d11/d3dcompiler are LoadLibrary'd).
+- Methodology in `docs/FRAMEGEN_TEST.md` (T1 throughput .. T6 cross-vendor, device
+  recipe, Nyquist/latency caveats). Branch: feat/bionic-fg-tester. NOT device-run yet.
+
 ## 2026-06-28 — DX11 SCALING TESTS scene set (compositor upscaler torture cards)
 Why: A/B the Bannerlator compositor's scaling modes (None/Linear/Nearest/SGSR/FSR/
 FSR-Fit/Sharpen/NIS). This app does NOT scale — it only renders crisp, native,
