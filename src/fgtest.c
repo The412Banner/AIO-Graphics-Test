@@ -44,8 +44,11 @@
 // Copyright (c) 2026 The412Banner. Licensed under Apache-2.0 (see LICENSE).
 
 #define COBJMACROS
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
+#include <mmsystem.h>   // timeBeginPeriod / timeEndPeriod
 #include <d3d11.h>
 #include <dxgi.h>
 #include <d3dcompiler.h>
@@ -144,7 +147,7 @@ typedef HRESULT(WINAPI *PFN_D3D11CreateDeviceAndSwapChain)(
     IDXGIAdapter *, D3D_DRIVER_TYPE, HMODULE, UINT, const D3D_FEATURE_LEVEL *, UINT, UINT,
     const DXGI_SWAP_CHAIN_DESC *, IDXGISwapChain **, ID3D11Device **, D3D_FEATURE_LEVEL *,
     ID3D11DeviceContext **);
-static PFN_D3DCompile g_compile;
+static pD3DCompile g_compile;
 
 static ID3DBlob *compile_hlsl(const char *src, const char *entry, const char *target) {
     ID3DBlob *blob = NULL, *err = NULL;
@@ -476,7 +479,7 @@ int WINAPI WinMain(HINSTANCE hinst, HINSTANCE hprev, LPSTR cmdline, int nshow) {
 
     HMODULE d3dc = LoadLibraryA("d3dcompiler_47.dll");
     if (!d3dc) d3dc = LoadLibraryA("d3dcompiler_43.dll");
-    g_compile = d3dc ? (PFN_D3DCompile)GetProcAddress(d3dc, "D3DCompile") : NULL;
+    g_compile = d3dc ? (pD3DCompile)GetProcAddress(d3dc, "D3DCompile") : NULL;
     if (!g_compile) { fail_box("Could not load d3dcompiler (D3DCompile)."); return 1; }
 
     ID3DBlob *vsb = compile_hlsl(kVS, "VSMain", "vs_4_0");
