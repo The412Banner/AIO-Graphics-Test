@@ -65,6 +65,7 @@ jobs:
               -DVK_USE_PLATFORM_WIN32_KHR -DWIN32_LEAN_AND_MEAN \
               -D_WIN32_WINNT=0x0A00 \
               -fcf-protection=none -mno-avx \
+              -fstack-protector-all -fno-omit-frame-pointer \
               -O2 -o $f.o
           done
 
@@ -101,7 +102,7 @@ jobs:
             -mwindows \
             -L vk/lib \
             -o ${{ matrix.out }} \
-            -lvulkan-1 -lgdi32 -luser32 -lopengl32 -lcomctl32 -ldxguid
+            -lvulkan-1 -lgdi32 -luser32 -lopengl32 -lcomctl32 -ldxguid -lssp
           file ${{ matrix.out }}
 
       - name: Upload artifact
