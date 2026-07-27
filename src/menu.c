@@ -1144,14 +1144,16 @@ static void show_dx11_scaling(HWND frame) {
         NULL);
     if (g_ui_font) SendMessage(g_placeholder, WM_SETFONT, (WPARAM)g_ui_font, TRUE);
 
-    static const char *labels[] = {"Combo card (zone/grid/checker/wedge)",
+    static const char *labels[] = {"FG Source (bionic-fg capture test)",
+                                   "Combo card (zone/grid/checker/wedge)",
                                    "Zone plate",
                                    "Resolution wedge / siemens",
                                    "Lines & diagonals (1px)",
                                    "Checkerboard (1/2/4px)",
                                    "Hard edges",
                                    "Banding test (dither)"};
-    static const char *args[] = {"dx11 --scene scaletest_combo",
+    static const char *args[] = {"dx11 --scene fgsource",
+                                 "dx11 --scene scaletest_combo",
                                  "dx11 --scene scaletest_zoneplate",
                                  "dx11 --scene scaletest_wedge",
                                  "dx11 --scene scaletest_grid",

@@ -4064,7 +4064,7 @@ static void scale_cleanup(void) {
 #define FG_BASE_FPS   30.0
 #define FG_DATA_BITS  20
 #define FG_BC_CELLS   (3 + FG_DATA_BITS + 1 + 2)   // start(1,0,1) + data + parity + stop(1,0)
-#define FG_MAX_VERTS  4096
+#define FG_MAX_VERTS  512   /* scene uses ~210 verts; kept small to minimize BSS footprint */
 
 typedef struct { float x, y, r, g, b, a; } FgVtx;
 static ID3D11VertexShader   *s_fg_vs;

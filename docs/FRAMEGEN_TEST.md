@@ -1,7 +1,8 @@
 # Bionic-FG validation harness
 
-A deterministic Direct3D 11 **frame source** (`src/fgtest.c` → `AIO-FGTest-{32,64}bit.exe`)
-plus a host-side **capture analyzer** (`tools/fg_analyze.py`) that together prove the
+A deterministic Direct3D 11 **frame source** — the `fgsource` scene inside the main AIO
+Graphics Test exe (`dx11 --scene fgsource`, reached via **DirectX 11 → Scaling Tests →
+FG Source**) — plus a host-side **capture analyzer** (`tools/fg_analyze.py`) that together prove the
 Bannerlator Bionic-FG Vulkan frame-generation layer is not merely *running* but
 **effective, authentic, spatially correct, and smoothly paced.**
 
@@ -47,27 +48,21 @@ on-screen output**. This harness splits the job cleanly:
 
 ## Running it
 
-Build via CI (**Actions → "Build Bionic-FG Tester (Windows PE)"**) → download
-`AIO-FGTest-64bit.exe` (or 32-bit for legacy titles).
-
-Interactive keys: `[` `]` cap ∓5 · `V` vsync · `Space` pause · `1`–`4` scene · `Esc`.
-
-Headless / scripted:
-
-```
-AIO-FGTest-64bit.exe --cap 30 --scene verify --duration 12 --out fgtest_results.json
-```
+The frame source ships inside the main AIO Graphics Test exe (built by the normal
+`build-windows.yml`). In the app shell open **Cube — Direct3D 11 → Scaling Tests →
+FG Source**, or launch it directly with `--cube dx11 --scene fgsource`. It is
+self-paced to a fixed 30 fps base cadence and needs no CLI flags or results file —
+every marker is a pure fraction of the swapchain, so the analyzer reconstructs the
+expected image from the capture's own resolution.
 
 On device (root bridge sketch):
 
 ```sh
-# 1. push the exe into a container's drive_c and the results path somewhere readable
-bridge 'cp /sdcard/Download/AIO-FGTest-64bit.exe <prefix>/drive_c/'
-# 2. launch it through the container with Bionic-FG 2x enabled for that shortcut,
-#    while screen-recording the actual output:
+# 1. add the AIO Graphics Test exe as a shortcut and enable Bionic-FG 2x for it, then
+#    launch the FG Source card while screen-recording the actual output:
 bridge 'screenrecord --time-limit 15 /sdcard/Download/fg_cap.mp4'
-# 3. pull the capture + the results file the exe wrote, then analyze on host:
-python3 tools/fg_analyze.py fg_cap.mp4 fgtest_results.json --expect-mult 2
+# 2. pull the capture, then analyze on host (no results file needed for the in-app build):
+python3 tools/fg_analyze.py fg_cap.mp4 --expect-mult 2
 ```
 
 ## Reading the result

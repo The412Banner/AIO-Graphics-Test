@@ -137,3 +137,31 @@ once before the render loop.
   exes to /sdcard/Download, ran them, DX cubes render SOLID now (no longer inside-out).
 - DONE. Optional follow-up: re-bundle rebuilt exes into Bannerlator
   container_pattern_common.tzst like v1.6.1 (existing containers need reinstall/root push).
+
+## 2026-07-27 (session 2, post-reboot) — endbr64 theory DEBUNKED; c000001d is a layout-sensitive latent bug
+Bridge restored after reboot. Restaged the CET-free exe (af1c5df0) into all 3 container drive_c.
+Re-tested the "AIO Graphics Test" Desktop shortcut (game grid) on the Proton-11-arm64ec / FEX
+container. Findings (device-proven this session):
+- FOUND+FIXED a real shortcut bug: Exec was `...exe dx11 --scene fgsource` with NO `--cube`, so
+  WinMain (cube.c:4291 run_cube gate) fell through to aio_run_shell() instead of the D3D11 scene.
+  The app's own menu launches scenes as `--cube dx11 --scene <name>` (menu.c:1362). Added `--cube`.
+- The c000001d crash PERSISTED after `--cube`. Instruction audit of the staged exe (llvm-objdump +
+  byte scan): **0 endbr64, 0 AVX/VEX, no exotic instrs**. Crash addr 0x7ffebf66ac / 0x6ffca966ac is
+  OUTSIDE our exe (ImageBase 0x140000000) → the fault is in a loaded DLL, not our code.
+- CONTROL: DiRT 3 (same DiRT3-cloned config, only the exe differs) runs perfectly NOW — Mesa GL
+  contexts, no crash, DXVK reached. So the driver/container/reboot are FINE; crash is exe-specific.
+- Pulled the INSTALLED "original" exe (C:\AIO Graphics Test\...-64bit.exe, 2372804 B, 07-26 19:38 =
+  what the user launches from Downloads/Start-Menu). It is ALSO 0 endbr64, IDENTICAL import list
+  (opengl32 + vulkan-1), and DEVICE-PROVEN WORKS via our exact game-grid path (rendered the D3D11
+  spin cube @ 2546 fps + FusionHUD). → **endbr64 was NEVER the cause; the `-fcf-protection=none
+  -mno-avx` "fix" (5ffe693) changed nothing (both builds already clean).**
+- The ONLY main-build diff between WORKS (2372804) and CRASHES (2377747/af1c5df0/HEAD) is commit
+  1080b02 (fgsource scene: +161 lines cube_d3d11.c incl. static FgVtx s_fg_verts[4096] = 96KB BSS,
+  +1 kBenchRows line). The crashing build c000001d's **even on `--scene spin`** (not fgsource) →
+  the whole binary is poisoned, not the scene. kScenes/kBenchRows both use dynamic sizeof counts
+  (no overflow). ⇒ **layout-sensitive latent memory-corruption (heisenbug): adding fgsource shifted
+  .bss/.text so a pre-existing overflow now lands on a code pointer → illegal-instruction in a DLL.**
+- PLAN (user directive): stop the standalone FG workflow (build-fgtest.yml + fgtest.c), roll the FG
+  test into the MAIN build as a card under **DX11 > Scaling Tests** (show_dx11_scaling), built by the
+  original build-windows.yml. Shrink FG_MAX_VERTS 4096→512 (84KB less BSS) as a best-effort to not
+  perturb the latent bug. If it still c000001d's, hunt the real overflow (stack-protector/ASan build).
