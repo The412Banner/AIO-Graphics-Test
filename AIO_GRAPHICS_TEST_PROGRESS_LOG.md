@@ -1,4 +1,24 @@
 
+## 2026-07-27 (later still) — ROOT CAUSE: mingw exes SIGILL under FEX (endbr64) — FIXED
+On-device the AIO exe (and the standalone fgtest, and by inference the WinNative
+"Frame-Gen-Tester") launched but instantly BLACK-SCREENED: created a window
+("Game window detected") then exited ~1s in, BEFORE D3D11 (no DXVK log ever). Chased
+it via the root bridge: fixed a broken shortcut first (the user's "Download" shortcut
+had NO [Extra Data] config — no dxwrapper/driver — so D3D11 never set up; created a
+proper "AIO Graphics Test.desktop" cloned from the working DiRT 3 config), then a
+clean-relaunch logcat capture showed the smoking gun:
+  013c:err:seh:NtRaiseException Unhandled exception code c000001d addr 0x6ffca966ac
+c000001d = STATUS_ILLEGAL_INSTRUCTION. Container = Proton 11.0-3-arm64ec-4, x86_64 PEs
+run via FEX (libwow64fex). mingw-w64 gcc-13 (ubuntu-22.04) emits endbr64 (CET/IBT) at
+function prologues; THIS FEX build SIGILLs on endbr64 -> every mingw exe dies at the
+first indirect call, ~1s in, before rendering. FIX: add `-fcf-protection=none -mno-avx`
+to the compile flags (build-windows.yml + build-fgtest.yml). Rebuilt run 30263084204
+GREEN; verified the new exe has **0 endbr64** byte-patterns (old build had hundreds).
+New AIO-Graphics-Test-64bit.exe staged to Downloads (bridge dropped before I could
+re-stage into the container C:\ / relaunch — user rebooting to restore the daemon).
+DEVICE-CONFIRMED FIX PENDING (endbr64 removal verified in-binary; on-device render not
+yet re-tested). 🔑 This gotcha affects ANY mingw-gcc-13 exe in this container.
+
 ## 2026-07-27 (later) — FG Source integrated as in-app D3D11 scene
 The standalone AIO-FGTest exe would NOT launch in the user's arm64ec Proton-9
 container: 32-bit ran+crashed under FEX in DXVK (zombie, no results file), 64-bit
