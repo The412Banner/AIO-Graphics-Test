@@ -50,6 +50,7 @@ jobs:
           ${{ matrix.prefix }}-gcc src/fgtest.c \
             -I src \
             -DWIN32_LEAN_AND_MEAN -D_WIN32_WINNT=0x0A00 \
+            -fcf-protection=none -mno-avx \
             -O2 -mwindows \
             -o ${{ matrix.out }} \
             -luser32 -lgdi32 -ldxguid -lwinmm

@@ -64,6 +64,7 @@ jobs:
               -I src -I vk/include \
               -DVK_USE_PLATFORM_WIN32_KHR -DWIN32_LEAN_AND_MEAN \
               -D_WIN32_WINNT=0x0A00 \
+              -fcf-protection=none -mno-avx \
               -O2 -o $f.o
           done
 
