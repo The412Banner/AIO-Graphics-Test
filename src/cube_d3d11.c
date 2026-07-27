@@ -4049,8 +4049,169 @@ static void scale_cleanup(void) {
 }
 
 // ============================== scene registry ==============================
+// ==================== FG SOURCE scene (Bionic-FG validation) ====================
+// A deterministic, self-paced (~30 fps) frame source that bakes real/generated-frame
+// markers so an external high-speed capture can validate the Bionic-FG Vulkan layer
+// (see docs/FRAMEGEN_TEST.md + tools/fg_analyze.py). Runs through the normal D3D11
+// (DXVK -> Vulkan) present path that Bionic-FG hooks. Every element is a pure
+// function of the integer frame index and expressed as a FRACTION of the swapchain,
+// so the analyzer reconstructs it from the capture's own resolution (no results file
+// needed for the in-app build). Signals: FLICKER (full invert/frame -> ~50% grey =
+// a generated frame), BARCODE (start + 20-bit index + parity + stop), PHASE hue
+// swatch, constant-VELOCITY marker (interp accuracy), fast BARS + ROTOR (motion
+// stress). It self-throttles to a known base cadence so the FG multiplier is
+// measurable as (captured rate / 30).
+#define FG_BASE_FPS   30.0
+#define FG_DATA_BITS  20
+#define FG_BC_CELLS   (3 + FG_DATA_BITS + 1 + 2)   // start(1,0,1) + data + parity + stop(1,0)
+#define FG_MAX_VERTS  4096
+
+typedef struct { float x, y, r, g, b, a; } FgVtx;
+static ID3D11VertexShader   *s_fg_vs;
+static ID3D11PixelShader    *s_fg_ps;
+static ID3D11InputLayout    *s_fg_layout;
+static ID3D11Buffer         *s_fg_vb;
+static ID3D11RasterizerState *s_fg_rs;
+static FgVtx    s_fg_verts[FG_MAX_VERTS];
+static int      s_fg_nv;
+static uint64_t s_fg_fi;
+static double   s_fg_qpf, s_fg_next;
+
+static void fg_hue(float h, float *r, float *g, float *b) {
+    float x = fabsf(fmodf(h * 6.0f, 2.0f) - 1.0f), c = 1.0f - x;
+    switch ((int)(h * 6.0f) % 6) {
+        case 0: *r = 1; *g = c; *b = 0; break;  case 1: *r = c; *g = 1; *b = 0; break;
+        case 2: *r = 0; *g = 1; *b = c; break;  case 3: *r = 0; *g = c; *b = 1; break;
+        case 4: *r = c; *g = 0; *b = 1; break;  default: *r = 1; *g = 0; *b = c; break;
+    }
+}
+static void fg_quad(float px, float py, float pw, float ph, float r, float g, float b) {
+    if (s_fg_nv + 6 > FG_MAX_VERTS) return;
+    float x0 = px / g_w * 2.f - 1.f, x1 = (px + pw) / g_w * 2.f - 1.f;
+    float y0 = 1.f - py / g_h * 2.f, y1 = 1.f - (py + ph) / g_h * 2.f;
+    FgVtx q[6] = {{x0, y0, r, g, b, 1}, {x1, y0, r, g, b, 1}, {x1, y1, r, g, b, 1},
+                  {x0, y0, r, g, b, 1}, {x1, y1, r, g, b, 1}, {x0, y1, r, g, b, 1}};
+    memcpy(&s_fg_verts[s_fg_nv], q, sizeof q); s_fg_nv += 6;
+}
+static void fg_rotor(float cx, float cy, float len, float th, float ang,
+                     float r, float g, float b) {
+    if (s_fg_nv + 6 > FG_MAX_VERTS) return;
+    float dx = cosf(ang), dy = sinf(ang), nx = -dy, ny = dx;
+    float hx = nx * th * 0.5f, hy = ny * th * 0.5f;
+    float ax = cx + hx, ay = cy + hy, bx = cx - hx, by = cy - hy;
+    float tx = cx + dx * len, ty = cy + dy * len;
+    float c2x = tx + hx, c2y = ty + hy, d2x = tx - hx, d2y = ty - hy;
+#define FGX(P) ((P) / g_w * 2.f - 1.f)
+#define FGY(P) (1.f - (P) / g_h * 2.f)
+    FgVtx q[6] = {{FGX(ax), FGY(ay), r, g, b, 1}, {FGX(c2x), FGY(c2y), r, g, b, 1},
+                  {FGX(d2x), FGY(d2y), r, g, b, 1}, {FGX(ax), FGY(ay), r, g, b, 1},
+                  {FGX(bx), FGY(by), r, g, b, 1}, {FGX(d2x), FGY(d2y), r, g, b, 1}};
+#undef FGX
+#undef FGY
+    memcpy(&s_fg_verts[s_fg_nv], q, sizeof q); s_fg_nv += 6;
+}
+
+static int fg_init(ID3D11Device *dev, ID3D11DeviceContext *ctx, int w, int h) {
+    (void)ctx; (void)w; (void)h;
+    static const char *vs =
+        "struct VSIn{float2 p:POSITION;float4 c:COLOR;};"
+        "struct VSOut{float4 p:SV_POSITION;float4 c:COLOR;};"
+        "VSOut VSMain(VSIn i){VSOut o;o.p=float4(i.p,0,1);o.c=i.c;return o;}";
+    static const char *ps =
+        "struct VSOut{float4 p:SV_POSITION;float4 c:COLOR;};"
+        "float4 PSMain(VSOut i):SV_Target{return i.c;}";
+    ID3DBlob *vsb = compile_hlsl(vs, "VSMain", "vs_4_0");
+    ID3DBlob *psb = compile_hlsl(ps, "PSMain", "ps_4_0");
+    if (!vsb || !psb) return 1;
+    ID3D11Device_CreateVertexShader(dev, ID3D10Blob_GetBufferPointer(vsb),
+                                    ID3D10Blob_GetBufferSize(vsb), NULL, &s_fg_vs);
+    ID3D11Device_CreatePixelShader(dev, ID3D10Blob_GetBufferPointer(psb),
+                                   ID3D10Blob_GetBufferSize(psb), NULL, &s_fg_ps);
+    D3D11_INPUT_ELEMENT_DESC il[] = {
+        {"POSITION", 0, DXGI_FORMAT_R32G32_FLOAT,       0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
+        {"COLOR",    0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 8, D3D11_INPUT_PER_VERTEX_DATA, 0},
+    };
+    ID3D11Device_CreateInputLayout(dev, il, 2, ID3D10Blob_GetBufferPointer(vsb),
+                                   ID3D10Blob_GetBufferSize(vsb), &s_fg_layout);
+    ID3D10Blob_Release(vsb); ID3D10Blob_Release(psb);
+    D3D11_BUFFER_DESC bd; memset(&bd, 0, sizeof bd);
+    bd.ByteWidth = sizeof s_fg_verts; bd.Usage = D3D11_USAGE_DYNAMIC;
+    bd.BindFlags = D3D11_BIND_VERTEX_BUFFER; bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    ID3D11Device_CreateBuffer(dev, &bd, NULL, &s_fg_vb);
+    D3D11_RASTERIZER_DESC rsd; memset(&rsd, 0, sizeof rsd);
+    rsd.FillMode = D3D11_FILL_SOLID; rsd.CullMode = D3D11_CULL_NONE;
+    ID3D11Device_CreateRasterizerState(dev, &rsd, &s_fg_rs);
+    LARGE_INTEGER f; QueryPerformanceFrequency(&f); s_fg_qpf = (double)f.QuadPart;
+    s_fg_fi = 0; s_fg_next = 0;
+    return 0;
+}
+
+static void fg_frame(ID3D11DeviceContext *ctx, double t, float aspect) {
+    (void)t; (void)aspect;
+    // Self-pace to a KNOWN base cadence so the FG multiplier = captured_rate / FG_BASE_FPS.
+    LARGE_INTEGER c; QueryPerformanceCounter(&c);
+    double now = (double)c.QuadPart / s_fg_qpf;
+    if (s_fg_next == 0) s_fg_next = now;
+    if (now < s_fg_next) {
+        double rem = s_fg_next - now;
+        if (rem > 0.002) Sleep((DWORD)((rem - 0.001) * 1000.0));
+        do { QueryPerformanceCounter(&c); now = (double)c.QuadPart / s_fg_qpf; } while (now < s_fg_next);
+    }
+    s_fg_next += 1.0 / FG_BASE_FPS;
+    if (now - s_fg_next > 1.0 / FG_BASE_FPS) s_fg_next = now;  // resync after a stall
+
+    uint64_t fi = s_fg_fi++;
+    float W = (float)g_w, H = (float)g_h;
+    float strip = H * 0.07f; if (strip < 24) strip = 24;
+    float cw = W / (FG_BC_CELLS + 2);
+    s_fg_nv = 0;
+
+    // FLICKER (primary real/gen discriminator)
+    { float v = (fi & 1) ? 1.f : 0.f; fg_quad(0, strip, cw * 2, cw * 2, v, v, v); }
+    // BARCODE: start(1,0,1) + 20-bit index (LSB first) + parity + stop(1,0)
+    { float x = cw; int bits[FG_BC_CELLS], n = 0, par = 0;
+      bits[n++] = 1; bits[n++] = 0; bits[n++] = 1;
+      for (int i = 0; i < FG_DATA_BITS; i++) { int b = (int)((fi >> i) & 1); bits[n++] = b; par ^= b; }
+      bits[n++] = par; bits[n++] = 1; bits[n++] = 0;
+      for (int i = 0; i < n; i++, x += cw) { float v = bits[i] ? 1.f : 0.f; fg_quad(x, 0, cw - 1, strip, v, v, v); } }
+    // PHASE hue swatch (independent phase estimator)
+    { float r, g, b; fg_hue((float)(fi % 60) / 60.f, &r, &g, &b); fg_quad(W - strip * 2, strip, strip * 2, strip, r, g, b); }
+    // VELOCITY marker (ping-pong; interpolation accuracy)
+    { float sz = H / 12.f; if (sz < 24) sz = 24; float span = W - sz; float step = span / (float)(FG_BASE_FPS * 2.0);
+      float p = fmodf((float)fi * step, span * 2.f); float mx = p <= span ? p : span * 2.f - p;
+      fg_quad(mx, H * 0.5f - sz * 0.5f, sz, sz, 0.1f, 0.9f, 1.f); }
+    // fast BARS (ghosting stress)
+    { float step = W / (float)FG_BASE_FPS; for (int i = 0; i < 4; i++) { float bx = fmodf((float)fi * step + i * (W / 4.f), W); fg_quad(bx, H * 0.25f, 3.f, H * 0.5f, 1, 1, 1); } }
+    // ROTOR (rotational motion)
+    { float ang = (float)fi * 0.10f; fg_rotor(W * 0.5f, H * 0.72f, H * 0.2f, 6.f, ang, 0.2f, 1.f, 0.4f);
+      fg_rotor(W * 0.5f, H * 0.72f, H * 0.2f, 6.f, ang + 3.14159f, 1.f, 0.4f, 0.2f); }
+
+    D3D11_MAPPED_SUBRESOURCE m;
+    if (SUCCEEDED(ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)s_fg_vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) {
+        memcpy(m.pData, s_fg_verts, (size_t)s_fg_nv * sizeof(FgVtx));
+        ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)s_fg_vb, 0);
+    }
+    UINT stride = sizeof(FgVtx), off = 0;
+    ID3D11DeviceContext_RSSetState(ctx, s_fg_rs);
+    ID3D11DeviceContext_IASetInputLayout(ctx, s_fg_layout);
+    ID3D11DeviceContext_IASetVertexBuffers(ctx, 0, 1, &s_fg_vb, &stride, &off);
+    ID3D11DeviceContext_IASetPrimitiveTopology(ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ID3D11DeviceContext_VSSetShader(ctx, s_fg_vs, NULL, 0);
+    ID3D11DeviceContext_PSSetShader(ctx, s_fg_ps, NULL, 0);
+    ID3D11DeviceContext_Draw(ctx, (UINT)s_fg_nv, 0);
+}
+
+static void fg_cleanup(void) {
+    if (s_fg_vs) { ID3D11VertexShader_Release(s_fg_vs); s_fg_vs = NULL; }
+    if (s_fg_ps) { ID3D11PixelShader_Release(s_fg_ps); s_fg_ps = NULL; }
+    if (s_fg_layout) { ID3D11InputLayout_Release(s_fg_layout); s_fg_layout = NULL; }
+    if (s_fg_vb) { ID3D11Buffer_Release(s_fg_vb); s_fg_vb = NULL; }
+    if (s_fg_rs) { ID3D11RasterizerState_Release(s_fg_rs); s_fg_rs = NULL; }
+}
+
 static const D3D11Scene kScenes[] = {
     {"spin", "D3D11 Cube", spin_init, spin_frame, spin_cleanup},
+    {"fgsource", "D3D11 FG Source (bionic-fg test)", fg_init, fg_frame, fg_cleanup},
     {"textured", "D3D11 Textured", tex_init, tex_frame, tex_cleanup},
     {"instanced", "D3D11 Instanced", inst_init, inst_frame, inst_cleanup},
     {"tess", "D3D11 Tessellation", tess_init, tess_frame, tess_cleanup},

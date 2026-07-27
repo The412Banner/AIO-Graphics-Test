@@ -744,6 +744,7 @@ static const BenchRow kBenchRows[] = {
     {"Draw 512", "dx11 --scene drawstress --draws 512", "D3D11 Draw 512", 1},
     {"Draw 1024", "dx11 --scene drawstress --draws 1024", "D3D11 Draw 1024", 1},
     {"Draw 2048", "dx11 --scene drawstress --draws 2048", "D3D11 Draw 2048", 1},
+    {"FG Source", "dx11 --scene fgsource", "D3D11 FG Source (bionic-fg test)", 1},
     {"D3D12: Cube", "dx12", "Direct3D 12", 0},
 };
 #define N_BENCH_ROWS ((int)(sizeof(kBenchRows) / sizeof(kBenchRows[0])))
