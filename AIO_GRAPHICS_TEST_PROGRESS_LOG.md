@@ -1,4 +1,17 @@
 
+## 2026-07-27 (later) — FG Source integrated as in-app D3D11 scene
+The standalone AIO-FGTest exe would NOT launch in the user's arm64ec Proton-9
+container: 32-bit ran+crashed under FEX in DXVK (zombie, no results file), 64-bit
+never even appeared in `ps` (wine logs don't hit logcat, so no clean error). Pivot
+(user's call): fold the FG source into the MAIN AIO exe, which launches reliably via
+the app's known-good path. Added `dx11 --scene fgsource` in cube_d3d11.c (reuses the
+file's compile_hlsl/g_w/g_h; deterministic, self-paced ~30fps; flicker/barcode/phase/
+velocity/bars/rotor baked as FRACTIONS of the swapchain so the analyzer needs no
+results file) + a "FG Source" menu row in menu.c next to the D3D12 entry. Build run
+30261408984 GREEN (both arches). Staged AIO-Graphics-Test-64bit.exe to Downloads +
+all 3 containers' C:\. NOT device-run yet. Base cadence fixed 30 (multiplier =
+captured_rate/30). Standalone exe + analyzer + workflow still on the branch too.
+
 ## 2026-07-27 — Bionic-FG validation harness (new standalone exe + analyzer)
 Why: prove the Bionic-FG Vulkan layer isn't just running but is EFFECTIVE — extra
 frames really on-screen, genuinely interpolated (not duplicated), spatially correct,
