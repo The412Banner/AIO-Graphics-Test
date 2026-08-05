@@ -72,6 +72,7 @@
 #include "cube_d3d9.h"   // AIO Graphics Test: Direct3D 9 (DXVK) cube backend
 #include "cube_d3d8.h"   // AIO Graphics Test: Direct3D 8 (DXVK d3d8 wrapper) cube backend
 #include "cube_ddraw.h"  // AIO Graphics Test: DirectDraw / legacy Direct3D (DX5/6/7) backend
+#include "shell_imgui.h"  // AIO Graphics Test: --imgui single-window Dear ImGui shell (Phase 0)
 #endif
 #define MILLION 1000000L
 #define BILLION 1000000000L
@@ -4283,6 +4284,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR pCmdLine,
             AIO_FREE_ARGV();
             return rc;
         }
+    }
+
+    // AIO Graphics Test: --imgui launches the new single-window Dear ImGui shell
+    // (Phase 0 de-risk scaffold). Additive and reachable ONLY via this flag; the
+    // no-args launch below still runs the existing shell unchanged.
+    if (AIO_CLI_HAS("--imgui")) {
+        int rc = aio_run_imgui_shell(hInstance);
+        AIO_FREE_ARGV();
+        return rc;
     }
 
     // --cube <api> (and --no-menu) launch the standalone cube window directly.

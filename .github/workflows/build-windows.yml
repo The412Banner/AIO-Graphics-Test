@@ -67,6 +67,25 @@ jobs:
               -O2 -o $f.o
           done
 
+      - name: Fetch + compile Dear ImGui shell (C++ / DX11)
+        run: |
+          # Phase 0 de-risk scaffold: prove the C++ / Dear ImGui / DX11 path builds
+          # and (for the user to test) launches under FEX/arm64ec Proton-9. Pinned to
+          # a stable tag. Cloned raw + compiled with g++ (no CMake) to match the
+          # Vulkan-Headers pattern. -fcf-protection=none is FEX-arm64ec insurance.
+          git clone --depth 1 --branch v1.91.5 https://github.com/ocornut/imgui imgui
+          for f in imgui imgui_draw imgui_tables imgui_widgets \
+                   backends/imgui_impl_dx11 backends/imgui_impl_win32; do
+            ${{ matrix.prefix }}-g++ -c imgui/$f.cpp \
+              -I imgui -I imgui/backends -I src \
+              -DWIN32_LEAN_AND_MEAN -D_WIN32_WINNT=0x0A00 -fcf-protection=none \
+              -O2 -o $(basename $f).o
+          done
+          ${{ matrix.prefix }}-g++ -c src/shell_imgui.cpp \
+            -I imgui -I imgui/backends -I src \
+            -DWIN32_LEAN_AND_MEAN -D_WIN32_WINNT=0x0A00 -fcf-protection=none \
+            -O2 -o shell_imgui.o
+
       - name: Build vulkan-1 import lib from the symbols actually referenced
         run: |
           # The real vulkan-1.dll is provided by Wine/DXVK at runtime; we only need
@@ -94,13 +113,23 @@ jobs:
 
       - name: Link ${{ matrix.out }}
         run: |
-          ${{ matrix.prefix }}-gcc \
+          # Linked with g++ (not gcc) so the C++ / libstdc++ symbols from the ImGui
+          # objects resolve; static libstdc++/libgcc so there is no runtime C++ DLL
+          # dependency. d3d11 / dxgi / d3dcompiler are intentionally NOT linked - the
+          # DX11 device is created via a dynamic d3d11.dll load and ImGui's D3DCompile
+          # use is satisfied by a lazy-loading shim in shell_imgui.cpp, so the exe
+          # still launches on a container without the DXVK DLL set. imm32 (a core Wine
+          # DLL) is the only extra static import, pulled in by ImGui's Win32 backend.
+          ${{ matrix.prefix }}-g++ \
             cube.o gpuinfo.o menu.o bench.o hud.o disk.o cube_gl.o cube_d3d11.o cube_d3d12.o \
             cube_d3d10.o cube_d3d9.o cube_d3d8.o cube_ddraw.o watchdog.o app_res.o \
+            imgui.o imgui_draw.o imgui_tables.o imgui_widgets.o \
+            imgui_impl_dx11.o imgui_impl_win32.o shell_imgui.o \
             -mwindows \
             -L vk/lib \
             -o ${{ matrix.out }} \
-            -lvulkan-1 -lgdi32 -luser32 -lopengl32 -lcomctl32 -ldxguid
+            -lvulkan-1 -lgdi32 -luser32 -lopengl32 -lcomctl32 -ldxguid -limm32 \
+            -static-libstdc++ -static-libgcc
           file ${{ matrix.out }}
 
       - name: Upload artifact
