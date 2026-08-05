@@ -131,3 +131,47 @@ before we invest in the real UI. Nothing existing changes.
   dynamic-d3d11 pattern is the template for keeping the redesign DXVK-optional.
   If it crashes, the culprit is C++ codegen under FEX — next lever is narrowing
   compiler flags (e.g. -mno-avx / -fno-exceptions) or an even more minimal TU.
+
+## 2026-08-05 — Phase 1 — ImGui shell chrome (1:1 mockup reproduction)
+Why: Phase 0 proved the ImGui/DX11 window launches under FEX/arm64ec (no c000001d).
+Phase 1 builds the real single-window chrome to match the approved mockup
+(scratchpad/aio-redesign.html) — same dark-instrument feel, teal accent, per-API
+color chips, panel rounding, grouped menu, viewport HUD + telemetry, footer. Chrome
+only; no live per-test render in the viewport yet (that is Phase 2).
+- src/shell_imgui.cpp rewritten (keeps ALL Phase-0 machinery: dynamic d3d11 load,
+  lazy D3DCompile shim, imgui_impl_win32+dx11, real QPC frametime feed, --imgui flag).
+  Removed the stray Phase-0 top-left "Direct3D 11 — NNNN FPS" overlay + raw toolbar
+  text (the garbled/overlapping draws) — replaced by the full chrome.
+- Palette: exact hex from the mockup CSS custom props, both DARK (default) + LIGHT,
+  mapped into an ImGuiStyle setup (Window/Child rounding 10, FrameRounding 7, Grab 6,
+  borders 1px in --line, scrollbar themed) in apply_theme(bool). The VIEWPORT/screen
+  region uses the theme-independent dark --scr colors in BOTH themes (like the mockup).
+- Per-API chip hues (theme-independent): vk #e5484d, gl #5b8def, dx12 #41bf6d,
+  dx11 #22c1ad, dx10 #3fb9a0, dx9 #e0a13a, dx8/ddraw #94a1b0, demo #a678f0, tools=accent.
+- Fonts EMBEDDED (no external files): Cascadia Mono (mono role) + Inter (UI role),
+  base85-compressed TTF via imgui binary_to_compressed_c -> src/font_mono.inc +
+  src/font_ui.inc, loaded at 5 sizes (Inter 14/19, Cascadia 10/12/20), oversample 3x2.
+- Top app bar = titlebar (multi-API app glyph + "AIO Graphics Test" + AIO_VERSION +
+  decorative win controls) over a toolbar (crumb "Group > Item" + List/Grid segmented
+  control [default List, accent fill + #04231f ink on active] + Theme toggle).
+- Right menu panel (width 320): header "Tests / N tests", grouped scroll (List rows OR
+  2-col Grid tiles) with mono uppercase group headers + divider, 9px API chips, fps
+  hints (mono, right-aligned), hover=panel2, selected=panelhi + 2px accent left bar +
+  faux-bold name. Grid tiles: panel2 + 3px hue left bar, selected=accent border+glow.
+- Left viewport: dark scr gradient fill + HUD (rgba pill: glowing API chip + mono API
+  label + 20px accent-ink FPS from LIVE frame timing + FRAMETIME caps + custom
+  draw-list sparkline [area-fill gradient + endpoint dot; NOT raw PlotLines, per the
+  1:1 spec] + ms/avg/1% from the real ring buffer) and a bottom telemetry strip
+  (Resolution / Present / Translation-path[accent-ink] / GPU, mono caps keys + values,
+  1px dividers). Tools hide the HUD/telemetry and show a centered tool placeholder.
+- Footer: "Built with [drawn heart #e5484d] for the Emulation Community" + mono version.
+- Selecting any menu row updates HUD API/chip, telemetry present+path, and the crumb
+  (static catalog data — backends do NOT launch yet).
+- CATALOG sourced from real code (no invented/dropped entries): 8 backends (menu.c
+  g_items + cube.c WinMain), DX11 Scenes (14, show_dx11_scenes feature set), Showcase
+  Demos (14, show_dx11_demos), Scaling Tests (7, show_dx11_scaling), Tools (3).
+- Branch feat/imgui-shell (NOT merged). No workflow change needed (fonts are #included
+  .inc; shell_imgui.cpp already compiled with -I src on both arches).
+- NEXT (Phase 2): render each test to an offscreen DX11 texture and blit/ImGui::Image
+  it into the viewport rect (HUD/telemetry composite on top); wire real backend launch
+  on selection; feed HUD FPS from the test's own present loop, not the shell's.
