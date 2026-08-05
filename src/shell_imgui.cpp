@@ -15,12 +15,12 @@
 // keeps d3d11 / dxgi / d3dcompiler ALL dynamic; the only extra static import ImGui's
 // Win32 backend adds is imm32 (a core DLL always present under Wine).
 
-#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <d3d11.h>
 #include <dxgi.h>
 #include <d3dcompiler.h>
-#include <stdint.h>
+#include <cstdint>
+#include <cstdio>
 
 #include "imgui.h"
 #include "backends/imgui_impl_win32.h"
