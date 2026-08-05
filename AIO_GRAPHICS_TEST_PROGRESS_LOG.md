@@ -165,3 +165,23 @@ container. Findings (device-proven this session):
   test into the MAIN build as a card under **DX11 > Scaling Tests** (show_dx11_scaling), built by the
   original build-windows.yml. Shrink FG_MAX_VERTS 4096→512 (84KB less BSS) as a best-effort to not
   perturb the latent bug. If it still c000001d's, hunt the real overflow (stack-protector/ASan build).
+
+## 2026-07-27 (session 2 cont.) — roll-in built + +seh/stack-protector diagnosis
+- Rolled FG Source into the main build under DX11 > Scaling Tests (menu.c show_dx11_scaling),
+  dropped standalone build-fgtest.yml + src/fgtest.c, shrank FG_MAX_VERTS 4096->512. Branch
+  feat/bionic-fg-tester, built green (be2bdbf0). Still c000001d on device (footprint shrink
+  didn't dodge the latent bug).
+- Enabled WINEDEBUG=+seh via app prefs (shared_prefs enable_wine_debug=true,
+  wine_debug_channels=seh,err,warn,fixme). Backtrace of the crash: return chain zeroed / rip
+  jumps to a NON-module garbage address ⇒ corrupted control transfer (fn pointer / return).
+- Diagnostic build with -fstack-protector-all -fno-omit-frame-pointer -lssp (1ce2a47): STILL
+  crashes AND the canary did NOT trip ⇒ NOT a stack-array overflow. With the layout shift the
+  backtrace resolved: **fault is INSIDE libarm64ecfex.dll + 0x1766ac** (the FEX arm64ec emulator)
+  = FEX raising illegal-instruction decoding a bad guest address. Only our CRT-entry frame
+  (AIO...exe + 0x14D0) resolves; the guest x86 call stack is opaque to the native unwinder.
+- CONCLUSION: layout-sensitive corrupted indirect-call target (global/heap or arm64ec thunk),
+  deterministic per-build whenever fgsource is compiled in; the working 2372804 build is just a
+  lucky layout. Standard stack canaries can't catch it. NEXT OPTIONS: (a) -O0 / -fno-strict-aliasing
+  rebuild (cheap shot), (b) isolate fgsource into its own .c TU, (c) UB audit of function-pointer
+  use on the D3D11/HUD startup path, (d) capture FEX's own guest-RIP log. Working tile restored
+  (2372804). -fstack-protector diagnostic still on the branch (revert once fixed).
