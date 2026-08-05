@@ -118,8 +118,9 @@ jobs:
           # dependency. d3d11 / dxgi / d3dcompiler are intentionally NOT linked - the
           # DX11 device is created via a dynamic d3d11.dll load and ImGui's D3DCompile
           # use is satisfied by a lazy-loading shim in shell_imgui.cpp, so the exe
-          # still launches on a container without the DXVK DLL set. imm32 (a core Wine
-          # DLL) is the only extra static import, pulled in by ImGui's Win32 backend.
+          # still launches on a container without the DXVK DLL set. imm32 + dwmapi
+          # (core Wine DLLs) are the only extra static imports, pulled in by ImGui's
+          # Win32 backend.
           ${{ matrix.prefix }}-g++ \
             cube.o gpuinfo.o menu.o bench.o hud.o disk.o cube_gl.o cube_d3d11.o cube_d3d12.o \
             cube_d3d10.o cube_d3d9.o cube_d3d8.o cube_ddraw.o watchdog.o app_res.o \
@@ -128,7 +129,7 @@ jobs:
             -mwindows \
             -L vk/lib \
             -o ${{ matrix.out }} \
-            -lvulkan-1 -lgdi32 -luser32 -lopengl32 -lcomctl32 -ldxguid -limm32 \
+            -lvulkan-1 -lgdi32 -luser32 -lopengl32 -lcomctl32 -ldxguid -limm32 -ldwmapi \
             -static-libstdc++ -static-libgcc
           file ${{ matrix.out }}
 
