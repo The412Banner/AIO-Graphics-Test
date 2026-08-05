@@ -79,3 +79,55 @@ once before the render loop.
   exes to /sdcard/Download, ran them, DX cubes render SOLID now (no longer inside-out).
 - DONE. Optional follow-up: re-bundle rebuilt exes into Bannerlator
   container_pattern_common.tzst like v1.6.1 (existing containers need reinstall/root push).
+
+## 2026-08-05 — Phase 0 — ImGui/DX11 scaffold (single-window redesign de-risk)
+Why: the redesign targets a single-window Dear ImGui / DX11 shell, but mingw C++
+codegen has previously hit illegal-instruction (c000001d) crashes under the
+FEX/arm64ec Proton-9 container. This ADDITIVE, REVERSIBLE scaffold proves the
+C++ / ImGui / DX11 path builds green and (for the user to test) launches there,
+before we invest in the real UI. Nothing existing changes.
+- New --imgui CLI flag → aio_run_imgui_shell(hInstance), dispatched in WinMain
+  BEFORE the run_cube/aio_run_shell decision (cube.c). No-args launch still runs
+  the OLD shell; every other path is byte-for-byte unchanged.
+- src/shell_imgui.h: tiny header, `extern "C"` under C++ so cube.c (C) can call in.
+- src/shell_imgui.cpp (one file): ImGui-on-DX11 proof window sketching the target
+  look — top toolbar with a List/Grid segmented control (stub), a RIGHT-docked test
+  list (Vulkan/OpenGL/DX12/DX11/…) as selectable rows, a LEFT viewport clear-color
+  fill with an overlay reading "Direct3D 11 — NNNN FPS" + an ImGui::PlotLines
+  frametime sparkline fed by REAL QPC-measured frame intervals. ESC quits.
+- RENDERER SAFETY (repo lesson: never static-link the DXVK DLL set or the exe won't
+  launch on a container without DXVK): the D3D11 device is created via a DYNAMIC
+  d3d11.dll load (GetProcAddress("D3D11CreateDeviceAndSwapChain")); if it fails the
+  exe shows a message box and exits cleanly (no crash). d3d11/dxgi are NOT linked.
+  ImGui's DX11 backend needs D3DCompile — satisfied by a lazy-loading forwarding
+  SHIM in shell_imgui.cpp that LoadLibrary()s d3dcompiler_47.dll at first use, so
+  d3dcompiler stays dynamic too (NO -ld3dcompiler needed — the shim resolved the
+  symbol cleanly; verified: zero undefined-D3DCompile at link).
+- Build wiring (.github/workflows/build-windows.yml, raw g++, NO CMake, matches the
+  Vulkan-Headers clone pattern): clone Dear ImGui pinned to v1.91.5; compile
+  imgui{,_draw,_tables,_widgets} + backends/imgui_impl_{dx11,win32} + shell_imgui.cpp
+  with `-O2 -I imgui -I imgui/backends -I src -DWIN32_LEAN_AND_MEAN
+  -D_WIN32_WINNT=0x0A00 -fcf-protection=none` (the -fcf-protection=none is deliberate
+  FEX-arm64ec insurance). Link with g++ (not gcc) so libstdc++ resolves, static
+  (`-static-libstdc++ -static-libgcc`) so there is NO runtime C++ DLL dep.
+- Extra link libs actually needed (reported): **-limm32** and **-ldwmapi** (both
+  pulled in by imgui_impl_win32; both are CORE Wine DLLs, always present, so no
+  container-launch risk). Did NOT need -ld3d11 / -ldxgi / -ld3dcompiler.
+- 32-bit NOT gated: the C++/ImGui TUs compile and link on BOTH i686 and x86_64
+  (i686 failed identically to x86_64 only on the missing dwmapi, fixed for both).
+- CI build-windows run 31055718702 GREEN both legs (build-i686 + build-x86_64) on
+  branch feat/imgui-shell @ 80e154c (headSha verified == pushed SHA). Artifacts
+  present: 64bit 1173275 B, 32bit 1189029 B. Iterations to green: add <cstdio> for
+  snprintf, then -ldwmapi.
+- STAGED (CI-green, NOT device-proven): 64-bit exe →
+  /sdcard/Download/AIO-Graphics-Test-imgui-scaffold-64bit.exe,
+  sha256 309c3f621319cc7f764adf8746d731c201f4ada40af7ce5d0bc0f2b539c76dfc
+  (on-device sha256 verified equal). USER launches with `--imgui` and reports
+  whether the ImGui window renders (proves no c000001d) or crashes.
+- NOT merged to main. Branch feat/imgui-shell only.
+- Phase 1 notes: if the window launches clean, build out the real single-window
+  layout here (docking, real per-test render target in the left viewport, wire the
+  List/Grid control, feed the HUD from live frame stats). The D3DCompile shim +
+  dynamic-d3d11 pattern is the template for keeping the redesign DXVK-optional.
+  If it crashes, the culprit is C++ codegen under FEX — next lever is narrowing
+  compiler flags (e.g. -mno-avx / -fno-exceptions) or an even more minimal TU.
