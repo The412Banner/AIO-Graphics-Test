@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="cBg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0e1620"/><stop offset="1" stop-color="#070b10"/>
+    </linearGradient>
+    <linearGradient id="cTop" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1d2b38"/><stop offset="1" stop-color="#16222d"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="54" fill="url(#cBg)"/>
+  <polygon points="128,52 204,90 128,128 52,90" fill="url(#cTop)"/>
+  <polygon points="204,90 128,128 128,204 204,166" fill="#131d27"/>
+  <polygon points="52,90 128,128 128,204 52,166" fill="#0d151d"/>
+  <g fill="none" stroke="#2fd6c3" stroke-opacity="0.22" stroke-width="10" stroke-linejoin="round" stroke-linecap="round">
+    <polygon points="128,52 204,90 128,128 52,90"/>
+    <path d="M52,90 L52,166 L128,204 L204,166 L204,90"/>
+    <path d="M128,128 L128,204"/>
+  </g>
+  <g fill="none" stroke="#3fe6d5" stroke-width="3.5" stroke-linejoin="round" stroke-linecap="round">
+    <polygon points="128,52 204,90 128,128 52,90"/>
+    <path d="M52,90 L52,166 L128,204 L204,166 L204,90"/>
+    <path d="M128,128 L128,204"/>
+  </g>
+</svg>

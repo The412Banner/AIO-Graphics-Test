@@ -1,17 +1,18 @@
 #!/bin/sh
-# Regenerate the app icon (src/app.ico) - a stylized isometric cube matching the
-# app's colorful test cube, on a dark rounded square. Requires ImageMagick.
+# Regenerate the app icon (src/app.ico) from tools/app_icon.svg - the V2
+# "edge-glow" isometric cube: glowing teal wireframe cube on a dark rounded
+# square, matching the app's dark-instrument identity.
+# Requires rsvg-convert (librsvg) + ImageMagick.
 #   sh tools/gen_icon.sh
 set -e
+svg=tools/app_icon.svg
 out=src/app.ico
-tmp=$(mktemp --suffix=.png)
-magick -size 512x512 xc:none \
-  -fill '#14141b' -draw 'roundrectangle 20,20,492,492,72,72' \
-  -stroke '#0a0a0d' -strokewidth 4 \
-  -fill '#4d8cff' -draw 'polygon 256,116 388,192 256,268 124,192' \
-  -fill '#e6444a' -draw 'polygon 124,192 256,268 256,436 124,360' \
-  -fill '#36c45a' -draw 'polygon 256,268 388,192 388,360 256,436' \
-  "$tmp"
-magick "$tmp" -define icon:auto-resize=256,128,64,48,32,24,16 "$out"
-rm -f "$tmp"
+tmp=$(mktemp -d)
+# Render each icon size directly from the vector for crisp small sizes.
+for s in 16 32 48 64 128 256; do
+  rsvg-convert -w "$s" -h "$s" "$svg" -o "$tmp/icon_$s.png"
+done
+magick "$tmp/icon_16.png" "$tmp/icon_32.png" "$tmp/icon_48.png" \
+       "$tmp/icon_64.png" "$tmp/icon_128.png" "$tmp/icon_256.png" "$out"
+rm -rf "$tmp"
 echo "wrote $out"
