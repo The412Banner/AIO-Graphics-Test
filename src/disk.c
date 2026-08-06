@@ -120,7 +120,9 @@ static const char *disk_class_for(double seq_mbps) {
     return "UFS 4.0+ / NVMe SSD";
 }
 
-char *aio_disk_run(int size_mb, int defeat_cache, aio_disk_progress_fn progress, void *user) {
+char *aio_disk_run_ex(int size_mb, int defeat_cache, aio_disk_progress_fn progress, void *user,
+                      AioDiskResult *out) {
+    if (out) { memset(out, 0, sizeof(*out)); }
     char *report = (char *)malloc(DISK_REPORT_CAP);
     if (!report) return NULL;
     report[0] = '\0';
@@ -170,6 +172,7 @@ char *aio_disk_run(int size_mb, int defeat_cache, aio_disk_progress_fn progress,
     if (!buf) {
         snprintf(report, DISK_REPORT_CAP,
                  "Disk Read / Write Speed\r\n\r\nCould not allocate the I/O buffer.");
+        if (out) snprintf(out->err, sizeof(out->err), "Could not allocate the I/O buffer.");
         return report;
     }
     // Fill with non-trivial data so compression / sparse-file optimisations can't
@@ -369,6 +372,7 @@ char *aio_disk_run(int size_mb, int defeat_cache, aio_disk_progress_fn progress,
                  "Test file : %s\r\n\r\n"
                  "ERROR: %s\r\n",
                  path, err);
+        if (out) snprintf(out->err, sizeof(out->err), "%s", err);
         return report;
     }
 
@@ -423,7 +427,22 @@ char *aio_disk_run(int size_mb, int defeat_cache, aio_disk_progress_fn progress,
              randw_mbps, randw_iops, (unsigned long long)randw_ops, t_randw,
              cls, defeat_cache ? "" : "; run Real-Flash Read for a read-based class",
              DISK_RAND_SECS, note);
+    if (out) {
+        out->ok = 1;
+        out->seq_read_mbps = read_mbps;
+        out->seq_write_mbps = write_mbps;
+        out->rand_read_mbps = rand_mbps;
+        out->rand_write_mbps = randw_mbps;
+        out->rand_read_iops = rand_iops;
+        out->rand_write_iops = randw_iops;
+        snprintf(out->storage_class, sizeof(out->storage_class), "%s", cls);
+    }
     return report;
+}
+
+// Text-only wrapper (unchanged public contract; menu.c / CLI use this).
+char *aio_disk_run(int size_mb, int defeat_cache, aio_disk_progress_fn progress, void *user) {
+    return aio_disk_run_ex(size_mb, defeat_cache, progress, user, NULL);
 }
 
 // Delete any leftover temp files from a previous run and report how much was freed.

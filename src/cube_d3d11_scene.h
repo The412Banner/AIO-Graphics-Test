@@ -41,6 +41,21 @@ void aio_d3d11_scene_cleanup(int i);
 // (Same setter the standalone --draws path uses.)
 void aio_d3d11_set_draws(int n);
 
+// ---- Input injection for the embedded interactive scenes (freelook / planet) ----
+// When a scene runs INSIDE the shell it has no window / wndproc of its own, so the
+// keyboard / wheel / mouse-steer that the standalone runner reads from its wndproc
+// never arrive. The shell feeds them here instead. No effect on non-interactive
+// scenes (all gated on the scene's own g_freelook flag).
+//   key   : set one VK code up/down (edge-detects F=stop/go, M=mouse-steer toggle)
+//   wheel : mouse-wheel steps (+ = faster cruise, - = slower), same curve as WM_MOUSEWHEEL
+//   steer : normalized cursor offset from the viewport centre, each in [-1,1];
+//           active=0 means "cursor not over the viewport" (steering held)
+//   reset : clear all injected key state (call on scene switch / focus loss)
+void aio_d3d11_input_key(int vk, int down);
+void aio_d3d11_input_wheel(float ticks);
+void aio_d3d11_input_steer(int active, float nx, float ny);
+void aio_d3d11_input_reset(void);
+
 #ifdef __cplusplus
 }
 #endif

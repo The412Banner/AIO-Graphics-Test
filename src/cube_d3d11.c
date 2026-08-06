@@ -73,6 +73,11 @@ static unsigned char g_keys[256];        // WM_KEYDOWN/UP state, indexed by VK c
 static char  g_scene_hud[64] = "";       // optional per-scene status appended to the HUD (set by interactive scenes)
 static int   g_autofwd = 1;              // SkyFly cruise: auto-fly forward (F toggles)
 static int   g_mousesteer = 1;           // cursor-position steering on (M toggles)
+// Injected steering from the ImGui shell (no wndproc/window of our own there). When
+// g_inject_steer is set, the freelook/planet update reads g_inject_nx/ny instead of
+// GetCursorPos(g_free_hwnd). Set via aio_d3d11_input_steer().
+static int   g_inject_steer = 0;
+static float g_inject_nx = 0.0f, g_inject_ny = 0.0f;
 
 static LRESULT CALLBACK d3d11_wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
     switch (m) {
@@ -3215,12 +3220,21 @@ static void planet_update(double t) {
 
     // Joystick steering from the cursor's offset from the window centre (only while
     // the cursor is over the window) -- steer just by moving the mouse, no buttons.
-    if (g_mousesteer && g_free_hwnd && g_w > 0 && g_h > 0) {
-        POINT cur;
-        if (GetCursorPos(&cur) && ScreenToClient(g_free_hwnd, &cur) && cur.x >= 0 &&
-            cur.y >= 0 && cur.x < g_w && cur.y < g_h) {
-            float nx = (cur.x - g_w * 0.5f) / (g_w * 0.5f);
-            float ny = (cur.y - g_h * 0.5f) / (g_h * 0.5f);
+    if (g_mousesteer) {
+        float nx = 0.0f, ny = 0.0f;
+        int have = 0;
+        if (g_inject_steer) {
+            nx = g_inject_nx; ny = g_inject_ny; have = 1;
+        } else if (g_free_hwnd && g_w > 0 && g_h > 0) {
+            POINT cur;
+            if (GetCursorPos(&cur) && ScreenToClient(g_free_hwnd, &cur) && cur.x >= 0 &&
+                cur.y >= 0 && cur.x < g_w && cur.y < g_h) {
+                nx = (cur.x - g_w * 0.5f) / (g_w * 0.5f);
+                ny = (cur.y - g_h * 0.5f) / (g_h * 0.5f);
+                have = 1;
+            }
+        }
+        if (have) {
             const float dz = 0.10f;  // centre dead-zone so a parked cursor doesn't drift
             nx = (nx > dz) ? (nx - dz) / (1.0f - dz) : (nx < -dz ? (nx + dz) / (1.0f - dz) : 0.0f);
             ny = (ny > dz) ? (ny - dz) / (1.0f - dz) : (ny < -dz ? (ny + dz) / (1.0f - dz) : 0.0f);
@@ -3549,12 +3563,22 @@ static void freelook_update(double t) {
 
     // Joystick steering from the cursor's offset from the window centre (only while
     // the cursor is over the window) -- steer just by moving the mouse, no buttons.
-    if (g_mousesteer && g_free_hwnd && g_w > 0 && g_h > 0) {
-        POINT cur;
-        if (GetCursorPos(&cur) && ScreenToClient(g_free_hwnd, &cur) && cur.x >= 0 &&
-            cur.y >= 0 && cur.x < g_w && cur.y < g_h) {
-            float nx = (cur.x - g_w * 0.5f) / (g_w * 0.5f);
-            float ny = (cur.y - g_h * 0.5f) / (g_h * 0.5f);
+    // Injected path (ImGui shell) wins when active; else read the real cursor.
+    if (g_mousesteer) {
+        float nx = 0.0f, ny = 0.0f;
+        int have = 0;
+        if (g_inject_steer) {
+            nx = g_inject_nx; ny = g_inject_ny; have = 1;
+        } else if (g_free_hwnd && g_w > 0 && g_h > 0) {
+            POINT cur;
+            if (GetCursorPos(&cur) && ScreenToClient(g_free_hwnd, &cur) && cur.x >= 0 &&
+                cur.y >= 0 && cur.x < g_w && cur.y < g_h) {
+                nx = (cur.x - g_w * 0.5f) / (g_w * 0.5f);
+                ny = (cur.y - g_h * 0.5f) / (g_h * 0.5f);
+                have = 1;
+            }
+        }
+        if (have) {
             const float dz = 0.10f;  // centre dead-zone so a parked cursor doesn't drift
             nx = (nx > dz) ? (nx - dz) / (1.0f - dz) : (nx < -dz ? (nx + dz) / (1.0f - dz) : 0.0f);
             ny = (ny > dz) ? (ny - dz) / (1.0f - dz) : (ny < -dz ? (ny + dz) / (1.0f - dz) : 0.0f);
@@ -4140,6 +4164,40 @@ void aio_d3d11_scene_frame(int i, ID3D11DeviceContext *ctx, double t, float aspe
 void aio_d3d11_scene_cleanup(int i) {
     if (i < 0 || i >= aio_d3d11_scene_count()) return;
     kScenes[i].cleanup();
+}
+
+// ---- shell input injection (see cube_d3d11_scene.h) ----
+void aio_d3d11_input_key(int vk, int down) {
+    if (vk < 0 || vk > 255) return;
+    int was = g_keys[vk];
+    g_keys[vk] = down ? 1 : 0;
+    // Edge toggles (once per physical press), mirroring d3d11_wndproc.
+    if (g_freelook && down && !was) {
+        if (vk == 'F') g_autofwd = !g_autofwd;
+        else if (vk == 'M') g_mousesteer = !g_mousesteer;
+    }
+}
+
+void aio_d3d11_input_wheel(float ticks) {
+    if (!g_freelook || ticks == 0.0f) return;
+    int steps = (int)(ticks < 0.0f ? -ticks : ticks);
+    if (steps < 1) steps = 1;
+    float f = (ticks > 0.0f) ? 1.15f : 0.87f;
+    for (int i = 0; i < steps; i++) g_cam_speed *= f;
+    if (g_cam_speed < 1.5f) g_cam_speed = 1.5f;
+    if (g_cam_speed > 2500.0f) g_cam_speed = 2500.0f;
+}
+
+void aio_d3d11_input_steer(int active, float nx, float ny) {
+    g_inject_steer = active ? 1 : 0;
+    g_inject_nx = nx;
+    g_inject_ny = ny;
+}
+
+void aio_d3d11_input_reset(void) {
+    memset(g_keys, 0, sizeof(g_keys));
+    g_inject_steer = 0;
+    g_inject_nx = g_inject_ny = 0.0f;
 }
 
 // ================================ the runner ================================

@@ -269,6 +269,153 @@ static void report_vulkan(StrBuf *sb) {
     vkDestroyInstance(inst, NULL);
 }
 
+// --------------------------------------------------------- structured queries
+static const char *vk_vendor_str(uint32_t id) {
+    switch (id) {
+        case 0x1002: return "AMD";
+        case 0x1010: return "ImgTec";
+        case 0x10DE: return "NVIDIA";
+        case 0x13B5: return "ARM";
+        case 0x5143: return "Qualcomm";
+        case 0x8086: return "Intel";
+        case 0x10005: return "Mesa";
+        default:      return "Unknown";
+    }
+}
+
+void aio_gpuinfo_query_vk(AioVkInfo *out) {
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
+
+    VkApplicationInfo app;
+    memset(&app, 0, sizeof(app));
+    app.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+    app.pApplicationName = "AIO Graphics Test";
+    app.pEngineName = "AIO Graphics Test";
+    app.apiVersion = VK_API_VERSION_1_0;
+
+    VkInstanceCreateInfo ici;
+    memset(&ici, 0, sizeof(ici));
+    ici.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+    ici.pApplicationInfo = &app;
+
+    VkInstance inst = VK_NULL_HANDLE;
+    if (vkCreateInstance(&ici, NULL, &inst) != VK_SUCCESS) return;
+
+    uint32_t gpu_count = 0;
+    vkEnumeratePhysicalDevices(inst, &gpu_count, NULL);
+    if (gpu_count == 0) { vkDestroyInstance(inst, NULL); return; }
+    VkPhysicalDevice *gpus = malloc(sizeof(VkPhysicalDevice) * gpu_count);
+    if (!gpus) { vkDestroyInstance(inst, NULL); return; }
+    vkEnumeratePhysicalDevices(inst, &gpu_count, gpus);
+
+    // Prefer the first non-CPU device (the real GPU), else device 0.
+    uint32_t sel = 0;
+    for (uint32_t g = 0; g < gpu_count; g++) {
+        VkPhysicalDeviceProperties p;
+        vkGetPhysicalDeviceProperties(gpus[g], &p);
+        if (p.deviceType != VK_PHYSICAL_DEVICE_TYPE_CPU) { sel = g; break; }
+    }
+
+    VkPhysicalDeviceProperties p;
+    vkGetPhysicalDeviceProperties(gpus[sel], &p);
+    snprintf(out->device, sizeof(out->device), "%s", p.deviceName);
+    snprintf(out->api, sizeof(out->api), "%u.%u.%u", VK_API_VERSION_MAJOR(p.apiVersion),
+             VK_API_VERSION_MINOR(p.apiVersion), VK_API_VERSION_PATCH(p.apiVersion));
+    snprintf(out->driver, sizeof(out->driver), "%u.%u.%u", VK_API_VERSION_MAJOR(p.driverVersion),
+             VK_API_VERSION_MINOR(p.driverVersion), VK_API_VERSION_PATCH(p.driverVersion));
+    snprintf(out->vendor, sizeof(out->vendor), "%s (0x%04x)", vk_vendor_str(p.vendorID), p.vendorID);
+    snprintf(out->type, sizeof(out->type), "%s", vk_device_type_str(p.deviceType));
+
+    VkPhysicalDeviceMemoryProperties mem;
+    vkGetPhysicalDeviceMemoryProperties(gpus[sel], &mem);
+    VkDeviceSize best = 0;
+    int best_local = 0;
+    for (uint32_t h = 0; h < mem.memoryHeapCount; h++) {
+        if (mem.memoryHeaps[h].size > best) {
+            best = mem.memoryHeaps[h].size;
+            best_local = (mem.memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) ? 1 : 0;
+        }
+    }
+    snprintf(out->memory, sizeof(out->memory), "%.1f GB %s",
+             (double)best / (1024.0 * 1024.0 * 1024.0), best_local ? "device-local" : "shared");
+
+    VkPhysicalDeviceFeatures feat;
+    vkGetPhysicalDeviceFeatures(gpus[sel], &feat);
+    out->f_geometry = feat.geometryShader ? 1 : 0;
+    out->f_tessellation = feat.tessellationShader ? 1 : 0;
+    out->f_samplerAniso = feat.samplerAnisotropy ? 1 : 0;
+    out->f_multiDrawIndirect = feat.multiDrawIndirect ? 1 : 0;
+    out->f_shaderInt64 = feat.shaderInt64 ? 1 : 0;
+    out->f_textureBC = feat.textureCompressionBC ? 1 : 0;
+    out->f_sparseBinding = feat.sparseBinding ? 1 : 0;
+    out->f_fragStoresAtomics = feat.fragmentStoresAndAtomics ? 1 : 0;
+    out->ok = 1;
+
+    free(gpus);
+    vkDestroyInstance(inst, NULL);
+}
+
+void aio_gpuinfo_query_gl(AioGlInfo *out) {
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
+
+    WNDCLASSA wc;
+    memset(&wc, 0, sizeof(wc));
+    wc.lpfnWndProc = DefWindowProcA;
+    wc.hInstance = GetModuleHandle(NULL);
+    wc.lpszClassName = "AIOGpuInfoGLWindow";
+    RegisterClassA(&wc);
+
+    HWND hwnd = CreateWindowA(wc.lpszClassName, "gl", WS_OVERLAPPEDWINDOW, 0, 0, 16, 16, NULL, NULL,
+                              wc.hInstance, NULL);
+    if (!hwnd) return;
+    HDC dc = GetDC(hwnd);
+    PIXELFORMATDESCRIPTOR pfd;
+    memset(&pfd, 0, sizeof(pfd));
+    pfd.nSize = sizeof(pfd);
+    pfd.nVersion = 1;
+    pfd.dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER;
+    pfd.iPixelType = PFD_TYPE_RGBA;
+    pfd.cColorBits = 32;
+    pfd.cDepthBits = 24;
+    pfd.iLayerType = PFD_MAIN_PLANE;
+    int pf = ChoosePixelFormat(dc, &pfd);
+    if (pf == 0 || !SetPixelFormat(dc, pf, &pfd)) {
+        ReleaseDC(hwnd, dc);
+        DestroyWindow(hwnd);
+        return;
+    }
+    HGLRC rc = wglCreateContext(dc);
+    if (!rc || !wglMakeCurrent(dc, rc)) {
+        if (rc) wglDeleteContext(rc);
+        ReleaseDC(hwnd, dc);
+        DestroyWindow(hwnd);
+        return;
+    }
+
+    const char *renderer = (const char *)glGetString(GL_RENDERER);
+    const char *version = (const char *)glGetString(GL_VERSION);
+    const char *glsl = (const char *)glGetString(GL_SHADING_LANGUAGE_VERSION);
+    const char *vendor = (const char *)glGetString(GL_VENDOR);
+    snprintf(out->renderer, sizeof(out->renderer), "%s", renderer ? renderer : "(null)");
+    snprintf(out->version, sizeof(out->version), "%s", version ? version : "(null)");
+    snprintf(out->glsl, sizeof(out->glsl), "%s", glsl ? glsl : "(null)");
+    snprintf(out->vendor, sizeof(out->vendor), "%s", vendor ? vendor : "(null)");
+    GLint maxtex = 0, maxsamp = 0;
+    glGetIntegerv(0x0D33 /* GL_MAX_TEXTURE_SIZE */, &maxtex);
+    glGetIntegerv(0x8D57 /* GL_MAX_SAMPLES */, &maxsamp);
+    snprintf(out->max_texture, sizeof(out->max_texture), "%d", (int)maxtex);
+    if (maxsamp > 0) snprintf(out->max_samples, sizeof(out->max_samples), "%d", (int)maxsamp);
+    else            snprintf(out->max_samples, sizeof(out->max_samples), "-");
+    out->ok = 1;
+
+    wglMakeCurrent(NULL, NULL);
+    wglDeleteContext(rc);
+    ReleaseDC(hwnd, dc);
+    DestroyWindow(hwnd);
+}
+
 // ----------------------------------------------------------------- public API
 // OpenGL-only report (for the OpenGL tab). Caller frees.
 char *aio_gpuinfo_build_gl_text(void) {

@@ -1,4 +1,54 @@
 
+## 2026-08-05 — Phase 3 — Tool datapanes + interactive input + real HUD throughput
+Why: Phase 2 embedded the live DX11 viewport. Phase 3 finishes the remaining app
+surfaces so the single-window shell replaces the classic menus for the Tools, the
+interactive demos, and honest performance readout. (Cross-API backend embedding is
+still deferred to a later pass.)
+
+- TOOL DATAPANES (native ImGui, 1:1 mockup .datapane/.dp-card/.tile styling; theme-
+  independent dark scr* palette in both light+dark; mono data, tabular values, green/
+  red flags). They own the viewport surface for Tools (HUD + telemetry hidden).
+  - GPU Info: two-column Vulkan | OpenGL instrument cards. REAL data via new structured
+    accessors in gpuinfo.c/.h — aio_gpuinfo_query_vk() (device/driver/api/vendor/type/
+    largest-heap memory + 8 real VkPhysicalDeviceFeatures yes/no rows) and
+    aio_gpuinfo_query_gl() (renderer/version/GLSL/vendor/max-texture/MSAA). Nothing
+    fabricated. Queried ONCE on a background thread (VkInstance + WGL context are heavy);
+    shows "Querying adapters..." until done.
+  - Benchmark: full kBenchRows[] catalog (36 rows) mirrored shell-side, mockup bar+value
+    layout, per-row Run + Run All, 15/30/45/60 s duration + vsync toggle, avg + min/max
+    shown per row. DX11 rows bench IN-PROCESS (a bench-scene override drives the offscreen
+    target so its GPU cost is timed via the timestamp-disjoint pair; present forced
+    Uncapped during the run); non-DX11 rows CreateProcess "--cube <arg> --bench <secs>
+    --autoclose 3 [--vsync]" and read back AIO-Graphics-Test_bench_<apilabel>.txt
+    ("avg|min|max"), reusing menu.c's exact result-file naming/format.
+  - Disk Speed: seq read/write + random 4K read/write tiles (MB/s + IOPS), 256/512/1024/
+    2048 MB selector, Real-Flash/Quick toggle, Run, "What's this?" popup, "Clear Temp
+    Files". Wired to disk.c via new aio_disk_run_ex() (fills AioDiskResult) + existing
+    aio_disk_cleanup(); the run executes on a background thread.
+- INTERACTIVE DEMOS INPUT: Free Look + Planet Fly now steer inside the ImGui viewport.
+  Added an input-injection API to cube_d3d11.c (aio_d3d11_input_key/wheel/steer/reset,
+  declared in cube_d3d11_scene.h). Both freelook_update + planet_update prefer an
+  INJECTED normalized-steer path (g_inject_steer) over the GetCursorPos(g_free_hwnd)
+  path they use standalone. The shell feeds ImGui key state (WASD/QE/Space/Shift/Ctrl/
+  arrows/F/M), wheel, and a viewport-centre-relative steer — ONLY while the pointer is
+  over the viewport (else input is released), so ImGui controls aren't hijacked. Input
+  is reset on scene switch.
+- REAL HUD THROUGHPUT: a D3D11 TIMESTAMP_DISJOINT + TIMESTAMP pair brackets just the
+  scene's frame() draws each frame; read back one frame late (no GPU stall). The HUD
+  pill + sparkline now show the scene's true GPU render rate (high, like the standalone
+  cube) instead of the shell's vsync'd present rate; falls back to present rate if the
+  driver lacks timestamp support. Added a Present-mode toolbar toggle (Vsync/FIFO vs
+  Uncapped) honored by Present(syncInterval); the telemetry Present cell reflects it.
+- POLISH: tool background forced to the dark gradient (a bench scene rendered offscreen
+  for timing can't bleed behind the cards); input reset on scene switch; timing queries
+  created/destroyed with the device.
+- Files: src/shell_imgui.cpp (datapanes, bench engine, timing, input feed, present
+  toggle), src/gpuinfo.c/.h (+structured queries), src/disk.c/.h (+aio_disk_run_ex/
+  AioDiskResult), src/cube_d3d11.c + src/cube_d3d11_scene.h (input injection). No CI
+  workflow change needed (all compiled by the existing steps; no new TUs).
+- Branch feat/imgui-shell (NOT merged). NEXT: cross-API backend embedding (D3D12/D3D10/
+  D3D9/DX8/DDraw into a shared surface) so the 8 backends render in-viewport too.
+
 ## 2026-08-05 — Phase 2 — live DX11 render IN the ImGui viewport (+ fullscreen, resize)
 Why: Phase 1 gave 1:1 chrome with a placeholder viewport. Phase 2 makes the LEFT
 viewport render the DX11 family LIVE, in-place ("exactly like the preview"): the
