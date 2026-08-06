@@ -92,6 +92,11 @@ static ID3D11DeviceContext *g_ctx = nullptr;
 static IDXGISwapChain *g_swap = nullptr;
 static ID3D11RenderTargetView *g_rtv = nullptr;
 
+// GPU-timing query lifecycle (defined with the Phase 3 timing state below; forward-
+// declared here because create_device / destroy_device drive them).
+static void create_timing_queries();
+static void destroy_timing_queries();
+
 // Deferred / coalesced swapchain resize (ImGui-example pattern): WM_SIZE only
 // records the pending size; the main loop applies ONE ResizeBuffers per frame so a
 // click-drag of the window edge doesn't thrash-recreate the backbuffer every pixel.
