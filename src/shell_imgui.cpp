@@ -135,16 +135,25 @@ static LONG WINAPI aio_seh_filter(EXCEPTION_POINTERS *ep) {
 extern "C" void aio_diag_init(void) {
     if (g_diag) return;
     char path[MAX_PATH] = "";
-    char exe[MAX_PATH] = "";
-    if (GetModuleFileNameA(nullptr, exe, MAX_PATH)) {
-        char *slash = strrchr(exe, '\\');
-        if (slash) {
-            *slash = '\0';
-            snprintf(path, sizeof(path), "%s\\AIO-Graphics-Test_startup.log", exe);
-            g_diag = fopen(path, "w");
+    // PRIMARY: the container shared-tmp path Z:\usr\tmp\ - Z: = imagefs root via
+    // dosdevices, mounted before the app runs and PROVEN app-writable (the HUD
+    // side-channel writes hud_active_api.json there in-container), so it works even
+    // at the constructor(101) stage. Earlier exe-dir/%TEMP%/CWD targets can all be
+    // non-writable under the container sandbox, which would drop the log entirely.
+    snprintf(path, sizeof(path), "Z:\\usr\\tmp\\AIO-Graphics-Test_startup.log");
+    g_diag = fopen(path, "w");
+    if (!g_diag) {  // fallback 1: <exe dir>
+        char exe[MAX_PATH] = "";
+        if (GetModuleFileNameA(nullptr, exe, MAX_PATH)) {
+            char *slash = strrchr(exe, '\\');
+            if (slash) {
+                *slash = '\0';
+                snprintf(path, sizeof(path), "%s\\AIO-Graphics-Test_startup.log", exe);
+                g_diag = fopen(path, "w");
+            }
         }
     }
-    if (!g_diag) {  // fallback 1: %TEMP%
+    if (!g_diag) {  // fallback 2: %TEMP%
         char tmp[MAX_PATH];
         DWORD n = GetTempPathA(sizeof(tmp), tmp);
         if (n > 0 && n < sizeof(tmp)) {
@@ -152,7 +161,7 @@ extern "C" void aio_diag_init(void) {
             g_diag = fopen(path, "w");
         }
     }
-    if (!g_diag) {  // fallback 2: CWD
+    if (!g_diag) {  // fallback 3: CWD
         snprintf(path, sizeof(path), "AIO-Graphics-Test_startup.log");
         g_diag = fopen(path, "w");
     }
