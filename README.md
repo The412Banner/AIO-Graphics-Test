@@ -1,19 +1,32 @@
 # AIO Graphics Test
 
-An all-in-one graphics **diagnostic + benchmark** tool for the **Winlator/Gamehub/GameNative** Wine
-graphics stack on Android (DXVK, VKD3D-Proton, Turnip, Zink). One Windows `.exe` you drop
+An all-in-one graphics **diagnostic + benchmark** tool for the **Winlator / GameHub / GameNative**
+Wine graphics stack on Android (DXVK, VKD3D-Proton, Turnip, Zink). One Windows `.exe` you drop
 into a container — it replaces `vkcube.exe`, `GPUInfo.exe`, and the whole `3d-tests` kit
-(DX8/9/11/12 + GL demos) with a single, touch-friendly, instrumented binary that renders
-the **same cube through every graphics API** so you can see exactly which translation layer
-is broken or slow. On top of the diagnostic cubes it bundles a gallery of detailed
-**procedural showcase scenes** (a photoreal planet, a neon-rain city, moonlit dunes, a
-volumetric nebula, a "Seascape" ocean) that double as fragment-heavy benchmarks, two
-**interactive fly-cams** (a terrain flyer and an Earth→Mars orbital flyer with gamepad
-support), a **disk-speed benchmark**, and a full **dark theme**.
+(DX8/9/11/12 + GL demos) with a single, touch-friendly, instrumented binary that renders the
+**same cube through every graphics API** so you can see exactly which translation layer is broken
+or slow. On top of the diagnostic cubes it bundles a gallery of detailed **procedural showcase
+scenes** (a photoreal planet, a neon-rain city, moonlit dunes, a volumetric nebula, a "Seascape"
+ocean) that double as fragment-heavy benchmarks, two **interactive fly-cams** (a terrain flyer and
+an Earth→Mars orbital flyer with gamepad support), a **disk-speed benchmark**, and full **light /
+dark themes**.
+
+> ## 🧭 What's new in v2 — one window, no pop-ups
+>
+> **v2 is a ground-up interface rebuild.** In v1 each test opened in its own separate window. In
+> v2 the app is a **single window** with a docked menu on the right and **one live render viewport**
+> — every API and every scene renders **in place, inside that viewport**, and you **swap between them
+> instantly** without a single pop-up window. It's rebuilt on **[Dear ImGui](https://github.com/ocornut/imgui)**
+> (the immediate-mode UI behind RenderDoc, Tracy, and most GPU tooling) for a polished, fluid,
+> professional instrument feel, with a live HUD, a frametime graph, and a telemetry read-out
+> composited over the render.
+>
+> **This README describes v2.0**, which is in active development toward the next stable release.
+> The current published stable is **v1.6.1** on the [Releases](https://github.com/The412Banner/AIO-Graphics-Test/releases) page.
 
 Forked from Khronos [Vulkan-Tools `vkcube`](https://github.com/KhronosGroup/Vulkan-Tools)
-(`cube.c`, tag `sdk-1.3.239.0`, Apache-2.0). The self-contained pre-codegen base links
-`vulkan-1` directly (no `cube_functions.h` generation step).
+(`cube.c`, tag `sdk-1.3.239.0`, Apache-2.0). The self-contained pre-codegen base links `vulkan-1`
+directly (no `cube_functions.h` generation step).
 
 > **Idea & inspiration:** [**Nick (@Xnick417x)**](https://github.com/Xnick417x) — co-author. See [Credits](#credits).
 >
@@ -22,26 +35,39 @@ Forked from Khronos [Vulkan-Tools `vkcube`](https://github.com/KhronosGroup/Vulk
 ## Download
 
 Grab the latest `AIO-Graphics-Test-64bit.exe` (or `-32bit.exe`) from the
-[**Releases**](https://github.com/The412Banner/AIO-Graphics-Test/releases) page, drop it
-into a Winlator container, and run it — it opens a menu, no install. See it in action in the
-[**showcase video**](https://youtu.be/gKhwjwjGvWI). The container already
-provides `vulkan-1.dll` (every Winlator container does). The exe's embedded cube icon is
-used as the shortcut art when you add it to a container.
+[**Releases**](https://github.com/The412Banner/AIO-Graphics-Test/releases) page, drop it into a
+Winlator container, and run it — no install. The container already provides `vulkan-1.dll` (every
+Winlator container does). The exe's embedded cube icon is used as the shortcut art when you add it
+to a container.
+
+## The interface (v2)
+
+A single, resizable window built for a touchscreen (Winlator is touch-first), themeable light or
+dark:
+
+- **Live render viewport** (left) — the selected test renders here, in place. Pick another test and
+  it **swaps into the same viewport instantly** — no new window ever opens. A translucent HUD pill
+  shows the active **API + live FPS + a scrolling frametime graph**; a telemetry strip along the
+  bottom reports **resolution, present mode, the exact translation path** (e.g. `d3d11 → DXVK →
+  Turnip`), and the **GPU**. The viewport stays a dark instrument surface in both themes.
+- **Docked menu** (right) — every test grouped and one tap away: **Graphics Backends**, **DX11
+  Scenes**, **Showcase Demos**, **Scaling Tests**, and **Tools**. Each row carries a per-API colour
+  chip and an fps hint; the selected row is highlighted. Toggle between a compact **List** and a
+  visual **Grid** from the toolbar.
+- **Fullscreen** — a one-tap button expands the running test to fill the whole window (menu,
+  toolbar, and strips slide away, the HUD stays). Exit with the on-screen **Exit Fullscreen** pill or
+  **F11 / Esc** — it always drops back to the exact view you left, test still running.
+- **Aspect-correct resize** — drag any edge or corner and the render re-fits the window's aspect
+  cleanly (square faces stay square, native resolution, no stretching), coalesced so a drag stays
+  smooth.
+- **Light / dark theme** — toggle from the toolbar; the chrome re-themes, the render screen stays
+  dark.
 
 ## What it does
 
-A single binary, driven by an **in-app menu** (touch-friendly — Winlator is a touchscreen),
-with optional CLI shortcuts:
-
-- **App shell** — a persistent left-sidebar menu + content pane, **dark-themed throughout**
-  (window, push buttons, checkboxes, panes, and report scrollbars are all custom dark-painted).
-  Pick a test; GPU Info opens in-frame, cube/scene tests open in their own window (so the menu
-  stays usable).
-- **GPU / driver report** — Vulkan and OpenGL shown as **two stacked, independently-scrollable
-  panes** on one page (device, driver + API version, memory heaps, queue families, features,
-  extensions). Replaces `GPUInfo.exe`.
-- **Multi-API renderer** — the same cube through **every** graphics API in the Winlator
-  stack, so 5/6/7/8/9/10/11/12 are all covered:
+- **Multi-API renderer** — the same cube through **every** graphics API in the Winlator stack, so
+  5 / 6 / 7 / 8 / 9 / 10 / 11 / 12 are all covered — and in v2 **all of them render inside the one
+  viewport and swap in place**:
 
   | Backend | Path it exercises |
   |---|---|
@@ -54,15 +80,15 @@ with optional CLI shortcuts:
   | **Direct3D 11**| **DXVK** d3d11 → Vulkan |
   | **Direct3D 12**| **VKD3D-Proton** d3d12 → Vulkan |
 
-  > **Two builds, two bitnesses.** Each release ships `AIO-Graphics-Test-64bit.exe` (**64-bit**)
-  > and `AIO-Graphics-Test-32bit.exe` (**32-bit**). A 64-bit process can only load the
-  > container's *x64* DXVK / VKD3D / ddraw DLLs; a 32-bit process loads the separate *x32*
-  > set. Since almost every legacy DirectX game (and all DX5/6/7 titles) runs as 32-bit, the
-  > x86 build tests DLLs the x64 build physically can't reach. Use whichever matches the game
-  > you're debugging — or run both to compare the two DLL sets.
+  > **Two builds, two bitnesses.** Each release ships `AIO-Graphics-Test-64bit.exe` (**64-bit**) and
+  > `AIO-Graphics-Test-32bit.exe` (**32-bit**). A 64-bit process can only load the container's *x64*
+  > DXVK / VKD3D / ddraw DLLs; a 32-bit process loads the separate *x32* set. Since almost every
+  > legacy DirectX game (and all DX5/6/7 titles) runs as 32-bit, the x86 build tests DLLs the x64
+  > build physically can't reach. Use whichever matches the game you're debugging — or run both to
+  > compare the two DLL sets.
 
-- **DX11 test suite** — Direct3D 11 has the deepest coverage: a suite of scenes, each
-  stressing a different part of the pipeline / DXVK:
+- **DX11 test suite** — Direct3D 11 has the deepest coverage: a suite of scenes, each stressing a
+  different part of the pipeline / DXVK:
 
   | Scene | Exercises |
   |---|---|
@@ -79,8 +105,8 @@ with optional CLI shortcuts:
   | Atomics | a histogram built with **`InterlockedAdd`** atomics + clear-UAV + a structured-buffer SRV-in-VS (a correctness probe for the translation layer) |
   | Draw stress (128–2048) | thousands of **individual draw calls** (not instanced) → **CPU/submit-bound**, a different axis from every GPU-bound scene; pick the draw count to map the scaling curve |
 
-- **Demo Scenes** — a gallery of procedural **showcase** scenes (all ray-marched in the D3D11
-  pixel shader, so they double as heavy fragment-ALU stress tests), reached via **Demo Scenes ▸**:
+- **Demo Scenes** — a gallery of procedural **showcase** scenes (all ray-marched in the D3D11 pixel
+  shader, so they double as heavy fragment-ALU stress tests):
 
   | Scene | What it renders |
   |---|---|
@@ -89,141 +115,151 @@ with optional CLI shortcuts:
   | **Desert** | a moonlit dune sea — rolling heightfield dunes, cool moonlight + soft terrain shadows, wind ripples, a craters moon and a star field |
   | **Detailed Nebula** | volumetric emission/absorption — glowing gas (red → magenta → reflection-blue temperature palette) + dark dust lanes, three embedded stars lighting the gas from within, dithered front-to-back march |
   | **Ocean v2** | a "Seascape" sea — choppy summed wave octaves, binary-search heightmap trace, Fresnel sky-reflection vs deep-water refraction, subsurface crest glow, sun specular + sun disk |
-  | **Free Look** 🎮 | the first **interactive** scene — a SkyFly-style fly-cam over a ridged-mountain + ocean heightfield with volumetric fly-through clouds, altitude atmosphere fading to a star field. Auto-cruises; steer with the cursor / **WASD** / arrows, wheel = speed |
+  | **Free Look** 🎮 | an **interactive** SkyFly-style fly-cam over a ridged-mountain + ocean heightfield with volumetric fly-through clouds, altitude atmosphere fading to a star field. Auto-cruises; steer with the cursor / **WASD** / arrows, wheel = speed |
   | **Planet Fly (Earth + Mars)** 🎮 | leave the surface, watch the horizon **curve into a full globe** from orbit (oceans, ice caps, clouds, atmospheric limb), then fly **~2500 u to a second planet — Mars** (rusty dunes, CO₂ caps, thin sky) and descend onto it. Surface-relative 6-DOF camera with gravity re-orientation; **gamepad (XInput)** supported |
   | Showcase · Raymarch SDF · Mandelbulb · Volumetric nebula · Ocean · Cel · Matcap | the original lighter procedural scenes (reflections + soft shadows, a raw SDF march, a fractal, simple volumetrics, toon, chrome matcap) |
 
-  > 🎮 **Free Look** and **Planet Fly** are camera-controlled (keyboard / cursor-steer / gamepad); the
-  > rest of the gallery is auto-animated. Controls are shown in each window's title bar.
+  > 🎮 **Free Look** and **Planet Fly** are camera-controlled (keyboard / cursor-steer / gamepad),
+  > steered directly inside the viewport; the rest of the gallery is auto-animated.
 
-- **Native-Vulkan scenes** — beyond the textured cube, the Vulkan backend has a **Phong-lit**
-  cube (full ambient + diffuse + specular on the *native* VK path, no DXVK) and a
-  **mesh-shader probe** that reports whether the device/driver exposes `VK_EXT_mesh_shader`
-  (Turnip on Adreno currently does not — the probe is the diagnostic).
+- **Native-Vulkan scenes** — beyond the textured cube, the Vulkan backend has a **Phong-lit** cube
+  (full ambient + diffuse + specular on the *native* VK path, no DXVK) and a **mesh-shader probe**
+  that reports whether the device/driver exposes `VK_EXT_mesh_shader` (Turnip on Adreno currently
+  does not — the probe is the diagnostic).
 
-- **Benchmark** — a view (or `--bench <sec>`) that times a run and reports **Avg / Min / Max**
-  + **1%-low** FPS (with a per-frame **CSV**). Min/Max use the 1st/99th percentile so a stray
-  sub-frame timing glitch can't produce an absurd reading; a short **warm-up window** is
-  excluded so first-frame shader compilation doesn't skew the result.
-  - **Tick what to run** — every test is a checkbox (with **Select All / Clear All**); the many
-    D3D11 scenes collapse under one **Direct3D 11** group (and the draw-stress counts under one
-    **Draw Stress** sub-row).
-  - **Run Selected** sweeps the ticked tests **sequentially and hands-free** (no GPU
-    contention between tests).
+- **GPU / driver report** — **Vulkan** and **OpenGL** shown side by side (device, driver + API
+  version, memory, features yes/no, extensions). Replaces `GPUInfo.exe`.
+
+- **Benchmark** — times a run and reports **Avg / Min / Max** + **1%-low** FPS (with a per-frame
+  **CSV**). Min/Max use the 1st/99th percentile so a stray sub-frame glitch can't produce an absurd
+  reading; a short **warm-up window** is excluded so first-frame shader compilation doesn't skew the
+  result.
+  - **Tick what to run** — every test is a checkbox (**Select All / Clear All**); the many D3D11
+    scenes collapse under one **Direct3D 11** group (and draw-stress under one **Draw Stress**
+    sub-row).
+  - **Run Selected / Run All** — sweeps the ticked tests **sequentially and hands-free** (no GPU
+    contention between tests); results fill in as each finishes.
   - **Selectable length** — 15 / 30 / 45 / 60 s — and a **Vsync toggle**.
-  - **Benchmark Results** screen — the full Avg/Min/Max for every test, with a **run picker**:
-    each sweep is saved to disk with a **timestamp**, so you can review previous runs (they
-    survive app restarts).
-- **Semaphore Probe** — benchmarks the instanced D3D11 cube with **timeline vs binary**
-  semaphores to measure the Turnip-kgsl timeline-semaphore regression, and prints a plain
-  verdict (e.g. *"binary is 1.7× faster"*). (The binary path only differs on a DXVK build
-  that honors `DXVK_DISABLE_TIMELINE_SEMAPHORES`.)
-- **Disk Speed** — a non-graphics view that measures **sequential write**, **sequential read**,
-  **random 4 KB read**, and **random 4 KB write** throughput (MB/s + IOPS) against a temp file in
-  `%TEMP%` (created and deleted each run), i.e. the *in-container* storage speed a game actually
-  gets. Pick **256 / 512 / 1024 / 2048 MB** (default **1024 MB**), then:
-  - **Run (quick)** — fast, but Wine usually serves the reads from the OS page cache (RAM), so the
-    read numbers are RAM-fast, not real flash. Good for seeing the cache benefit.
-  - **Real-Flash Read** — before *each* read it writes a RAM-sized **cache-buster** file to evict
-    the test file from the page cache, so both the sequential and random reads happen *cold* and
-    reflect true storage speed (slower; writes several extra GB, deleted afterwards). Both **write**
+  - **Results** — the full Avg/Min/Max for every test, with a **run picker**: each sweep is saved to
+    disk with a **timestamp**, so previous runs survive app restarts.
+- **Semaphore Probe** — benchmarks the instanced D3D11 cube with **timeline vs binary** semaphores
+  to measure the Turnip-kgsl timeline-semaphore regression, and prints a plain verdict (e.g. *"binary
+  is 1.7× faster"*). (The binary path only differs on a DXVK build that honors
+  `DXVK_DISABLE_TIMELINE_SEMAPHORES`.)
+- **Disk Speed** — a non-graphics view that measures **sequential** and **random 4 KB** read/write
+  throughput (MB/s + IOPS) against a temp file in `%TEMP%` (created and deleted each run) — i.e. the
+  *in-container* storage speed a game actually gets. Pick **256 / 512 / 1024 / 2048 MB** (default
+  **1024 MB**):
+  - **Run (quick)** — fast, but Wine usually serves reads from the OS page cache (RAM), so read
+    numbers are RAM-fast. Good for seeing the cache benefit.
+  - **Real-Flash Read** — before *each* read it writes a RAM-sized **cache-buster** to evict the test
+    file from the page cache, so reads happen *cold* and reflect true storage speed. Both **write**
     figures are always real (committed straight to storage).
-  - **CrossPlatformDiskTest-matched method** — both random tests run a fixed **7 s** over a
-    **shuffled set of unique 4 KB offsets** (each block is touched at most once, so a read is never
-    served from RAM), and the random write is **flushed per operation** (committed-write speed).
-    This mirrors the popular [CrossPlatformDiskTest](https://github.com/maxim-saplin/CrossPlatformDiskTest)
-    app's methodology, so the numbers line up with it on the same device — set both to a 1 GiB file
-    for an apples-to-apples comparison.
-  - **Storage class** — translates your sequential speed into a consumer tier
-    (eMMC / UFS 2.1 / UFS 3.1 / UFS 4.0 / SSD) so you don't have to read the raw MB/s. It's an
-    *in-container* floor (Wine overhead means the real chip may be a tier higher), so it's hedged
-    *"or better"*; based on write + the cold read.
-  - **Clear Temp Files** — a normal run deletes its files automatically, but if a run is interrupted
-    (app closed mid-test) the multi-GB test file / cache-buster can linger; this button deletes any
-    leftovers and reports the space freed.
+  - **CrossPlatformDiskTest-matched method** — the random tests run a fixed **7 s** over a **shuffled
+    set of unique 4 KB offsets** (each block touched at most once), and random write is **flushed per
+    operation**. Mirrors the popular [CrossPlatformDiskTest](https://github.com/maxim-saplin/CrossPlatformDiskTest)
+    methodology, so numbers line up on the same device (use a 1 GiB file for apples-to-apples).
+  - **Storage class** — translates sequential speed into a consumer tier (eMMC / UFS 2.1 / 3.1 / 4.0
+    / SSD), hedged *"or better"* since Wine overhead means the real chip may be a tier higher.
+  - **Clear Temp Files** — deletes any multi-GB test files left behind if a run was interrupted, and
+    reports the space freed.
   - **What's this?** — a scrollable in-app explainer of all of the above.
-- **Live HUD** — every cube window shows the active API + live FPS as an on-screen overlay.
-- **Hang watchdog** — if a backend deadlocks (e.g. a broken GL stack blocking in
-  `SwapBuffers`), it self-closes after ~12 s instead of locking up the container.
-- **Robust by design** — DXVK / VKD3D / d3dcompiler are all loaded **dynamically**, so the
-  exe launches and shows a graceful notice even on a container that lacks them. All output is
-  written to disk too, so results survive a PRoot/Termux OOM-kill mid-test.
+- **Live HUD** — the viewport always shows the active API + live FPS + a scrolling **frametime
+  graph** as an integrated overlay, in windowed and fullscreen alike.
+- **Hang watchdog** — if a backend deadlocks (e.g. a broken GL stack blocking in `SwapBuffers`), it
+  self-recovers instead of locking up the container.
+- **Robust by design** — DXVK / VKD3D / d3dcompiler are all loaded **dynamically**, so the exe
+  launches and shows a graceful notice even on a container that lacks them. All output is written to
+  disk too, so results survive a PRoot/Termux OOM-kill mid-test.
 
 ## CLI shortcuts
 
-The menu is the primary interface, but every mode has a flag too:
+The single-window app is the primary interface, but the individual backends are still scriptable for
+power users and automation:
 
 | Flag | What it does |
 |------|--------------|
-| *(default)* | Opens the app shell (menu) |
+| *(default)* | Opens the single-window app |
 | `--gpuinfo` / `--report` | Dump GL + VK adapter info to console + `AIO-Graphics-Test_report.txt`, then exit |
-| `--cube vk\|gl\|dx7\|dx8\|dx9\|dx10\|dx11\|dx12` | Launch a backend directly in its own window |
-| `--cube ddraw2d` | Launch the pure-2D DirectDraw blit test (`dx7` = the DirectDraw 3D cube) |
+| `--cube vk\|gl\|dx7\|dx8\|dx9\|dx10\|dx11\|dx12` | Run a single backend headless (its own window) — used by scripting and the benchmark sweeps |
+| `--cube ddraw2d` | The pure-2D DirectDraw blit test (`dx7` = the DirectDraw 3D cube) |
 | `--cube vk --scene phong\|meshshader` | Native-VK Phong-lit cube, or the mesh-shader probe |
-| `--cube dx11 --scene <name>` | Pick a DX11 scene. **Pipeline tests:** `spin` `textured` `instanced` `tess` `compute` `dolphin` `gsexplode` `atomics` `drawstress`. **Showcases:** `space` `city` `desert` `nebula2` `ocean2` `showcase` `raymarch` `ocean` `mandelbulb` `nebula` `cel` `matcap`. **Interactive:** `freelook` `planet` |
+| `--cube dx11 --scene <name>` | Pick a DX11 scene. **Pipeline:** `spin` `textured` `instanced` `tess` `compute` `dolphin` `gsexplode` `atomics` `drawstress`. **Showcases:** `space` `city` `desert` `nebula2` `ocean2` `showcase` `raymarch` `ocean` `mandelbulb` `nebula` `cel` `matcap`. **Interactive:** `freelook` `planet` |
 | `--cube dx11 --scene drawstress --draws <n>` | Draw-stress with N draws (128 / 256 / 512 / 1024 / 2048) |
 | `--bench <sec>` | Run the launched cube as a timed benchmark (avg/min/max/1%-low + CSV) |
 | `--vsync` | Present with vsync (default is uncapped) |
 | `--autoclose <sec>` | Auto-dismiss the benchmark result popup after N s (Run All uses 3) |
 | `--semaphore timeline\|binary` | Force the DXVK semaphore path (the probe uses this) |
-| `--no-menu` | Skip the shell and launch the cube directly |
 
 ## Build
 
 CI only (no local builds). Cross-compiled Linux → Windows PE on GitHub Actions
-(`.github/workflows/build-windows.yml`) as a **two-arch matrix**: mingw-w64 + Vulkan-Headers
-+ a cross-built Vulkan-Loader import lib + glslang + `windres` (icon) → `AIO-Graphics-Test-64bit.exe`
-(**x86_64**) and `AIO-Graphics-Test-32bit.exe` (**i686**). Releases are the exact CI-built
-artifacts. Only `vulkan-1` is statically imported (always present in a container);
-`ddraw`/d3d8/9/10/11/12, `dxgi`, and `d3dcompiler` are loaded at runtime.
+(`.github/workflows/build-windows.yml`) as a **two-arch matrix**: mingw-w64 + Vulkan-Headers + a
+cross-built Vulkan-Loader import lib + glslang + `windres` (icon), plus **Dear ImGui** (pinned,
+compiled with the Win32 + D3D11 backends) and the two **embedded UI fonts** — producing
+`AIO-Graphics-Test-64bit.exe` (**x86_64**) and `AIO-Graphics-Test-32bit.exe` (**i686**). The UI
+layer is C++ (`-fcf-protection=none` for FEX/arm64ec compatibility, static libstdc++/libgcc so
+there's no runtime DLL dependency); the backends stay C. Releases are the exact CI-built artifacts.
+Only `vulkan-1` is statically imported (always present in a container); `ddraw` / d3d8/9/10/11/12,
+`dxgi`, and `d3dcompiler` are loaded at runtime.
 
 ## Layout
 
 ```
-src/cube.c            forked vkcube + WinMain dispatch (also the Vulkan backend)
-src/menu.c            app shell (dark theme): sidebar, stacked GPU Info panes, scene/benchmark/probe views
-src/cube_gl.c         OpenGL backend (WGL)
-src/cube_ddraw.c      DirectDraw / legacy Direct3D backend (DX7 cube + 2D blit)
-src/cube_d3d8.c       Direct3D 8 backend (DXVK d3d8 wrapper)
-src/cube_d3d9.c       Direct3D 9 backend (DXVK)
-src/cube_d3d10.c      Direct3D 10 backend (DXVK)
-src/cube_d3d11.c      Direct3D 11 scene framework + scenes (pipeline tests, procedural showcases, interactive Free Look / Planet Fly flyers)
-src/cube_phong.frag   native-Vulkan Phong fragment shader (--scene phong)
-src/cube_d3d12.c      Direct3D 12 backend (VKD3D-Proton)
-src/disk.c, disk.h    Disk Speed benchmark (seq/random read+write, cache-buster, storage-class estimate, temp-file cleanup)
-src/gpuinfo.c         GL + VK adapter report
-src/bench.c           benchmark instrumentation (avg/min/max/1%-low + CSV, vsync flag)
-src/hud.c             in-window FPS/API overlay
-src/watchdog.c        render-loop hang watchdog
-src/dolphin_assets.h  embedded DolphinVS assets (generated)
-src/app.rc, app.ico   app icon (PE resource; also the Winlator shortcut art)
+src/cube.c              forked vkcube + WinMain dispatch (also the Vulkan backend)
+src/shell_imgui.cpp     the v2 single-window app: Dear ImGui shell, docked menu (List/Grid),
+                        live in-viewport render + backend swapping, HUD/telemetry, fullscreen, resize, theming
+src/shell_imgui.h       shell entry point
+src/cube_d3d11.c        Direct3D 11 scene framework + scenes (pipeline tests, procedural showcases, interactive flyers)
+src/cube_d3d11_scene.h  C accessors that let the shell drive the DX11 scenes on its own device
+src/cube_gl.c           OpenGL backend (WGL)
+src/cube_ddraw.c        DirectDraw / legacy Direct3D backend (DX7 cube + 2D blit)
+src/cube_d3d8.c         Direct3D 8 backend (DXVK d3d8 wrapper)
+src/cube_d3d9.c         Direct3D 9 backend (DXVK)
+src/cube_d3d10.c        Direct3D 10 backend (DXVK)
+src/cube_d3d12.c        Direct3D 12 backend (VKD3D-Proton)
+src/cube_phong.frag     native-Vulkan Phong fragment shader (--scene phong)
+src/disk.c, disk.h      Disk Speed benchmark (seq/random read+write, cache-buster, storage-class estimate)
+src/gpuinfo.c           GL + VK adapter report
+src/bench.c             benchmark instrumentation (avg/min/max/1%-low + CSV, vsync flag)
+src/hud.c               headless in-window FPS/API overlay (for --cube runs)
+src/watchdog.c          render-loop hang watchdog
+src/dolphin_assets.h    embedded DolphinVS assets (generated)
+src/font_ui.inc, font_mono.inc   embedded UI fonts (Inter + Cascadia Code, base85-compressed)
+src/menu.c              legacy v1 Win32 shell (retained during the v2 transition)
+src/app.rc, app.ico     app icon (PE resource; also the Winlator shortcut art)
 tools/gen_dolphin_assets.py   one-time .x/.bmp/.tga → dolphin_assets.h
 tools/gen_icon.sh             regenerate app.ico (ImageMagick)
-cmake/                mingw-w64 cross toolchain file
+cmake/                  mingw-w64 cross toolchain file
 ```
 
 ## Credits
 
-**AIO Graphics Test** is built by [**The412Banner**](https://github.com/The412Banner) with
-co-author [**Nick (@Xnick417x)**](https://github.com/Xnick417x) — the **idea, inspiration,
-and ongoing help** behind the project. Thank you, Nick. 🙏
+**AIO Graphics Test** is built by [**The412Banner**](https://github.com/The412Banner) with co-author
+[**Nick (@Xnick417x)**](https://github.com/Xnick417x) — the **idea, inspiration, and ongoing help**
+behind the project. Thank you, Nick. 🙏
 
 It stands on open-source graphics work and was informed by the `3d-tests` reference kit:
 
-- **Khronos `vkcube` / Vulkan-Tools** — `src/cube.c` is a fork of `cube/cube.c`
-  (tag `sdk-1.3.239.0`), Apache-2.0. © The Khronos Group, Valve, LunarG.
+- **Khronos `vkcube` / Vulkan-Tools** — `src/cube.c` is a fork of `cube/cube.c` (tag
+  `sdk-1.3.239.0`), Apache-2.0. © The Khronos Group, Valve, LunarG.
 - **Vulkan-Headers / Vulkan-Loader / glslang** — Khronos, Apache-2.0 (fetched in CI).
+- **[Dear ImGui](https://github.com/ocornut/imgui)** — the v2 interface layer, MIT © Omar Cornut.
+- **[Cascadia Code](https://github.com/microsoft/cascadia-code)** (SIL OFL, © Microsoft) and
+  **[Inter](https://github.com/rsms/inter)** (SIL OFL, © The Inter Project Authors) — the embedded UI
+  fonts.
 - **DXVK** and **VKD3D-Proton** — the translation layers this tool exercises (not bundled).
 
-**DolphinVS assets** — the Dolphin scene embeds the original Microsoft *DolphinVS* DirectX
-SDK sample data (dolphin + seafloor meshes, textures, and the 32-frame caustics), parsed
-into `src/dolphin_assets.h`. Those assets are **© Microsoft Corporation**, included for the
-homage scene; all trademarks belong to their owners. This project is independent and not
-affiliated with or endorsed by Microsoft.
+**DolphinVS assets** — the Dolphin scene embeds the original Microsoft *DolphinVS* DirectX SDK
+sample data (dolphin + seafloor meshes, textures, and the 32-frame caustics), parsed into
+`src/dolphin_assets.h`. Those assets are **© Microsoft Corporation**, included for the homage scene;
+all trademarks belong to their owners. This project is independent and not affiliated with or
+endorsed by Microsoft.
 
-Full attribution is in [`CREDITS.md`](CREDITS.md). Everything else is reimplemented natively
-— no third-party `.exe` binaries are bundled.
+Full attribution is in [`CREDITS.md`](CREDITS.md). Everything else is reimplemented natively — no
+third-party `.exe` binaries are bundled.
 
 ## License
 
-Apache-2.0 (inherited from Vulkan-Tools) — see [`LICENSE`](LICENSE).
+Apache-2.0 (inherited from Vulkan-Tools) — see [`LICENSE`](LICENSE). Bundled components keep their
+own licenses: Dear ImGui (MIT), Cascadia Code and Inter (SIL OFL).
