@@ -4809,9 +4809,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR pCmdLine,
         }
     }
 
-    // AIO Graphics Test: --imgui launches the new single-window Dear ImGui shell
-    // (Phase 0 de-risk scaffold). Additive and reachable ONLY via this flag; the
-    // no-args launch below still runs the existing shell unchanged.
+    // AIO Graphics Test: the single-window Dear ImGui shell is the DEFAULT (v2.0.0).
+    // --imgui is kept as an explicit alias; the no-args default (below) also runs it.
     if (AIO_CLI_HAS("--imgui")) {
         int rc = aio_run_imgui_shell(hInstance);
         AIO_FREE_ARGV();
@@ -4911,8 +4910,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR pCmdLine,
             }
         // fall through to the Vulkan cube below
     } else {
-        // Default: the app shell (persistent menu + in-frame GPU Info).
-        int rc = aio_run_shell(hInstance);
+        // Default (v2.0.0): the single-window Dear ImGui shell. --classic launches
+        // the legacy Win32 sidebar shell (kept for reference / fallback).
+        int rc = AIO_CLI_HAS("--classic") ? aio_run_shell(hInstance)
+                                          : aio_run_imgui_shell(hInstance);
         AIO_FREE_ARGV();
         return rc;
     }
