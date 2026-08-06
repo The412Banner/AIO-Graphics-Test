@@ -63,10 +63,15 @@ jobs:
         run: |
           for f in cube gpuinfo menu bench hud disk cube_gl cube_d3d11 cube_d3d12 \
                    cube_d3d10 cube_d3d9 cube_d3d8 cube_ddraw watchdog; do
+            # -mno-avx/-mno-avx2: the container's FEX/arm64ec x86 JIT can't execute
+            # AVX; GCC otherwise emits AVX in the auto-vectorized/CRT-init paths,
+            # which fires a c000001d (illegal instruction) before WinMain. Same flag
+            # that fixed the identical crash on the frame-gen build.
             ${{ matrix.prefix }}-gcc -c src/$f.c \
               -I src -I vk/include \
               -DVK_USE_PLATFORM_WIN32_KHR -DWIN32_LEAN_AND_MEAN \
               -D_WIN32_WINNT=0x0A00 \
+              -mno-avx -mno-avx2 \
               -O2 -o $f.o
           done
 
@@ -82,11 +87,17 @@ jobs:
             ${{ matrix.prefix }}-g++ -c imgui/$f.cpp \
               -I imgui -I imgui/backends -I src \
               -DWIN32_LEAN_AND_MEAN -D_WIN32_WINNT=0x0A00 -fcf-protection=none \
+              -mno-avx -mno-avx2 \
               -O2 -o $(basename $f).o
           done
+          # -mno-avx/-mno-avx2: FEX/arm64ec can't execute AVX; without it the added
+          # v2.0.1 C++ (bench/disk/theme) made GCC emit AVX in the C++ static-init
+          # path, firing a c000001d illegal instruction BEFORE WinMain (no startup
+          # log was ever written). Keep -fcf-protection=none alongside it.
           ${{ matrix.prefix }}-g++ -c src/shell_imgui.cpp \
             -I imgui -I imgui/backends -I src \
             -DWIN32_LEAN_AND_MEAN -D_WIN32_WINNT=0x0A00 -fcf-protection=none \
+            -mno-avx -mno-avx2 \
             -O2 -o shell_imgui.o
 
       - name: Build vulkan-1 import lib from the symbols actually referenced
