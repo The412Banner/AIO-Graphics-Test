@@ -518,3 +518,40 @@ All embedded, windowless; version bumped to v2.0.1.
   /sdcard/Download/AIO/ AND the shortcut target (owner 10156:1023, perms 0660). NOT merged.
   NEXT: user relaunches; read <exe_dir>\AIO-Graphics-Test_startup.log — presence/absence of the
   "[ctor]" line localizes the fault; if -O0 launches clean it confirms a codegen-sensitive fault.
+
+## 2026-08-06 — v2.0.1 crash: BINARY FORENSICS -> "new libstdc++ static-init" hypothesis DISPROVED
+Compared the WORKING v2.0.0 exe (device AIO-Graphics-Test-64bit.exe, sha 7afe46ca, version string
+"v2.0.0") vs the CRASHING v2.0.1 exe (first build 1721c19, sha 8f4f587b, "v2.0.1", pre-diag). Parsed
+the PE directly (custom Python; host objdump has no PE target). Findings:
+- .CRT init table: BYTE-IDENTICAL — 13 slots, same 3 real callbacks (pre_cpp_init, pre_c_init,
+  __dyn_tls_init). 104 bytes in BOTH.
+- __CTOR_LIST__ (mingw global-ctor list): IDENTICAL — exactly 4 ctors in both, ALL pre-existing
+  libgcc/libstdc++ internals (_GLOBAL__sub_I__ZN9__gnu_cxx9__freeres, _GLOBAL__sub_I___cxa_get_globals_fast,
+  two .text.startup). NO new `_GLOBAL__sub_I_<TU>` for any 2.0.1 source file => 2.0.1 added ZERO
+  pre-main static-init objects.
+- .tls: IDENTICAL size (16 bytes) — no new TLS/thread_local.
+- libstdc++ runtime static-init symbol markers (grep both binaries): ios_base::Init, std::thread,
+  std::mutex, basic_ofstream/filebuf, pthread_create, __cxa_thread_atexit, locale::facet, std::cout/cerr
+  = ZERO in BOTH (basic_ostream=1 in both, pre-existing EH/RTTI). No new C++ runtime init pulled in.
+- Import table: SAME DLLs (kernel32/user32/gdi32/opengl32/vulkan-1/msvcrt/comctl32/shell32/dwmapi);
+  the ONLY new imported symbol is msvcrt `strpbrk` (standard, always present -> cannot fail load).
+- Source grep of the diff (2aabe54..HEAD): NO new #include; NO iostream/fstream/sstream/thread/mutex;
+  NO std::cout/ofstream/thread/mutex/thread_local/file-scope std:: object; disk/GPU-info runs use Win32
+  CreateThread (not std::thread) — pre-existing.
+CONCLUSION: the crashing v2.0.1 is, at the loader/CRT/static-init level, structurally IDENTICAL to the
+working v2.0.0. The only differences are more app .text, the benign `strpbrk` import, and larger .data/
+.bss for new POD globals. The "new libstdc++ static-init object" hypothesis is DISPROVED. No source
+de-C++-ification made (would be shot-in-the-dark). Diagnostic build (-O0 + constructor(101), sha
+be22fef) remains staged.
+
+### IMPORTANT caveat re "no startup.log" == "pre-WinMain"
+The pre-WinMain inference rests solely on "no AIO-Graphics-Test_startup.log anywhere". But the diag
+writes to <exe_dir> (D:\AIO), then %TEMP%, then CWD — and D:\AIO runtime write-permission by the
+sandboxed app is UNVERIFIED: the 2.0.0 output files (bench.csv/_bench_*.txt) live in the GAMES dir
+(C:\...\aio graphics test\), NOT in D:\AIO. If none of the 3 fallback dirs are app-writable under this
+container, we get NO log regardless of WHERE the crash is => "no log" may be a FALSE NEGATIVE and the
+crash could be much later (even in-render). Recommended immediate next step: repoint the startup log to
+a PROVEN-writable path — Z:\usr\tmp\ (the HUD side-channel already writes hud_active_api.json there
+successfully in-container) — then relaunch. Also: capture FEX's GUEST RIP (0x6ffca966dc is FEX's fixed
+raise trampoline, uninformative) via WINEDEBUG=+seh,+relay or a FEX crash log; and do the apples-to-
+apples test (2.0.1 in the "AIO ImGui Test" container that ran 2.0.0; 2.0.0 in the "AIO" container).
