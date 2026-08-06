@@ -81,6 +81,92 @@ extern "C" HRESULT WINAPI D3DCompile(LPCVOID pSrcData, SIZE_T SrcDataSize, LPCST
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam,
                                                              LPARAM lParam);
 
+// ===========================================================================
+// Startup breadcrumb diagnostic (see shell_imgui.h). Always-on, cheap, guarded.
+// Writes a per-launch log NEXT TO THE EXE and flushes after every line so a hard
+// crash (e.g. the FEX c000001d illegal-instruction ones) still leaves a record of
+// the last milestone reached; an unhandled-exception filter appends the code +
+// faulting address + module.
+// ===========================================================================
+static FILE *g_diag = nullptr;
+static char g_diag_path[MAX_PATH] = "";
+
+static void aio_diag_ts(char *out, size_t cap) {
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    snprintf(out, cap, "%02d:%02d:%02d.%03d", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+}
+
+extern "C" void aio_diag_log(const char *msg) {
+    if (!g_diag || !msg) return;
+    char ts[32];
+    aio_diag_ts(ts, sizeof(ts));
+    fprintf(g_diag, "[%s] %s\n", ts, msg);
+    fflush(g_diag);
+}
+
+// Best-effort module name containing addr (for the crash report). Guarded.
+static const char *aio_module_at(void *addr, char *buf, size_t cap) {
+    HMODULE h = nullptr;
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           (LPCSTR)addr, &h) &&
+        h && GetModuleFileNameA(h, buf, (DWORD)cap)) {
+        return buf;
+    }
+    snprintf(buf, cap, "<unknown>");
+    return buf;
+}
+
+static LONG WINAPI aio_seh_filter(EXCEPTION_POINTERS *ep) {
+    if (g_diag && ep && ep->ExceptionRecord) {
+        void *addr = ep->ExceptionRecord->ExceptionAddress;
+        char modbuf[MAX_PATH];
+        aio_module_at(addr, modbuf, sizeof(modbuf));
+        char ts[32];
+        aio_diag_ts(ts, sizeof(ts));
+        fprintf(g_diag, "[%s] *** UNHANDLED EXCEPTION code=0x%08lx addr=%p module=%s ***\n", ts,
+                (unsigned long)ep->ExceptionRecord->ExceptionCode, addr, modbuf);
+        fflush(g_diag);
+    }
+    return EXCEPTION_EXECUTE_HANDLER;  // terminate, but with the log safely written
+}
+
+extern "C" void aio_diag_init(void) {
+    if (g_diag) return;
+    char path[MAX_PATH] = "";
+    char exe[MAX_PATH] = "";
+    if (GetModuleFileNameA(nullptr, exe, MAX_PATH)) {
+        char *slash = strrchr(exe, '\\');
+        if (slash) {
+            *slash = '\0';
+            snprintf(path, sizeof(path), "%s\\AIO-Graphics-Test_startup.log", exe);
+            g_diag = fopen(path, "w");
+        }
+    }
+    if (!g_diag) {  // fallback 1: %TEMP%
+        char tmp[MAX_PATH];
+        DWORD n = GetTempPathA(sizeof(tmp), tmp);
+        if (n > 0 && n < sizeof(tmp)) {
+            snprintf(path, sizeof(path), "%sAIO-Graphics-Test_startup.log", tmp);
+            g_diag = fopen(path, "w");
+        }
+    }
+    if (!g_diag) {  // fallback 2: CWD
+        snprintf(path, sizeof(path), "AIO-Graphics-Test_startup.log");
+        g_diag = fopen(path, "w");
+    }
+    if (g_diag) {
+        snprintf(g_diag_path, sizeof(g_diag_path), "%s", path);
+        SetUnhandledExceptionFilter(aio_seh_filter);
+        char ts[32];
+        aio_diag_ts(ts, sizeof(ts));
+        fprintf(g_diag, "=== AIO Graphics Test %s startup log  %s ===\n", AIO_VERSION, ts);
+        fprintf(g_diag, "[%s] log path: %s\n", ts, g_diag_path);
+        fflush(g_diag);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Direct3D 11 device / swapchain (created via dynamic d3d11.dll load).
 // ---------------------------------------------------------------------------
@@ -2445,6 +2531,7 @@ static void aio_hud_write_status(const Test *t) {
 // Entry point.
 // ===========================================================================
 extern "C" int aio_run_imgui_shell(HINSTANCE hInstance) {
+    aio_diag_log("aio_run_imgui_shell: entry");
     WNDCLASSEXA wc;
     ZeroMemory(&wc, sizeof(wc));
     wc.cbSize = sizeof(wc);
@@ -2463,11 +2550,14 @@ extern "C" int aio_run_imgui_shell(HINSTANCE hInstance) {
     HWND hwnd = CreateWindowA(wc.lpszClassName, "", WS_OVERLAPPEDWINDOW, 100, 100,
                               1180, 720, nullptr, nullptr, hInstance, nullptr);
     if (!hwnd) {
+        aio_diag_log("aio_run_imgui_shell: CreateWindow FAILED");
         UnregisterClassA(wc.lpszClassName, hInstance);
         return 1;
     }
+    aio_diag_log("window created; creating D3D11 device+swapchain...");
 
     if (!create_device(hwnd)) {
+        aio_diag_log("create_device FAILED (no d3d11.dll / DXVK?) - aborting");
         destroy_device();
         DestroyWindow(hwnd);
         UnregisterClassA(wc.lpszClassName, hInstance);
@@ -2479,6 +2569,7 @@ extern "C" int aio_run_imgui_shell(HINSTANCE hInstance) {
         return 1;
     }
 
+    aio_diag_log("D3D11 device+swapchain created");
     ShowWindow(hwnd, SW_SHOWDEFAULT);
     UpdateWindow(hwnd);
 
@@ -2496,13 +2587,19 @@ extern "C" int aio_run_imgui_shell(HINSTANCE hInstance) {
     g_mono_sm = io.Fonts->AddFontFromMemoryCompressedBase85TTF(CascadiaMono_compressed_data_base85, 10.0f, &cfg);
     g_mono_bg = io.Fonts->AddFontFromMemoryCompressedBase85TTF(CascadiaMono_compressed_data_base85, 20.0f, &cfg);
     io.FontDefault = g_ui;
+    aio_diag_log("ImGui context + fonts loaded");
 
     init_hues();
     apply_theme(true);  // dark default
+    aio_diag_log("theme applied; bench history load: begin");
     bench_hist_load();  // restore past benchmark runs (fix 4)
+    { char m[64]; snprintf(m, sizeof(m), "bench history load: end (%d runs)", g_bhist_n); aio_diag_log(m); }
+    aio_diag_log("disk history load: begin");
     disk_hist_load();   // restore past disk runs (fix 5)
+    { char m[64]; snprintf(m, sizeof(m), "disk history load: end (%d runs)", g_dhist_n); aio_diag_log(m); }
     ImGui_ImplWin32_Init(hwnd);
     ImGui_ImplDX11_Init(g_dev, g_ctx);
+    aio_diag_log("ImGui Win32 + DX11 backends init; entering main loop");
 
     // Real frametime ring buffer + absolute clock (scene animation time).
     static float frametimes[120];
@@ -2524,6 +2621,9 @@ extern "C" int aio_run_imgui_shell(HINSTANCE hInstance) {
             if (msg.message == WM_QUIT) done = true;
         }
         if (done) break;
+
+        static bool s_first_frame = true;
+        if (s_first_frame) { aio_diag_log("first frame: begin"); }
 
         // Apply one coalesced swapchain resize per frame (click-drag safe).
         if (g_resize_w != 0 && g_dev) {
@@ -2689,8 +2789,10 @@ extern "C" int aio_run_imgui_shell(HINSTANCE hInstance) {
         g_swap->Present(sync, 0);
         // Count the frame that just reached glass (drives the whole HUD).
         g_fps.tick(now_ms);
+        if (s_first_frame) { aio_diag_log("first frame: presented OK"); s_first_frame = false; }
     }
 
+    aio_diag_log("main loop exited; shutting down");
     if (g_cur_scene >= 0) aio_d3d11_scene_cleanup(g_cur_scene);
     destroy_embed();  // cleanup any live cross-API backend + upload texture
     destroy_offscreen();
@@ -2702,5 +2804,6 @@ extern "C" int aio_run_imgui_shell(HINSTANCE hInstance) {
     destroy_device();
     DestroyWindow(hwnd);
     UnregisterClassA(wc.lpszClassName, hInstance);
+    aio_diag_log("exit OK");
     return 0;
 }

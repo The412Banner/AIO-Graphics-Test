@@ -19,6 +19,16 @@ extern "C" {
 // NOT replace the existing shell.
 int aio_run_imgui_shell(HINSTANCE hInstance);
 
+// Startup breadcrumb diagnostic. aio_diag_init() opens a per-launch log next to the
+// exe (falls back to %TEMP%, then CWD) and installs an unhandled-exception filter
+// that records the exception code + faulting address + module. aio_diag_log() writes
+// one timestamped, immediately-flushed milestone line so a hard crash still leaves a
+// pinpointed record of the last init step reached. Both are always-on, cheap, and
+// fully guarded (they never crash or stall). Call aio_diag_init() first thing in
+// WinMain. Safe to call aio_diag_log() before init (it is then a no-op).
+void aio_diag_init(void);
+void aio_diag_log(const char *msg);
+
 #ifdef __cplusplus
 }
 #endif

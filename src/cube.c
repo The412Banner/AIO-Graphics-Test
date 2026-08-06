@@ -4775,6 +4775,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR pCmdLine,
     // Ensure wParam is initialized.
     msg.wParam = 0;
 
+    // Startup breadcrumb diagnostic: open the log + install the crash filter FIRST,
+    // before any heavy init, so even an early hard crash leaves a pinpointed record.
+    aio_diag_init();
+    aio_diag_log("WinMain: entry");
+    {
+        char m[600];
+        snprintf(m, sizeof(m), "WinMain args: %s", (pCmdLine && pCmdLine[0]) ? pCmdLine : "(none)");
+        aio_diag_log(m);
+    }
+
     // Use the CommandLine functions to get the command line arguments.
     // Unfortunately, Microsoft outputs
     // this information as wide characters for Unicode, and we simply want the
@@ -4808,6 +4818,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR pCmdLine,
     // AIO Graphics Test: CLI shortcut --gpuinfo/--report dumps GL+VK adapter info and exits.
     for (int iii = 0; iii < argc; iii++) {
         if (argv && argv[iii] && (strcmp(argv[iii], "--gpuinfo") == 0 || strcmp(argv[iii], "--report") == 0)) {
+            aio_diag_log("dispatch: --gpuinfo/--report");
             int rc = aio_run_gpuinfo();
             AIO_FREE_ARGV();
             return rc;
@@ -4817,6 +4828,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR pCmdLine,
     // AIO Graphics Test: the single-window Dear ImGui shell is the DEFAULT (v2.0.0).
     // --imgui is kept as an explicit alias; the no-args default (below) also runs it.
     if (AIO_CLI_HAS("--imgui")) {
+        aio_diag_log("dispatch: --imgui shell");
         int rc = aio_run_imgui_shell(hInstance);
         AIO_FREE_ARGV();
         return rc;
@@ -4827,6 +4839,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR pCmdLine,
     // implemented today; other APIs show a notice and exit.
     int run_cube = AIO_CLI_HAS("--cube") || AIO_CLI_HAS("--no-menu");
     if (run_cube) {
+        aio_diag_log("dispatch: --cube (standalone CLI)");
         const char *api = "vk";
         for (int iii = 0; iii < argc - 1; iii++)
             if (argv && argv[iii] && strcmp(argv[iii], "--cube") == 0) api = argv[iii + 1];
@@ -4917,6 +4930,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR pCmdLine,
     } else {
         // Default (v2.0.0): the single-window Dear ImGui shell. --classic launches
         // the legacy Win32 sidebar shell (kept for reference / fallback).
+        aio_diag_log(AIO_CLI_HAS("--classic") ? "dispatch: --classic (legacy shell)"
+                                              : "dispatch: default (imgui shell)");
         int rc = AIO_CLI_HAS("--classic") ? aio_run_shell(hInstance)
                                           : aio_run_imgui_shell(hInstance);
         AIO_FREE_ARGV();
