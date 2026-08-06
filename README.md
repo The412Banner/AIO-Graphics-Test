@@ -21,8 +21,7 @@ dark themes**.
 > professional instrument feel, with a live HUD, a frametime graph, and a telemetry read-out
 > composited over the render.
 >
-> **This README describes v2.0**, which is in active development toward the next stable release.
-> The current published stable is **v1.6.1** on the [Releases](https://github.com/The412Banner/AIO-Graphics-Test/releases) page.
+> **This is v2.0.0** — the ground-up single-window rebuild, and the current release. Grab it from the [Releases](https://github.com/The412Banner/AIO-Graphics-Test/releases) page.
 
 Forked from Khronos [Vulkan-Tools `vkcube`](https://github.com/KhronosGroup/Vulkan-Tools)
 (`cube.c`, tag `sdk-1.3.239.0`, Apache-2.0). The self-contained pre-codegen base links `vulkan-1`
