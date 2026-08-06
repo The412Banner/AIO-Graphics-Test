@@ -62,6 +62,33 @@ dark:
 - **Light / dark theme** — toggle from the toolbar; the chrome re-themes, the render screen stays
   dark.
 
+## Screenshots
+
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshots/vulkan-grid-light.png" alt="Vulkan — Grid layout, Light theme"><br><sub><b>Vulkan</b> — Grid menu, light theme</sub></td>
+<td width="50%"><img src="docs/screenshots/d3d12.png" alt="Direct3D 12"><br><sub><b>Direct3D 12</b> → VKD3D → Turnip</sub></td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/d3d11.png" alt="Direct3D 11"><br><sub><b>Direct3D 11</b> → DXVK → Turnip</sub></td>
+<td><img src="docs/screenshots/d3d10.png" alt="Direct3D 10"><br><sub><b>Direct3D 10</b> → DXVK → Turnip</sub></td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/d3d9.png" alt="Direct3D 9"><br><sub><b>Direct3D 9</b> → DXVK → Turnip</sub></td>
+<td><img src="docs/screenshots/d3d8.png" alt="Direct3D 8"><br><sub><b>Direct3D 8</b> → d3d9 → DXVK</sub></td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/directdraw.png" alt="DirectDraw (DX7)"><br><sub><b>DirectDraw (DX7)</b> — the legacy path DXVK doesn't implement</sub></td>
+<td><img src="docs/screenshots/gpu-info.png" alt="GPU Info"><br><sub><b>GPU Info</b> — Vulkan + OpenGL device report</sub></td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/benchmark.png" alt="Benchmark suite"><br><sub><b>Benchmark</b> — per-test + Run All, avg / lows</sub></td>
+<td><img src="docs/screenshots/disk-speed.png" alt="Disk Speed"><br><sub><b>Disk Speed</b> — CPDT-matched in-container storage test</sub></td>
+</tr>
+</table>
+
+*Every backend renders in the same window and swaps in place — no test opens its own window.*
+
 ## What it does
 
 - **Multi-API renderer** — the same cube through **every** graphics API in the Winlator stack, so
