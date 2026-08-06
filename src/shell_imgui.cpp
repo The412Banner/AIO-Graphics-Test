@@ -1253,7 +1253,9 @@ static int g_dhist_sel = 0;
 #define AIO_DISK_HIST_FILE "AIO-Graphics-Test_disk_history.txt"
 static void disk_hist_load() {
     g_dhist_n = 0;
-    FILE *f = fopen(AIO_DISK_HIST_FILE, "r");
+    char dpath[320];
+    aio_results_path("Disk Speed", AIO_DISK_HIST_FILE, dpath, sizeof(dpath));
+    FILE *f = fopen(dpath, "r");
     if (!f) return;
     char line[256];
     while (fgets(line, sizeof(line), f)) {
@@ -1277,7 +1279,9 @@ static void disk_hist_load() {
 static void disk_hist_record() {
     if (!g_diskres.ok) return;
     char ts[24]; aio_local_timestamp(ts, sizeof(ts));
-    FILE *f = fopen(AIO_DISK_HIST_FILE, "a");
+    char dpath[320];
+    aio_results_path("Disk Speed", AIO_DISK_HIST_FILE, dpath, sizeof(dpath));
+    FILE *f = fopen(dpath, "a");
     if (f) {
         fprintf(f, "%s\t%d\t%d\t%.1f\t%.1f\t%.1f\t%.1f\t%s\n", ts, g_disk_run_mb, g_disk_defeat,
                 g_diskres.seq_read_mbps, g_diskres.seq_write_mbps, g_diskres.rand_read_mbps,
@@ -1400,7 +1404,9 @@ static const AioEmbedBackend *bench_embed_for(const BRow &r) {
 
 static void bench_hist_load() {
     g_bhist_n = 0;
-    FILE *f = fopen(AIO_BENCH_HIST_FILE, "r");
+    char hpath[320];
+    aio_results_path("Benchmark", AIO_BENCH_HIST_FILE, hpath, sizeof(hpath));
+    FILE *f = fopen(hpath, "r");
     if (!f) return;
     char line[256];
     BHistRun *cur = nullptr;
@@ -1445,7 +1451,9 @@ static void bench_sweep_finish() {
     g_bench_sweep_active = false;
     if (g_bench_sweep.nrows == 0) return;
     // Append to the persistent tab-separated history file.
-    FILE *f = fopen(AIO_BENCH_HIST_FILE, "a");
+    char hpath[320];
+    aio_results_path("Benchmark", AIO_BENCH_HIST_FILE, hpath, sizeof(hpath));
+    FILE *f = fopen(hpath, "a");
     if (f) {
         fprintf(f, "RUN\t%s\t%d\n", g_bench_sweep.ts, g_bench_sweep.secs);
         for (int i = 0; i < g_bench_sweep.nrows; ++i) {
@@ -1460,7 +1468,9 @@ static void bench_sweep_finish() {
     for (char *p = safe; *p; ++p) if (*p == ':' || *p == ' ') *p = '-';
     char fn[96];
     snprintf(fn, sizeof(fn), "AIO-Graphics-Test_bench_report_%s.txt", safe);
-    FILE *rf = fopen(fn, "w");
+    char rpath[400];
+    aio_results_path("Benchmark", fn, rpath, sizeof(rpath));
+    FILE *rf = fopen(rpath, "w");
     if (rf) {
         fprintf(rf, "AIO Graphics Test - benchmark report\r\n%s   %d s per test\r\n\r\n",
                 g_bench_sweep.ts, g_bench_sweep.secs);
@@ -1796,6 +1806,12 @@ static void draw_bench_history(ImVec2 base, float w, float h) {
             ry += 6.0f;
         }
     }
+    // Reserve content height from the child's ORIGIN (lb), not the last widget's
+    // cursor: screen_button/checkbox/InvisibleButton leave the ImGui cursor at the
+    // final row, so a Dummy placed there would ~double the content and create dead
+    // space + over-scroll (fix 3). Anchoring at lb makes content == drawn rows, so
+    // there's no scroll when the rows are shorter than the child.
+    ImGui::SetCursorScreenPos(lb);
     ImGui::Dummy(ImVec2(availW, ry - lb.y + 8.0f));
     ImGui::EndChild();
 }
@@ -1921,6 +1937,12 @@ static void draw_bench_pane(ImVec2 o, float w, float h) {
     text_at(ldl, g_mono_sm, 9.5f, ImVec2(rx0, ry), PAL.scrMuted,
             "All rows run EMBEDDED in the viewport (no pop-out). Each run is saved to History.");
     ry += 16.0f;
+    // Reserve content height from the child's ORIGIN (lb), not the last widget's
+    // cursor: screen_button/checkbox/InvisibleButton leave the ImGui cursor at the
+    // final row, so a Dummy placed there would ~double the content and create dead
+    // space + over-scroll (fix 3). Anchoring at lb makes content == drawn rows, so
+    // there's no scroll when the rows are shorter than the child.
+    ImGui::SetCursorScreenPos(lb);
     ImGui::Dummy(ImVec2(availW, ry - lb.y + 8.0f));
     ImGui::EndChild();
     ImGui::EndChild();
@@ -1974,6 +1996,12 @@ static void draw_disk_history(ImVec2 base, float w, float h) {
         text_at(ldl, g_mono_sm, 9.0f, ImVec2(rx + availW - 40.0f, ry + 6.0f), PAL.scrMuted, "MB/s");
         ry += rowH;
     }
+    // Reserve content height from the child's ORIGIN (lb), not the last widget's
+    // cursor: screen_button/checkbox/InvisibleButton leave the ImGui cursor at the
+    // final row, so a Dummy placed there would ~double the content and create dead
+    // space + over-scroll (fix 3). Anchoring at lb makes content == drawn rows, so
+    // there's no scroll when the rows are shorter than the child.
+    ImGui::SetCursorScreenPos(lb);
     ImGui::Dummy(ImVec2(availW, ry - lb.y + 8.0f));
     ImGui::EndChild();
 }
@@ -2156,13 +2184,54 @@ static void draw_tool_pane(ImVec2 o, float w, float h) {
     else if (strcmp(g_sel->name, "Disk Speed") == 0) draw_disk_pane(o, w, h);
 }
 
+// Compact progress overlay drawn OVER the live bench render in the viewport while a
+// benchmark run/sweep is in flight (fix 1): current test label, queue x/y, a
+// progress bar (g_bench_progress) and the live smoothed fps (g_bench_run_fps).
+static void draw_bench_overlay(ImDrawList *dl, ImVec2 o, float w, float h) {
+    const char *label = (g_bench_ip_row >= 0) ? g_brows[g_bench_ip_row].label : "Preparing...";
+    float panelW = 380.0f;
+    if (panelW > w - 28.0f) panelW = w - 28.0f;
+    float panelH = 68.0f;
+    ImVec2 p(o.x + (w - panelW) * 0.5f, o.y + 16.0f);
+    ImVec2 pmx(p.x + panelW, p.y + panelH);
+    dl->AddRectFilled(p, pmx, IM_COL32(6, 10, 14, 190), 10.0f);
+    dl->AddRect(p, pmx, IM_COL32(255, 255, 255, 24), 10.0f, 0, 1.0f);
+    // Header row: "BENCHMARKING" (left) + queue position x/y (right).
+    caps_at(dl, g_mono_sm, 9.5f, ImVec2(p.x + 14.0f, p.y + 10.0f), PAL.scrMuted, "Benchmarking", 2.0f);
+    char qb[32];
+    snprintf(qb, sizeof(qb), "%d / %d", g_bench_qn > 0 ? g_bench_qpos : 1, g_bench_qn > 0 ? g_bench_qn : 1);
+    float qw = text_w(g_mono_sm, 10.0f, qb);
+    text_at(dl, g_mono_sm, 10.0f, ImVec2(pmx.x - 14.0f - qw, p.y + 9.0f), PAL.scrMuted, qb);
+    // Body row: current test label (left) + live fps (right).
+    bold_at(dl, g_mono, 13.0f, ImVec2(p.x + 14.0f, p.y + 24.0f), PAL.accentInk, label);
+    char fb[24];
+    snprintf(fb, sizeof(fb), "%.0f fps", g_bench_run_fps);
+    float fw = text_w(g_mono, 12.0f, fb);
+    text_at(dl, g_mono, 12.0f, ImVec2(pmx.x - 14.0f - fw, p.y + 25.0f), PAL.scrText, fb);
+    // Progress bar of the active test.
+    float barY = p.y + panelH - 16.0f, barX = p.x + 14.0f, barW = panelW - 28.0f;
+    dl->AddRectFilled(ImVec2(barX, barY), ImVec2(barX + barW, barY + 7.0f), IM_COL32(255, 255, 255, 20), 4.0f);
+    float fp = g_bench_progress;
+    if (fp < 0) fp = 0;
+    if (fp > 1) fp = 1;
+    dl->AddRectFilled(ImVec2(barX, barY), ImVec2(barX + barW * fp, barY + 7.0f), PAL.accent, 4.0f);
+}
+
 static void draw_viewport(ImDrawList *dl, ImVec2 o, float w, float h, float fps, bool full) {
     ImVec2 mx(o.x + w, o.y + h);
 
+    // While a benchmark is running with the Benchmark tool selected, show the LIVE
+    // render in the viewport + a compact progress overlay (fix 1), instead of the
+    // datapane. When the run/sweep finishes (bench_any_active() false) we fall back
+    // to the datapane below.
+    bool bench_view = (strcmp(g_sel->name, "Benchmark") == 0) && bench_any_active();
+    bool bench_live_img = bench_view && g_scene_live && g_view_srv;
+
     // Background: the LIVE embedded image (DX11 scene OR cross-API readback via the
     // unified g_view_srv), else the themed screen gradient. Tools always get the dark
-    // gradient (a datapane owns the surface).
-    if (g_scene_live && g_view_srv && !g_sel->tool) {
+    // gradient (a datapane owns the surface) - except a running bench, which shows the
+    // live render.
+    if ((g_scene_live && g_view_srv && !g_sel->tool) || bench_live_img) {
         dl->AddImage((ImTextureID)(intptr_t)g_view_srv, o, mx);
     } else if (g_sel->tool) {
         // Tools keep the dark instrument surface (the datapane owns it).
@@ -2175,6 +2244,12 @@ static void draw_viewport(ImDrawList *dl, ImVec2 o, float w, float h, float fps,
         dl->AddLine(ImVec2(mx.x - 0.5f, o.y), ImVec2(mx.x - 0.5f, mx.y), PAL.line, 1.0f);
 
     if (g_sel->tool) {
+        // A running benchmark takes over the viewport: live render (drawn above) +
+        // a compact progress overlay, NOT the datapane (fix 1).
+        if (bench_view) {
+            draw_bench_overlay(dl, o, w, h);
+            return;
+        }
         // The datapane IS the content for tools: no HUD, no telemetry. Rendered over
         // the dark screen surface (already drawn above), scrolling in its own child.
         draw_tool_pane(o, w, h);

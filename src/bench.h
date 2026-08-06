@@ -4,6 +4,14 @@
 #ifndef AIO_BENCH_H
 #define AIO_BENCH_H
 
+#include <stddef.h>  // size_t
+
+// Build a full path "AIO Results\<category>\<filename>", creating the base
+// "AIO Results" folder and the "<category>" subfolder best-effort (recursive).
+// Falls back to just <filename> in the CWD if a folder can't be created, so a
+// write never fails outright. category e.g. "Benchmark" or "Disk Speed".
+void aio_results_path(const char *category, const char *filename, char *out, size_t cap);
+
 // Vsync flag shared by all backends (set from the --vsync CLI flag in WinMain):
 // 1 = present with vsync, 0 = uncapped. Read at swapchain/present time.
 extern int aio_vsync;

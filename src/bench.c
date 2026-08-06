@@ -21,6 +21,29 @@
 
 int aio_autoclose_sec = 0;
 
+// Build "AIO Results\<category>\<filename>", creating the base + category folders
+// best-effort. Falls back to just <filename> (the CWD, the old flat behavior) if a
+// directory can't be created, so a write never fails just because mkdir did.
+void aio_results_path(const char *category, const char *filename, char *out, size_t cap) {
+    if (!out || cap == 0) return;
+    if (!filename) filename = "";
+    int ok = 1;
+    if (!CreateDirectoryA("AIO Results", NULL) && GetLastError() != ERROR_ALREADY_EXISTS)
+        ok = 0;
+    char dir[256];
+    if (ok && category && category[0]) {
+        snprintf(dir, sizeof(dir), "AIO Results\\%s", category);
+        if (!CreateDirectoryA(dir, NULL) && GetLastError() != ERROR_ALREADY_EXISTS)
+            ok = 0;
+    } else {
+        snprintf(dir, sizeof(dir), "AIO Results");
+    }
+    if (ok)
+        snprintf(out, cap, "%s\\%s", dir, filename);
+    else
+        snprintf(out, cap, "%s", filename);  // CWD fallback
+}
+
 // Dismisses the result popup after aio_autoclose_sec seconds (finds it by title
 // and sends the OK command). No-op if the user already closed it.
 static DWORD WINAPI aio_box_closer(LPVOID p) {
@@ -156,7 +179,9 @@ char *aio_bench_finish_ex(const char *api_label, double total_seconds, AioBenchS
         free(sorted);
     }
 
-    FILE *f = fopen(AIO_BENCH_CSV, "w");
+    char csvpath[320];
+    aio_results_path("Benchmark", AIO_BENCH_CSV, csvpath, sizeof(csvpath));
+    FILE *f = fopen(csvpath, "w");
     if (f) {
         fprintf(f, "# AIO Graphics Test benchmark - %s\n", api_label);
         fprintf(f, "# frames,%lu,seconds,%.3f\n", (unsigned long)g_n, total_seconds);
@@ -175,7 +200,9 @@ char *aio_bench_finish_ex(const char *api_label, double total_seconds, AioBenchS
     {
         char rfn[160];
         snprintf(rfn, sizeof(rfn), "AIO-Graphics-Test_bench_%s.txt", api_label);
-        FILE *rf = fopen(rfn, "w");
+        char rpath[400];
+        aio_results_path("Benchmark", rfn, rpath, sizeof(rpath));
+        FILE *rf = fopen(rpath, "w");
         if (rf) {
             fprintf(rf, "%.0f|%.0f|%.0f", avg_fps, min_fps, max_fps);
             fclose(rf);
@@ -201,8 +228,9 @@ char *aio_bench_finish_ex(const char *api_label, double total_seconds, AioBenchS
                  "Min FPS  : %.1f\n"
                  "Max FPS  : %.1f\n"
                  "1%% low   : %.1f\n\n"
-                 "Saved: " AIO_BENCH_CSV,
-                 api_label, total_seconds, (unsigned long)g_n, avg_fps, min_fps, max_fps, low1_fps);
+                 "Saved: %s",
+                 api_label, total_seconds, (unsigned long)g_n, avg_fps, min_fps, max_fps, low1_fps,
+                 csvpath);
     }
 
     free(g_ft);

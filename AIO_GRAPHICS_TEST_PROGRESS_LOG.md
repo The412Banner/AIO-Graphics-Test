@@ -555,3 +555,37 @@ a PROVEN-writable path — Z:\usr\tmp\ (the HUD side-channel already writes hud_
 successfully in-container) — then relaunch. Also: capture FEX's GUEST RIP (0x6ffca966dc is FEX's fixed
 raise trampoline, uninformative) via WINEDEBUG=+seh,+relay or a FEX crash log; and do the apples-to-
 apples test (2.0.1 in the "AIO ImGui Test" container that ran 2.0.0; 2.0.0 in the "AIO" container).
+
+## 2026-08-06 — v2.0.1 polish: live bench render, results folders, list dead-space, -O2 restore (branch feat/aio-2.0.1)
+Context: the earlier "black screen" was a bad SHORTCUT config, NOT codegen — the app runs fine, so
+-O0 was never needed. Four changes, ONE build:
+
+- FIX 1 — LIVE bench render in the viewport. A running benchmark already renders offscreen
+  (render_scene_to_offscreen drives g_bench_active_embed / g_bench_active_scene -> g_view_srv). The
+  viewport now SHOWS that live render + a compact progress overlay (new draw_bench_overlay: test label,
+  queue x/y, progress bar from g_bench_progress, live g_bench_run_fps) instead of the Benchmark datapane
+  while bench_any_active(). draw_viewport gains `bench_view = Benchmark selected && bench_any_active()`
+  and `bench_live_img`; the image-draw condition ORs bench_live_img, and the g_sel->tool block draws the
+  overlay + returns when bench_view (else the datapane as before). Covers single Run, Run Selected,
+  Run All — each swept test shows as it runs; on finish the datapane (with results) returns.
+
+- FIX 2 — output files organized into folders. New helper aio_results_path(category, filename, out, cap)
+  in bench.c/.h: best-effort recursive CreateDirectoryA of "AIO Results\<category>", falls back to the
+  bare filename (CWD) if mkdir fails so a write never breaks. Layout now:
+    AIO Results\Benchmark\   -> AIO-Graphics-Test_bench.csv, _bench_<API>.txt (bench.c);
+                                AIO-Graphics-Test_history.txt, _bench_report_<ts>.txt (shell)
+    AIO Results\Disk Speed\  -> AIO-Graphics-Test_disk_history.txt (shell)
+  ALL read+write sites routed (disk_hist_load/record, bench_hist_load, bench_sweep_finish + report).
+  The result popup's "Saved:" line now prints the full path. gpuinfo _report.txt left as-is (per task).
+
+- FIX 3 — bench-row list dead-space + over-scroll. Root cause: screen_button/screen_checkbox (and the
+  history InvisibleButton) each SetCursorScreenPos to their widget, so at the trailing
+  ImGui::Dummy(availW, ry - lb.y + 8) the ImGui cursor sat at the LAST row, not the child origin lb —
+  the Dummy then reserved its full height from there, ~doubling content => big dead area + scroll past
+  the last row. Fix: SetCursorScreenPos(lb) immediately before each such Dummy so content height ==
+  drawn rows exactly (no scroll when rows are shorter than the child). Applied to ##benchrows, ##bhist,
+  and ##dhist (dhist draws only via the draw-list so was already correct — made explicit/robust).
+
+- BUILD FLAG — reverted -O0 -> -O2 for the ${prefix}-gcc C line and both ${prefix}-g++ C++ lines in
+  .github/workflows/build-windows.yml (the crash was the shortcut config, not codegen; -O2 gives
+  accurate benchmark numbers). Kept -fcf-protection=none -mno-avx -mno-avx2 and the startup diagnostic.
