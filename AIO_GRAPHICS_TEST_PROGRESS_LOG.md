@@ -1,4 +1,63 @@
 
+## 2026-08-05 — Phase 2 — live DX11 render IN the ImGui viewport (+ fullscreen, resize)
+Why: Phase 1 gave 1:1 chrome with a placeholder viewport. Phase 2 makes the LEFT
+viewport render the DX11 family LIVE, in-place ("exactly like the preview"): the
+selected scene draws to an offscreen texture that composites into the viewport rect,
+HUD/telemetry overlaying on top.
+- NEW src/cube_d3d11_scene.h + accessors in cube_d3d11.c (after pick_scene): expose
+  the file-static kScenes[] to the shell — aio_d3d11_scene_count/name/label,
+  _set_size, _init/_frame/_cleanup by index. init lazily loads d3dcompiler (mirrors
+  the runner) and sets g_w/g_h; the standalone aio_run_d3d11_cube path is UNCHANGED.
+  The shell drives kScenes[] against ITS OWN device — no window/swapchain/loop in
+  cube_d3d11.c. All scene custom rasterizer state is set per-frame inside *_frame
+  (verified: every RSSetState is in a _frame, none in _init), so the shell resets the
+  runner baseline (LESS depth + CULL_NONE) each frame before frame() → clean switching.
+- shell_imgui.cpp: offscreen RGBA8 color+SRV + D24S8 depth sized to the live viewport
+  rect (ensure_offscreen recreates ONLY on pixel-size change). Per frame for a DX11
+  selection: bind offscreen RTV+DSV, set viewport, LESS depth, CULL_NONE, clear to the
+  mockup screen bg, call the scene's frame(ctx,t,aspect), unbind RTV (no RTV/SRV
+  hazard), then ImDrawList::AddImage(srv) into the viewport; HUD pill + frametime
+  sparkline + telemetry draw over it via draw-list as before. HUD FPS = live present
+  rate; Resolution telemetry = live native offscreen px.
+- Selection→scene map (name-based, no struct churn): DX11 Scenes(14), Showcase
+  Demos(14), Scaling Tests(7) all map to cube kScenes[] indices; Draw-Stress rows set
+  the draw count via aio_d3d11_set_draws before init. RENDER LIVE: spin, textured,
+  instanced, tess, compute, gsexplode, atomics, dolphin, banding, drawstress 128–2048,
+  all 6 scaling cards + banding, and the auto-cruising demos (raymarch/ocean/ocean2/
+  mandelbulb/nebula/nebula2/showcase/space/desert/city/cel/matcap). The "Direct3D 11"
+  BACKEND row also embeds (spin).
+- DEFERRED (interactive input): Free Look + Planet Fly render in their default idle
+  camera — their WASD/mouse steering comes from d3d11_wndproc/g_free_hwnd which the
+  embedded path doesn't drive (guarded on g_free_hwnd==NULL, no crash). Feeding ImGui
+  viewport hover/keys into these is a Phase-3 follow-up; they do NOT block the rest.
+- Non-DX11 backends (Vulkan/OpenGL/D3D12/D3D10/D3D9/D3D8/DirectDraw-DX7): can't share
+  the DX11 device yet (Phase 3). Selecting one launches the standalone window via
+  CreateProcessA(self,"--cube <api>") (deduped; reselect to relaunch); the row shows a
+  subtle "opens window" glyph and the viewport shows a centered notice instead of HUD.
+- Tools (GPU Info/Benchmark/Disk Speed): unchanged Phase-1 placeholder (Phase-3
+  datapanes).
+- FULLSCREEN toggle (touch-first, for Winlator): translucent HUD-styled expand pill
+  pinned to the viewport top-right; tap → the live render fills the WHOLE window
+  (titlebar/toolbar/menu/telemetry/footer hidden, HUD pill kept as corner overlay);
+  the pill flips to an always-visible "Exit Fullscreen" restore pill; ALSO F11 and ESC
+  toggle (edge-triggered via WM_KEYDOWN bit-30 so key-repeat can't rapid-flip; ESC in
+  windowed still closes). ESC is NOT the only exit. Exit restores the exact windowed
+  layout — same selection + menu scroll (ImGui retains child state) + HUD/telemetry.
+- RESIZE (explicit requirement): WM_SIZE now only records a pending size; the main
+  loop applies ONE swapchain ResizeBuffers per frame (coalesced → click-drag doesn't
+  thrash). The offscreen color+depth recreate to the viewport's new PIXEL size (native
+  res, no blur) and aspect = vp_w/vp_h is recomputed every frame → square faces stay
+  square, no stretch. Fullscreen toggle is just another viewport-size change (whole
+  window) and is handled by the same path; scene keeps running (NOT re-init'd on
+  resize, matching the standalone runner). 0-w/0-h guarded (clamp ≥8px, W/Hh ≥1,
+  vpW/bodyH ≥8) so minimize / degenerate drag can't crash or divide-by-zero.
+- No workflow change (cube_d3d11_scene.h is a header; cube_d3d11.c + shell_imgui.cpp
+  already compiled with -I src). Branch feat/imgui-shell (NOT merged to main).
+- NEXT (Phase 3): cross-API embedding (D3D12/D3D10/D3D9/DX8/DDraw render-to-shared-
+  texture or interop into the shell surface; GL via WGL_NV_DX_interop or a readback
+  blit; Vulkan via a shared image), plus GPU Info / Benchmark / Disk Speed datapanes
+  in the viewport; feed ImGui viewport input into Free Look / Planet Fly.
+
 ## 2026-06-28 — DX11 SCALING TESTS scene set (compositor upscaler torture cards)
 Why: A/B the Bannerlator compositor's scaling modes (None/Linear/Nearest/SGSR/FSR/
 FSR-Fit/Sharpen/NIS). This app does NOT scale — it only renders crisp, native,

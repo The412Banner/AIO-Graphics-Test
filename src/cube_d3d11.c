@@ -4089,6 +4089,59 @@ static const D3D11Scene *pick_scene(const char *name) {
     return &kScenes[0];  // default: spin
 }
 
+// ===================== embedded scene accessors (ImGui shell) =====================
+// Let an external caller (shell_imgui.cpp) drive kScenes[] against ITS OWN device
+// and context, with no window / swapchain / loop of its own. See cube_d3d11_scene.h.
+// The standalone aio_run_d3d11_cube path above is unchanged.
+#include "cube_d3d11_scene.h"
+
+// Lazily resolve D3DCompile into g_compile (the runner does this too, before init).
+static int aio_scene_ensure_compiler(void) {
+    if (g_compile) return 1;
+    HMODULE d3dc = LoadLibraryA("d3dcompiler_47.dll");
+    if (!d3dc) d3dc = LoadLibraryA("d3dcompiler_43.dll");
+    g_compile = d3dc ? (PFN_D3DCompile)GetProcAddress(d3dc, "D3DCompile") : NULL;
+    return g_compile != NULL;
+}
+
+int aio_d3d11_scene_count(void) { return (int)(sizeof(kScenes) / sizeof(kScenes[0])); }
+
+const char *aio_d3d11_scene_name(int i) {
+    return (i >= 0 && i < aio_d3d11_scene_count()) ? kScenes[i].name : "";
+}
+const char *aio_d3d11_scene_label(int i) {
+    return (i >= 0 && i < aio_d3d11_scene_count()) ? kScenes[i].label : "";
+}
+
+void aio_d3d11_scene_set_size(int w, int h) {
+    if (w > 0) g_w = w;
+    if (h > 0) g_h = h;
+}
+
+int aio_d3d11_scene_init(int i, ID3D11Device *dev, ID3D11DeviceContext *ctx, int w, int h) {
+    if (i < 0 || i >= aio_d3d11_scene_count()) return 1;
+    if (!aio_scene_ensure_compiler()) {
+        fail_box(
+            "Could not load d3dcompiler (D3DCompile) in this container.\n\n"
+            "The HLSL shaders for the Direct3D 11 scene can't be compiled.");
+        return 1;
+    }
+    if (w > 0) g_w = w;
+    if (h > 0) g_h = h;
+    g_scene_hud[0] = '\0';
+    return kScenes[i].init(dev, ctx, w, h);
+}
+
+void aio_d3d11_scene_frame(int i, ID3D11DeviceContext *ctx, double t, float aspect) {
+    if (i < 0 || i >= aio_d3d11_scene_count()) return;
+    kScenes[i].frame(ctx, t, aspect);
+}
+
+void aio_d3d11_scene_cleanup(int i) {
+    if (i < 0 || i >= aio_d3d11_scene_count()) return;
+    kScenes[i].cleanup();
+}
+
 // ================================ the runner ================================
 int aio_run_d3d11_cube(HINSTANCE hinst, const char *scene_name) {
     const D3D11Scene *scene = pick_scene(scene_name);
