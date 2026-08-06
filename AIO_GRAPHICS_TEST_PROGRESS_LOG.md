@@ -485,3 +485,36 @@ All embedded, windowless; version bumped to v2.0.1.
   sha256 ca5ae99f44530f608f162add83d8bc68289bfbf2f522f56ea646a6d9f7dedb44 to /sdcard/Download/AIO/
   AND the shortcut target (owner 10156:1023, perms 0660). Startup diagnostic retained — a successful
   launch will now write the log through "entering main loop"/"first frame presented OK". NOT merged.
+
+## 2026-08-06 — v2.0.1 crash: -O0 diagnostic build + earliest ctor hook + UB audit
+- Correction from coordinator: -mno-avx did NOT fix it; 0x6ffca966dc is FEX's FIXED illegal-instruction
+  raise address (uninformative). Crash is still c000001d, still BEFORE WinMain (no startup.log written
+  on the -mno-avx build) — a corrupted control transfer in the guest during C++ static init (memory/
+  codegen class, same family as the Bionic-FG crash), NOT an ISA/AVX issue.
+- Two decisive diagnostics on feat/aio-2.0.1 (no app source logic changed):
+  1. Whole app rebuilt at -O0 (both ${prefix}-gcc C line and both ${prefix}-g++ C++ lines in
+     build-windows.yml; kept -fcf-protection=none and -mno-avx/-mno-avx2). -O0 often dodges codegen/
+     layout-sensitive faults; perf irrelevant for a diagnostic.
+  2. cube.c: __attribute__((constructor(101))) aio_earliest_ctor() -> aio_diag_init() + logs
+     "[ctor] static-init reached (priority 101)" DURING static init, before WinMain. Disambiguates:
+       ctor line present + no WinMain milestones => crash in a LATER constructor;
+       no line at all => crash before ANY user ctor (CRT startup / DLL load / relocation).
+- UB/overflow AUDIT of the 2.0.1 diff (2aabe54..HEAD) — findings:
+  * NO new dynamic/global constructors: every new global/static I added is POD with a constant/zero
+    initializer (g_scene_clear[3], g_view_bg/bg2, g_diag/g_diag_path, g_bhist[40]/g_dhist[40]/
+    g_bench_sweep (BHistRun/DHistRun POD), g_disk_prog (AioDiskProgress POD), g_bcheck[64],
+    g_brow_low1[64], g_bench_queue[64], g_bench_* scalars, g_bench_active_embed ptr). None have a
+    C++ ctor, so none add to the static-init ctor chain and none have a static-init-ORDER dependency.
+  * NO fixed-array overflow: g_brows has 35 entries; the parallel arrays g_bcheck/g_brow_low1/
+    g_bench_queue are [64] and every loop is bounded by g_nbrows(=35) or an explicit <64 guard.
+    History arrays capped at 40 with guards; bench_sweep.rows[40] guarded; loaders use snprintf into
+    fixed fields (ts[24]/label[40]/cls[48]) with sizeof and fgets(line[256]).
+  * NO new std::/new/function-pointer UB (embed tables are link-time-constant &kEmbed* addresses).
+  * aio_embed_clear_rgb is a plain same-module float[3] (constant init in cube.c); reads in the 7
+    embed backends are ordinary array loads.
+  => No source-level UB found; evidence points to a codegen/FEX interaction, hence the -O0 test.
+- CI GREEN both arches: run 31086706727, headSha c4612e5 (== pushed). Re-staged -O0 64-bit exe
+  (4,810,846 bytes) sha256 be22fef67baae5fa109c5a6dae6a69f1cbde4b694d4bf4734762cb286215936d to
+  /sdcard/Download/AIO/ AND the shortcut target (owner 10156:1023, perms 0660). NOT merged.
+  NEXT: user relaunches; read <exe_dir>\AIO-Graphics-Test_startup.log — presence/absence of the
+  "[ctor]" line localizes the fault; if -O0 launches clean it confirms a codegen-sensitive fault.
