@@ -471,3 +471,17 @@ All embedded, windowless; version bumped to v2.0.1.
   exe (sha ec8f2f5c659d2f5ee93ff4507513f714ede6bfad912c24eee5eaf038c8a14315) to /sdcard/Download/AIO/
   AND the shortcut target (owner 10156:1023, perms 0660). NOT merged. NEXT: user relaunches; read
   <exe_dir>\AIO-Graphics-Test_startup.log to pinpoint the exact failing milestone/module.
+
+## 2026-08-06 — v2.0.1 black-screen ROOT CAUSE + FIX: -mno-avx
+- ROOT CAUSE (device-proven): c000001d fired BEFORE WinMain — no AIO-Graphics-Test_startup.log was
+  written anywhere (aio_diag_init never ran), so the fault is in C++ static/CRT init before main.
+  Same FEX/arm64ec class as the Bionic-FG build: GCC emitted an AVX instruction the container's FEX
+  x86 JIT can't execute; the added v2.0.1 C++ (bench/disk/theme) pushed AVX into the early init path
+  where 2.0.0 had none. NOT a source bug.
+- FIX (codegen flag only, no source change): added -mno-avx -mno-avx2 to BOTH compile lines in
+  .github/workflows/build-windows.yml — ${prefix}-gcc (C) and ${prefix}-g++ (ImGui + shell_imgui);
+  kept -fcf-protection=none. Confirmed present in the CI compile commands.
+- CI GREEN both arches: run 31085867703, headSha 35a4790 (== pushed). Re-staged fixed 64-bit exe
+  sha256 ca5ae99f44530f608f162add83d8bc68289bfbf2f522f56ea646a6d9f7dedb44 to /sdcard/Download/AIO/
+  AND the shortcut target (owner 10156:1023, perms 0660). Startup diagnostic retained — a successful
+  launch will now write the log through "entering main loop"/"first frame presented OK". NOT merged.
