@@ -4221,6 +4221,529 @@ static void demo_init(struct demo *demo, int argc, char **argv) {
 // Include header required for parsing the command line options.
 #include <shellapi.h>
 
+// ===================== embedded offscreen + readback path =====================
+// A fully self-contained OFFSCREEN Vulkan cube (no surface, no swapchain, no
+// window) for the ImGui shell (see cube_embed.h). It creates its own instance +
+// device, renders one solid-colored cube to an offscreen R8G8B8A8 image, copies
+// that image into a host-visible buffer, and hands the CPU pixels to the shell,
+// which uploads them into a D3D11 texture. Independent of the LunarG demo above
+// (which stays the standalone --cube vk path) - this shares nothing but core
+// Vulkan + linmath + the embed shaders. Core Vulkan entry points referenced here
+// are linked through the CI-generated vulkan-1 import lib exactly like the demo.
+#include "cube_embed.h"
+
+typedef struct {
+    float pos[3];
+    float col[3];
+} AioVkeVertex;
+
+static struct {
+    int ready;
+    int w, h;
+    VkInstance inst;
+    VkPhysicalDevice gpu;
+    VkDevice dev;
+    uint32_t qfam;
+    VkQueue queue;
+    VkPhysicalDeviceMemoryProperties memprops;
+    VkImage color;
+    VkDeviceMemory color_mem;
+    VkImageView color_view;
+    VkImage depth;
+    VkDeviceMemory depth_mem;
+    VkImageView depth_view;
+    VkRenderPass rp;
+    VkFramebuffer fb;
+    VkBuffer vbo;
+    VkDeviceMemory vbo_mem;
+    VkBuffer ubo;
+    VkDeviceMemory ubo_mem;
+    void *ubo_ptr;
+    VkBuffer readback;
+    VkDeviceMemory readback_mem;
+    void *readback_ptr;
+    VkDescriptorSetLayout dsl;
+    VkDescriptorPool dpool;
+    VkDescriptorSet dset;
+    VkPipelineLayout playout;
+    VkPipeline pipe;
+    VkShaderModule vs, fs;
+    VkCommandPool cpool;
+    VkCommandBuffer cmd;
+    VkFence fence;
+    unsigned char *px;
+    double ms;
+    LARGE_INTEGER freq;
+} g_vke;
+
+static int aio_vke_mem_type(uint32_t typeBits, VkMemoryPropertyFlags req, uint32_t *out) {
+    for (uint32_t i = 0; i < g_vke.memprops.memoryTypeCount; i++) {
+        if ((typeBits & 1) && (g_vke.memprops.memoryTypes[i].propertyFlags & req) == req) {
+            *out = i;
+            return 1;
+        }
+        typeBits >>= 1;
+    }
+    return 0;
+}
+
+static int aio_vke_buffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags props,
+                          VkBuffer *buf, VkDeviceMemory *mem) {
+    VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                             .size = size,
+                             .usage = usage,
+                             .sharingMode = VK_SHARING_MODE_EXCLUSIVE};
+    if (vkCreateBuffer(g_vke.dev, &bi, NULL, buf) != VK_SUCCESS) return 0;
+    VkMemoryRequirements mr;
+    vkGetBufferMemoryRequirements(g_vke.dev, *buf, &mr);
+    uint32_t ti = 0;
+    if (!aio_vke_mem_type(mr.memoryTypeBits, props, &ti)) return 0;
+    VkMemoryAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                               .allocationSize = mr.size,
+                               .memoryTypeIndex = ti};
+    if (vkAllocateMemory(g_vke.dev, &ai, NULL, mem) != VK_SUCCESS) return 0;
+    return vkBindBufferMemory(g_vke.dev, *buf, *mem, 0) == VK_SUCCESS;
+}
+
+static int aio_vke_image(VkFormat fmt, VkImageUsageFlags usage, VkImage *img, VkDeviceMemory *mem) {
+    VkImageCreateInfo ii = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+                            .imageType = VK_IMAGE_TYPE_2D,
+                            .format = fmt,
+                            .extent = {(uint32_t)g_vke.w, (uint32_t)g_vke.h, 1},
+                            .mipLevels = 1,
+                            .arrayLayers = 1,
+                            .samples = VK_SAMPLE_COUNT_1_BIT,
+                            .tiling = VK_IMAGE_TILING_OPTIMAL,
+                            .usage = usage,
+                            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+                            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED};
+    if (vkCreateImage(g_vke.dev, &ii, NULL, img) != VK_SUCCESS) return 0;
+    VkMemoryRequirements mr;
+    vkGetImageMemoryRequirements(g_vke.dev, *img, &mr);
+    uint32_t ti = 0;
+    if (!aio_vke_mem_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &ti)) return 0;
+    VkMemoryAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                               .allocationSize = mr.size,
+                               .memoryTypeIndex = ti};
+    if (vkAllocateMemory(g_vke.dev, &ai, NULL, mem) != VK_SUCCESS) return 0;
+    return vkBindImageMemory(g_vke.dev, *img, *mem, 0) == VK_SUCCESS;
+}
+
+static void aio_vke_build_verts(AioVkeVertex *out) {
+    static const float f[6][4][3] = {
+        {{-1, -1, 1}, {1, -1, 1}, {1, 1, 1}, {-1, 1, 1}},
+        {{1, -1, -1}, {-1, -1, -1}, {-1, 1, -1}, {1, 1, -1}},
+        {{-1, 1, -1}, {-1, 1, 1}, {1, 1, 1}, {1, 1, -1}},
+        {{-1, -1, -1}, {1, -1, -1}, {1, -1, 1}, {-1, -1, 1}},
+        {{1, -1, -1}, {1, 1, -1}, {1, 1, 1}, {1, -1, 1}},
+        {{-1, -1, -1}, {-1, -1, 1}, {-1, 1, 1}, {-1, 1, -1}},
+    };
+    static const float col[6][3] = {
+        {0.90f, 0.20f, 0.20f}, {0.20f, 0.80f, 0.30f}, {0.25f, 0.45f, 0.95f},
+        {0.95f, 0.80f, 0.20f}, {0.85f, 0.40f, 0.90f}, {0.20f, 0.85f, 0.90f},
+    };
+    static const int idx[6] = {0, 1, 2, 0, 2, 3};
+    int v = 0;
+    for (int face = 0; face < 6; face++)
+        for (int k = 0; k < 6; k++) {
+            int ci = idx[k];
+            out[v].pos[0] = f[face][ci][0];
+            out[v].pos[1] = f[face][ci][1];
+            out[v].pos[2] = f[face][ci][2];
+            out[v].col[0] = col[face][0];
+            out[v].col[1] = col[face][1];
+            out[v].col[2] = col[face][2];
+            v++;
+        }
+}
+
+void aio_vk_embed_cleanup(void) {
+    if (g_vke.dev) vkDeviceWaitIdle(g_vke.dev);
+    if (g_vke.dev) {
+        if (g_vke.fence) vkDestroyFence(g_vke.dev, g_vke.fence, NULL);
+        if (g_vke.cpool) vkDestroyCommandPool(g_vke.dev, g_vke.cpool, NULL);
+        if (g_vke.pipe) vkDestroyPipeline(g_vke.dev, g_vke.pipe, NULL);
+        if (g_vke.playout) vkDestroyPipelineLayout(g_vke.dev, g_vke.playout, NULL);
+        if (g_vke.vs) vkDestroyShaderModule(g_vke.dev, g_vke.vs, NULL);
+        if (g_vke.fs) vkDestroyShaderModule(g_vke.dev, g_vke.fs, NULL);
+        if (g_vke.dpool) vkDestroyDescriptorPool(g_vke.dev, g_vke.dpool, NULL);
+        if (g_vke.dsl) vkDestroyDescriptorSetLayout(g_vke.dev, g_vke.dsl, NULL);
+        if (g_vke.fb) vkDestroyFramebuffer(g_vke.dev, g_vke.fb, NULL);
+        if (g_vke.rp) vkDestroyRenderPass(g_vke.dev, g_vke.rp, NULL);
+        if (g_vke.color_view) vkDestroyImageView(g_vke.dev, g_vke.color_view, NULL);
+        if (g_vke.color) vkDestroyImage(g_vke.dev, g_vke.color, NULL);
+        if (g_vke.color_mem) vkFreeMemory(g_vke.dev, g_vke.color_mem, NULL);
+        if (g_vke.depth_view) vkDestroyImageView(g_vke.dev, g_vke.depth_view, NULL);
+        if (g_vke.depth) vkDestroyImage(g_vke.dev, g_vke.depth, NULL);
+        if (g_vke.depth_mem) vkFreeMemory(g_vke.dev, g_vke.depth_mem, NULL);
+        if (g_vke.vbo) vkDestroyBuffer(g_vke.dev, g_vke.vbo, NULL);
+        if (g_vke.vbo_mem) vkFreeMemory(g_vke.dev, g_vke.vbo_mem, NULL);
+        if (g_vke.ubo_ptr) vkUnmapMemory(g_vke.dev, g_vke.ubo_mem);
+        if (g_vke.ubo) vkDestroyBuffer(g_vke.dev, g_vke.ubo, NULL);
+        if (g_vke.ubo_mem) vkFreeMemory(g_vke.dev, g_vke.ubo_mem, NULL);
+        if (g_vke.readback_ptr) vkUnmapMemory(g_vke.dev, g_vke.readback_mem);
+        if (g_vke.readback) vkDestroyBuffer(g_vke.dev, g_vke.readback, NULL);
+        if (g_vke.readback_mem) vkFreeMemory(g_vke.dev, g_vke.readback_mem, NULL);
+        vkDestroyDevice(g_vke.dev, NULL);
+    }
+    if (g_vke.inst) vkDestroyInstance(g_vke.inst, NULL);
+    if (g_vke.px) free(g_vke.px);
+    memset(&g_vke, 0, sizeof(g_vke));
+}
+
+int aio_vk_embed_init(int w, int h) {
+    if (w < 8) w = 8;
+    if (h < 8) h = 8;
+    if (g_vke.ready || g_vke.inst) aio_vk_embed_cleanup();
+    memset(&g_vke, 0, sizeof(g_vke));
+    g_vke.w = w;
+    g_vke.h = h;
+    QueryPerformanceFrequency(&g_vke.freq);
+
+    VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
+                             .pApplicationName = "AIO Graphics Test (embed)",
+                             .apiVersion = VK_API_VERSION_1_0};
+    VkInstanceCreateInfo ici = {.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &app};
+    if (vkCreateInstance(&ici, NULL, &g_vke.inst) != VK_SUCCESS) { aio_vk_embed_cleanup(); return 1; }
+
+    uint32_t ngpu = 0;
+    vkEnumeratePhysicalDevices(g_vke.inst, &ngpu, NULL);
+    if (ngpu == 0) { aio_vk_embed_cleanup(); return 1; }
+    VkPhysicalDevice gpus[16];
+    if (ngpu > 16) ngpu = 16;
+    vkEnumeratePhysicalDevices(g_vke.inst, &ngpu, gpus);
+    g_vke.gpu = gpus[0];
+    vkGetPhysicalDeviceMemoryProperties(g_vke.gpu, &g_vke.memprops);
+
+    uint32_t nqf = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(g_vke.gpu, &nqf, NULL);
+    VkQueueFamilyProperties qfp[16];
+    if (nqf > 16) nqf = 16;
+    vkGetPhysicalDeviceQueueFamilyProperties(g_vke.gpu, &nqf, qfp);
+    int found = 0;
+    for (uint32_t i = 0; i < nqf; i++)
+        if (qfp[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) { g_vke.qfam = i; found = 1; break; }
+    if (!found) { aio_vk_embed_cleanup(); return 1; }
+
+    float prio = 1.0f;
+    VkDeviceQueueCreateInfo qci = {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+                                   .queueFamilyIndex = g_vke.qfam,
+                                   .queueCount = 1,
+                                   .pQueuePriorities = &prio};
+    VkDeviceCreateInfo dci = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+                              .queueCreateInfoCount = 1,
+                              .pQueueCreateInfos = &qci};
+    if (vkCreateDevice(g_vke.gpu, &dci, NULL, &g_vke.dev) != VK_SUCCESS) { aio_vk_embed_cleanup(); return 1; }
+    vkGetDeviceQueue(g_vke.dev, g_vke.qfam, 0, &g_vke.queue);
+
+    // Offscreen color (readable via TRANSFER_SRC) + depth.
+    if (!aio_vke_image(VK_FORMAT_R8G8B8A8_UNORM,
+                       VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                       &g_vke.color, &g_vke.color_mem)) { aio_vk_embed_cleanup(); return 1; }
+    if (!aio_vke_image(VK_FORMAT_D32_SFLOAT, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, &g_vke.depth,
+                       &g_vke.depth_mem)) { aio_vk_embed_cleanup(); return 1; }
+    {
+        VkImageViewCreateInfo cv = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+                                    .image = g_vke.color,
+                                    .viewType = VK_IMAGE_VIEW_TYPE_2D,
+                                    .format = VK_FORMAT_R8G8B8A8_UNORM,
+                                    .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+        if (vkCreateImageView(g_vke.dev, &cv, NULL, &g_vke.color_view) != VK_SUCCESS) { aio_vk_embed_cleanup(); return 1; }
+        VkImageViewCreateInfo dv = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+                                    .image = g_vke.depth,
+                                    .viewType = VK_IMAGE_VIEW_TYPE_2D,
+                                    .format = VK_FORMAT_D32_SFLOAT,
+                                    .subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1}};
+        if (vkCreateImageView(g_vke.dev, &dv, NULL, &g_vke.depth_view) != VK_SUCCESS) { aio_vk_embed_cleanup(); return 1; }
+    }
+
+    // Render pass: color cleared -> stored as TRANSFER_SRC; depth cleared.
+    {
+        VkAttachmentDescription att[2] = {
+            {.format = VK_FORMAT_R8G8B8A8_UNORM,
+             .samples = VK_SAMPLE_COUNT_1_BIT,
+             .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+             .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+             .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+             .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+             .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+             .finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL},
+            {.format = VK_FORMAT_D32_SFLOAT,
+             .samples = VK_SAMPLE_COUNT_1_BIT,
+             .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+             .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+             .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+             .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+             .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+             .finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL},
+        };
+        VkAttachmentReference cref = {0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+        VkAttachmentReference dref = {1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+        VkSubpassDescription sub = {.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    .colorAttachmentCount = 1,
+                                    .pColorAttachments = &cref,
+                                    .pDepthStencilAttachment = &dref};
+        VkRenderPassCreateInfo rpi = {.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+                                      .attachmentCount = 2,
+                                      .pAttachments = att,
+                                      .subpassCount = 1,
+                                      .pSubpasses = &sub};
+        if (vkCreateRenderPass(g_vke.dev, &rpi, NULL, &g_vke.rp) != VK_SUCCESS) { aio_vk_embed_cleanup(); return 1; }
+    }
+    {
+        VkImageView views[2] = {g_vke.color_view, g_vke.depth_view};
+        VkFramebufferCreateInfo fbi = {.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+                                       .renderPass = g_vke.rp,
+                                       .attachmentCount = 2,
+                                       .pAttachments = views,
+                                       .width = (uint32_t)w,
+                                       .height = (uint32_t)h,
+                                       .layers = 1};
+        if (vkCreateFramebuffer(g_vke.dev, &fbi, NULL, &g_vke.fb) != VK_SUCCESS) { aio_vk_embed_cleanup(); return 1; }
+    }
+
+    // Vertex buffer (host visible, one upload).
+    {
+        AioVkeVertex verts[36];
+        aio_vke_build_verts(verts);
+        if (!aio_vke_buffer(sizeof(verts), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                            &g_vke.vbo, &g_vke.vbo_mem)) { aio_vk_embed_cleanup(); return 1; }
+        void *p = NULL;
+        vkMapMemory(g_vke.dev, g_vke.vbo_mem, 0, sizeof(verts), 0, &p);
+        memcpy(p, verts, sizeof(verts));
+        vkUnmapMemory(g_vke.dev, g_vke.vbo_mem);
+    }
+    // Uniform buffer (persistently mapped, updated per frame).
+    if (!aio_vke_buffer(sizeof(float) * 16, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                        &g_vke.ubo, &g_vke.ubo_mem)) { aio_vk_embed_cleanup(); return 1; }
+    vkMapMemory(g_vke.dev, g_vke.ubo_mem, 0, sizeof(float) * 16, 0, &g_vke.ubo_ptr);
+    // Readback buffer (host visible, tightly packed w*h*4).
+    if (!aio_vke_buffer((VkDeviceSize)w * h * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                        &g_vke.readback, &g_vke.readback_mem)) { aio_vk_embed_cleanup(); return 1; }
+    vkMapMemory(g_vke.dev, g_vke.readback_mem, 0, (VkDeviceSize)w * h * 4, 0, &g_vke.readback_ptr);
+
+    // Descriptor set (binding 0 = UBO, vertex stage).
+    {
+        VkDescriptorSetLayoutBinding b = {.binding = 0,
+                                          .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                                          .descriptorCount = 1,
+                                          .stageFlags = VK_SHADER_STAGE_VERTEX_BIT};
+        VkDescriptorSetLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+                                              .bindingCount = 1,
+                                              .pBindings = &b};
+        if (vkCreateDescriptorSetLayout(g_vke.dev, &li, NULL, &g_vke.dsl) != VK_SUCCESS) { aio_vk_embed_cleanup(); return 1; }
+        VkDescriptorPoolSize ps = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1};
+        VkDescriptorPoolCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+                                         .maxSets = 1,
+                                         .poolSizeCount = 1,
+                                         .pPoolSizes = &ps};
+        if (vkCreateDescriptorPool(g_vke.dev, &pi, NULL, &g_vke.dpool) != VK_SUCCESS) { aio_vk_embed_cleanup(); return 1; }
+        VkDescriptorSetAllocateInfo dai = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+                                           .descriptorPool = g_vke.dpool,
+                                           .descriptorSetCount = 1,
+                                           .pSetLayouts = &g_vke.dsl};
+        if (vkAllocateDescriptorSets(g_vke.dev, &dai, &g_vke.dset) != VK_SUCCESS) { aio_vk_embed_cleanup(); return 1; }
+        VkDescriptorBufferInfo bi = {g_vke.ubo, 0, sizeof(float) * 16};
+        VkWriteDescriptorSet wr = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                                   .dstSet = g_vke.dset,
+                                   .dstBinding = 0,
+                                   .descriptorCount = 1,
+                                   .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                                   .pBufferInfo = &bi};
+        vkUpdateDescriptorSets(g_vke.dev, 1, &wr, 0, NULL);
+    }
+
+    // Shaders + pipeline.
+    {
+        static const uint32_t vs_code[] = {
+#include "embed_cube.vert.inc"
+        };
+        static const uint32_t fs_code[] = {
+#include "embed_cube.frag.inc"
+        };
+        VkShaderModuleCreateInfo vsi = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+                                        .codeSize = sizeof(vs_code),
+                                        .pCode = vs_code};
+        VkShaderModuleCreateInfo fsi = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+                                        .codeSize = sizeof(fs_code),
+                                        .pCode = fs_code};
+        if (vkCreateShaderModule(g_vke.dev, &vsi, NULL, &g_vke.vs) != VK_SUCCESS ||
+            vkCreateShaderModule(g_vke.dev, &fsi, NULL, &g_vke.fs) != VK_SUCCESS) { aio_vk_embed_cleanup(); return 1; }
+
+        VkPipelineLayoutCreateInfo pli = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+                                          .setLayoutCount = 1,
+                                          .pSetLayouts = &g_vke.dsl};
+        if (vkCreatePipelineLayout(g_vke.dev, &pli, NULL, &g_vke.playout) != VK_SUCCESS) { aio_vk_embed_cleanup(); return 1; }
+
+        VkPipelineShaderStageCreateInfo stages[2] = {
+            {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+             .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = g_vke.vs, .pName = "main"},
+            {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+             .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = g_vke.fs, .pName = "main"},
+        };
+        VkVertexInputBindingDescription vib = {0, sizeof(AioVkeVertex), VK_VERTEX_INPUT_RATE_VERTEX};
+        VkVertexInputAttributeDescription via[2] = {
+            {0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0},
+            {1, 0, VK_FORMAT_R32G32B32_SFLOAT, sizeof(float) * 3},
+        };
+        VkPipelineVertexInputStateCreateInfo vi = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
+                                                   .vertexBindingDescriptionCount = 1,
+                                                   .pVertexBindingDescriptions = &vib,
+                                                   .vertexAttributeDescriptionCount = 2,
+                                                   .pVertexAttributeDescriptions = via};
+        VkPipelineInputAssemblyStateCreateInfo ia = {.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
+                                                     .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST};
+        VkViewport vp = {0, 0, (float)w, (float)h, 0.0f, 1.0f};
+        VkRect2D sc = {{0, 0}, {(uint32_t)w, (uint32_t)h}};
+        VkPipelineViewportStateCreateInfo vps = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
+                                                 .viewportCount = 1, .pViewports = &vp,
+                                                 .scissorCount = 1, .pScissors = &sc};
+        VkPipelineRasterizationStateCreateInfo rs = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+                                                     .polygonMode = VK_POLYGON_MODE_FILL,
+                                                     .cullMode = VK_CULL_MODE_NONE,
+                                                     .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE,
+                                                     .lineWidth = 1.0f};
+        VkPipelineMultisampleStateCreateInfo ms = {.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
+                                                   .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT};
+        VkPipelineDepthStencilStateCreateInfo ds = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+                                                    .depthTestEnable = VK_TRUE,
+                                                    .depthWriteEnable = VK_TRUE,
+                                                    .depthCompareOp = VK_COMPARE_OP_LESS};
+        VkPipelineColorBlendAttachmentState cba = {.colorWriteMask = 0xf};
+        VkPipelineColorBlendStateCreateInfo cb = {.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+                                                  .attachmentCount = 1, .pAttachments = &cba};
+        VkGraphicsPipelineCreateInfo gp = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+                                           .stageCount = 2, .pStages = stages,
+                                           .pVertexInputState = &vi, .pInputAssemblyState = &ia,
+                                           .pViewportState = &vps, .pRasterizationState = &rs,
+                                           .pMultisampleState = &ms, .pDepthStencilState = &ds,
+                                           .pColorBlendState = &cb, .layout = g_vke.playout,
+                                           .renderPass = g_vke.rp, .subpass = 0};
+        if (vkCreateGraphicsPipelines(g_vke.dev, VK_NULL_HANDLE, 1, &gp, NULL, &g_vke.pipe) != VK_SUCCESS) { aio_vk_embed_cleanup(); return 1; }
+    }
+
+    // Command pool + buffer + fence.
+    {
+        VkCommandPoolCreateInfo cpi = {.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+                                       .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+                                       .queueFamilyIndex = g_vke.qfam};
+        if (vkCreateCommandPool(g_vke.dev, &cpi, NULL, &g_vke.cpool) != VK_SUCCESS) { aio_vk_embed_cleanup(); return 1; }
+        VkCommandBufferAllocateInfo cai = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+                                           .commandPool = g_vke.cpool,
+                                           .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+                                           .commandBufferCount = 1};
+        if (vkAllocateCommandBuffers(g_vke.dev, &cai, &g_vke.cmd) != VK_SUCCESS) { aio_vk_embed_cleanup(); return 1; }
+        VkFenceCreateInfo fi = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        if (vkCreateFence(g_vke.dev, &fi, NULL, &g_vke.fence) != VK_SUCCESS) { aio_vk_embed_cleanup(); return 1; }
+    }
+
+    g_vke.px = (unsigned char *)malloc((size_t)w * h * 4);
+    if (!g_vke.px) { aio_vk_embed_cleanup(); return 1; }
+    g_vke.ready = 1;
+    return 0;
+}
+
+int aio_vk_embed_resize(int w, int h) {
+    if (w < 8) w = 8;
+    if (h < 8) h = 8;
+    if (g_vke.ready && w == g_vke.w && h == g_vke.h) return 0;
+    aio_vk_embed_cleanup();
+    return aio_vk_embed_init(w, h);
+}
+
+void aio_vk_embed_render(double t) {
+    if (!g_vke.ready) return;
+    LARGE_INTEGER a, b;
+    QueryPerformanceCounter(&a);
+    int w = g_vke.w, h = g_vke.h;
+    float aspect = (h > 0) ? (float)w / (float)h : 1.0f;
+
+    // MVP for Vulkan clip space (z in [0,1], y flipped), column-major for std140.
+    mat4x4 proj, view, model, ident, rotY, rotX, mv, mvp;
+    memset(proj, 0, sizeof(proj));
+    float zn = 0.1f, zf = 100.0f;
+    float ff = 1.0f / tanf(0.6f * 0.5f);
+    proj[0][0] = ff / aspect;
+    proj[1][1] = -ff;
+    proj[2][2] = zf / (zn - zf);
+    proj[2][3] = -1.0f;
+    proj[3][2] = (zn * zf) / (zn - zf);
+    mat4x4_translate(view, 0.0f, 0.0f, -6.5f);
+    // NB: linmath's mat4x4_mul is not alias-safe, so rotate into a DISTINCT dest
+    // (from an identity source) - rotate_Y(rotY, rotY, ..) would corrupt the matrix.
+    mat4x4_identity(ident);
+    mat4x4_rotate_Y(rotY, ident, (float)t * 0.6f);
+    mat4x4_rotate_X(rotX, ident, 0.5f);
+    mat4x4_mul(model, rotY, rotX);
+    mat4x4_mul(mv, view, model);
+    mat4x4_mul(mvp, proj, mv);
+    memcpy(g_vke.ubo_ptr, mvp, sizeof(float) * 16);
+
+    vkResetCommandBuffer(g_vke.cmd, 0);
+    VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                   .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
+    vkBeginCommandBuffer(g_vke.cmd, &bi);
+    VkClearValue clears[2];
+    clears[0].color.float32[0] = 8 / 255.0f;
+    clears[0].color.float32[1] = 12 / 255.0f;
+    clears[0].color.float32[2] = 17 / 255.0f;
+    clears[0].color.float32[3] = 1.0f;
+    clears[1].depthStencil.depth = 1.0f;
+    clears[1].depthStencil.stencil = 0;
+    VkRenderPassBeginInfo rbi = {.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+                                 .renderPass = g_vke.rp,
+                                 .framebuffer = g_vke.fb,
+                                 .renderArea = {{0, 0}, {(uint32_t)w, (uint32_t)h}},
+                                 .clearValueCount = 2,
+                                 .pClearValues = clears};
+    vkCmdBeginRenderPass(g_vke.cmd, &rbi, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdBindPipeline(g_vke.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g_vke.pipe);
+    vkCmdBindDescriptorSets(g_vke.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g_vke.playout, 0, 1,
+                            &g_vke.dset, 0, NULL);
+    VkDeviceSize off = 0;
+    vkCmdBindVertexBuffers(g_vke.cmd, 0, 1, &g_vke.vbo, &off);
+    vkCmdDraw(g_vke.cmd, 36, 1, 0, 0);
+    vkCmdEndRenderPass(g_vke.cmd);
+
+    // Copy the (now TRANSFER_SRC_OPTIMAL) color image into the readback buffer.
+    VkBufferImageCopy region = {.bufferOffset = 0,
+                                .bufferRowLength = 0,
+                                .bufferImageHeight = 0,
+                                .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                                .imageOffset = {0, 0, 0},
+                                .imageExtent = {(uint32_t)w, (uint32_t)h, 1}};
+    vkCmdCopyImageToBuffer(g_vke.cmd, g_vke.color, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           g_vke.readback, 1, &region);
+    vkEndCommandBuffer(g_vke.cmd);
+
+    VkSubmitInfo si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                       .commandBufferCount = 1,
+                       .pCommandBuffers = &g_vke.cmd};
+    vkResetFences(g_vke.dev, 1, &g_vke.fence);
+    vkQueueSubmit(g_vke.queue, 1, &si, g_vke.fence);
+    vkWaitForFences(g_vke.dev, 1, &g_vke.fence, VK_TRUE, UINT64_MAX);
+
+    memcpy(g_vke.px, g_vke.readback_ptr, (size_t)w * h * 4);
+    QueryPerformanceCounter(&b);
+    g_vke.ms = (double)(b.QuadPart - a.QuadPart) * 1000.0 / (double)g_vke.freq.QuadPart;
+}
+
+int aio_vk_embed_get_frame(AioEmbedFrame *out) {
+    if (!g_vke.ready || !g_vke.px || !out) return 1;
+    out->pixels = g_vke.px;
+    out->width = g_vke.w;
+    out->height = g_vke.h;
+    out->pitch = g_vke.w * 4;
+    out->fmt = AIO_EMBED_FMT_RGBA8;
+    out->flip_y = 0;
+    return 0;
+}
+
+double aio_vk_embed_gpu_ms(void) { return g_vke.ms; }
+
 // AIO Graphics Test helpers for WinMain argument handling.
 static int aio_cli_has(int argc, char **argv, const char *flag) {
     for (int i = 0; i < argc; i++)

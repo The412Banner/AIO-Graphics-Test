@@ -37,6 +37,7 @@
 #include <string.h>
 
 #include "cube_ddraw.h"
+#include "cube_embed.h"
 #include "hud.h"
 #include "bench.h"
 #include "watchdog.h"
@@ -548,4 +549,227 @@ int aio_run_ddraw_cube(HINSTANCE hinst, const char *variant) {
     IDirectDraw7_Release(dd);
     DestroyWindow(hwnd);
     return rc_code;
+}
+
+// ==================== Embedded offscreen + readback path ====================
+// Renders the Direct3D 7 (DirectDraw) cube to an OFFSCREEN, CPU-lockable
+// surface on its own DirectDraw device (no primary surface, no window blit),
+// then LOCKs that surface to read back its 32-bit pixels for the ImGui shell.
+// See cube_embed.h for the AioEmbed contract. Additive to the standalone runner.
+
+static IDirectDraw7 *g_dd;
+static IDirectDrawSurface7 *g_rt;    // offscreen 3D render target (lockable)
+static IDirectDrawSurface7 *g_zbuf;  // attached depth buffer
+static IDirect3D7 *g_d3d;
+static IDirect3DDevice7 *g_dev;
+static HWND g_embed_hwnd;            // hidden cooperative-level window
+static unsigned char *g_embed_px;    // CPU readback buffer (w*h*4, BGRA)
+static int g_embed_w, g_embed_h;
+static double g_embed_ms;            // last per-frame render+readback cost
+static LARGE_INTEGER g_embed_freq;
+
+int aio_ddraw_embed_init(int w, int h) {
+    if (w < 8) w = 8;
+    if (h < 8) h = 8;
+    if (g_dd || g_dev || g_embed_px) aio_ddraw_embed_cleanup();
+
+    QueryPerformanceFrequency(&g_embed_freq);
+
+    HINSTANCE hinst = GetModuleHandleA(NULL);
+    static int class_registered = 0;
+    const char *cls = "AIODDrawEmbed";
+    if (!class_registered) {
+        WNDCLASSA wc;
+        memset(&wc, 0, sizeof(wc));
+        wc.lpfnWndProc = DefWindowProcA;
+        wc.hInstance = hinst;
+        wc.lpszClassName = cls;
+        RegisterClassA(&wc);
+        class_registered = 1;
+    }
+
+    g_embed_hwnd = CreateWindowA(cls, "", WS_POPUP, 0, 0, w, h, NULL, NULL, hinst, NULL);
+    if (!g_embed_hwnd) return 1;
+
+    HMODULE ddlib = LoadLibraryA("ddraw.dll");
+    PFN_DirectDrawCreateEx p_create =
+        ddlib ? (PFN_DirectDrawCreateEx)GetProcAddress(ddlib, "DirectDrawCreateEx") : NULL;
+    if (!p_create) {
+        DestroyWindow(g_embed_hwnd);
+        g_embed_hwnd = NULL;
+        return 1;
+    }
+
+    if (FAILED(p_create(NULL, (void **)&g_dd, &IID_IDirectDraw7, NULL)) || !g_dd) {
+        aio_ddraw_embed_cleanup();
+        return 1;
+    }
+    // DirectDrawCreateEx still needs a cooperative window even in NORMAL mode.
+    IDirectDraw7_SetCooperativeLevel(g_dd, g_embed_hwnd, DDSCL_NORMAL);
+
+    // Offscreen 3D render target with an explicit 32-bit RGB (Blue at byte 0)
+    // pixel format, in system memory so it is reliably CPU-lockable. Retry in
+    // video memory if system-memory creation is refused.
+    DDSURFACEDESC2 rd;
+    memset(&rd, 0, sizeof(rd));
+    rd.dwSize = sizeof(rd);
+    rd.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
+    rd.dwWidth = w;
+    rd.dwHeight = h;
+    rd.ddpfPixelFormat.dwSize = sizeof(rd.ddpfPixelFormat);
+    rd.ddpfPixelFormat.dwFlags = DDPF_RGB;
+    rd.ddpfPixelFormat.dwRGBBitCount = 32;
+    rd.ddpfPixelFormat.dwRBitMask = 0x00FF0000;
+    rd.ddpfPixelFormat.dwGBitMask = 0x0000FF00;
+    rd.ddpfPixelFormat.dwBBitMask = 0x000000FF;
+    rd.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_3DDEVICE | DDSCAPS_SYSTEMMEMORY;
+    if (FAILED(IDirectDraw7_CreateSurface(g_dd, &rd, &g_rt, NULL)) || !g_rt) {
+        g_rt = NULL;
+        rd.ddsCaps.dwCaps = DDSCAPS_OFFSCREENPLAIN | DDSCAPS_3DDEVICE | DDSCAPS_VIDEOMEMORY;
+        if (FAILED(IDirectDraw7_CreateSurface(g_dd, &rd, &g_rt, NULL)) || !g_rt) {
+            g_rt = NULL;
+            aio_ddraw_embed_cleanup();
+            return 1;
+        }
+    }
+
+    // IDirect3D7 for enumeration / device creation.
+    if (FAILED(IDirectDraw7_QueryInterface(g_dd, &IID_IDirect3D7, (void **)&g_d3d)) || !g_d3d) {
+        g_d3d = NULL;
+        aio_ddraw_embed_cleanup();
+        return 1;
+    }
+
+    // Z-buffer: enumerate a supported format, create + attach to the target,
+    // preferring system memory to match the (typically system-memory) target.
+    ZSearch zs;
+    memset(&zs, 0, sizeof(zs));
+    IDirect3D7_EnumZBufferFormats(g_d3d, &IID_IDirect3DTnLHalDevice, enum_z_cb, &zs);
+    if (!zs.found)
+        IDirect3D7_EnumZBufferFormats(g_d3d, &IID_IDirect3DHALDevice, enum_z_cb, &zs);
+    if (zs.found) {
+        DDSURFACEDESC2 zd;
+        memset(&zd, 0, sizeof(zd));
+        zd.dwSize = sizeof(zd);
+        zd.dwFlags = DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT;
+        zd.dwWidth = w;
+        zd.dwHeight = h;
+        zd.ddsCaps.dwCaps = DDSCAPS_ZBUFFER | DDSCAPS_SYSTEMMEMORY;
+        zd.ddpfPixelFormat = zs.pf;
+        if (FAILED(IDirectDraw7_CreateSurface(g_dd, &zd, &g_zbuf, NULL))) {
+            g_zbuf = NULL;
+            zd.ddsCaps.dwCaps = DDSCAPS_ZBUFFER | DDSCAPS_VIDEOMEMORY;
+            IDirectDraw7_CreateSurface(g_dd, &zd, &g_zbuf, NULL);
+        }
+        if (g_zbuf) IDirectDrawSurface7_AddAttachedSurface(g_rt, g_zbuf);
+    }
+
+    // Device: T&L HAL, then HAL, then RGB (software) against the offscreen target.
+    static const IID *kDevs[] = {&IID_IDirect3DTnLHalDevice, &IID_IDirect3DHALDevice,
+                                 &IID_IDirect3DRGBDevice};
+    for (int i = 0; i < 3 && !g_dev; i++)
+        IDirect3D7_CreateDevice(g_d3d, kDevs[i], g_rt, &g_dev);
+    if (!g_dev) {
+        aio_ddraw_embed_cleanup();
+        return 1;
+    }
+
+    D3DVIEWPORT7 vp;
+    memset(&vp, 0, sizeof(vp));
+    vp.dwWidth = w;
+    vp.dwHeight = h;
+    vp.dvMinZ = 0.0f;
+    vp.dvMaxZ = 1.0f;
+    IDirect3DDevice7_SetViewport(g_dev, &vp);
+
+    IDirect3DDevice7_SetRenderState(g_dev, D3DRENDERSTATE_ZENABLE, D3DZB_TRUE);
+    IDirect3DDevice7_SetRenderState(g_dev, D3DRENDERSTATE_LIGHTING, FALSE);
+    IDirect3DDevice7_SetRenderState(g_dev, D3DRENDERSTATE_CULLMODE, D3DCULL_NONE);
+
+    g_embed_px = (unsigned char *)malloc((size_t)w * (size_t)h * 4);
+    if (!g_embed_px) {
+        aio_ddraw_embed_cleanup();
+        return 1;
+    }
+    g_embed_w = w;
+    g_embed_h = h;
+    g_embed_ms = 0.0;
+    return 0;
+}
+
+int aio_ddraw_embed_resize(int w, int h) {
+    if (w < 8) w = 8;
+    if (h < 8) h = 8;
+    if (g_dev && w == g_embed_w && h == g_embed_h) return 0;
+    aio_ddraw_embed_cleanup();
+    return aio_ddraw_embed_init(w, h);
+}
+
+void aio_ddraw_embed_render(double t) {
+    if (!g_dev) return;
+
+    LARGE_INTEGER qstart, qend;
+    QueryPerformanceCounter(&qstart);
+
+    float aspect = (g_embed_h > 0) ? (float)g_embed_w / (float)g_embed_h : 1.0f;
+    float a = (float)t * 0.6f;
+    Mat4 model = mat_mul(mat_rotate(0, 1, 0, a), mat_rotate(1, 0, 0, 0.5f));
+    D3DMATRIX world = to_d3dmat(model);
+    D3DMATRIX view = to_d3dmat(mat_translate(0, 0, -6.5f));
+    D3DMATRIX proj = to_d3dmat(mat_perspective(0.6f, aspect, 0.1f, 100.0f));
+
+    D3DLVERTEX verts[36];
+    build_lvert_cube(verts);
+
+    IDirect3DDevice7_Clear(g_dev, 0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, 0x00080C11, 1.0f, 0);
+    if (SUCCEEDED(IDirect3DDevice7_BeginScene(g_dev))) {
+        IDirect3DDevice7_SetTransform(g_dev, D3DTRANSFORMSTATE_WORLD, &world);
+        IDirect3DDevice7_SetTransform(g_dev, D3DTRANSFORMSTATE_VIEW, &view);
+        IDirect3DDevice7_SetTransform(g_dev, D3DTRANSFORMSTATE_PROJECTION, &proj);
+        IDirect3DDevice7_DrawPrimitive(g_dev, D3DPT_TRIANGLELIST, D3DFVF_LVERTEX, verts, 36, 0);
+        IDirect3DDevice7_EndScene(g_dev);
+    }
+
+    // Read back: lock the offscreen target and copy rows honoring the pitch.
+    DDSURFACEDESC2 sd;
+    memset(&sd, 0, sizeof(sd));
+    sd.dwSize = sizeof(sd);
+    if (g_embed_px &&
+        SUCCEEDED(IDirectDrawSurface7_Lock(g_rt, NULL, &sd, DDLOCK_WAIT | DDLOCK_READONLY, NULL))) {
+        for (int y = 0; y < g_embed_h; y++)
+            memcpy(g_embed_px + (size_t)y * g_embed_w * 4,
+                   (BYTE *)sd.lpSurface + (size_t)y * sd.lPitch, (size_t)g_embed_w * 4);
+        IDirectDrawSurface7_Unlock(g_rt, NULL);
+    }
+
+    QueryPerformanceCounter(&qend);
+    g_embed_ms = (g_embed_freq.QuadPart > 0)
+                     ? (double)(qend.QuadPart - qstart.QuadPart) * 1000.0 / (double)g_embed_freq.QuadPart
+                     : 0.0;
+}
+
+int aio_ddraw_embed_get_frame(AioEmbedFrame *out) {
+    if (!g_embed_px || !out) return 1;
+    out->pixels = g_embed_px;
+    out->width = g_embed_w;
+    out->height = g_embed_h;
+    out->pitch = g_embed_w * 4;
+    out->fmt = AIO_EMBED_FMT_BGRA8;  // 32-bit RGB masks put Blue at byte 0
+    out->flip_y = 0;
+    return 0;
+}
+
+double aio_ddraw_embed_gpu_ms(void) { return g_embed_ms; }
+
+void aio_ddraw_embed_cleanup(void) {
+    if (g_dev) { IDirect3DDevice7_Release(g_dev); g_dev = NULL; }
+    if (g_zbuf) { IDirectDrawSurface7_Release(g_zbuf); g_zbuf = NULL; }
+    if (g_d3d) { IDirect3D7_Release(g_d3d); g_d3d = NULL; }
+    if (g_rt) { IDirectDrawSurface7_Release(g_rt); g_rt = NULL; }
+    if (g_dd) { IDirectDraw7_Release(g_dd); g_dd = NULL; }
+    if (g_embed_px) { free(g_embed_px); g_embed_px = NULL; }
+    if (g_embed_hwnd) { DestroyWindow(g_embed_hwnd); g_embed_hwnd = NULL; }
+    g_embed_w = 0;
+    g_embed_h = 0;
+    g_embed_ms = 0.0;
 }

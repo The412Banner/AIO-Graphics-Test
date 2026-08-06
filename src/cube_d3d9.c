@@ -27,6 +27,7 @@
 #include <string.h>
 
 #include "cube_d3d9.h"
+#include "cube_embed.h"
 #include "hud.h"
 #include "bench.h"
 #include "watchdog.h"
@@ -321,4 +322,210 @@ int aio_run_d3d9_cube(HINSTANCE hinst) {
     IDirect3D9_Release(d3d);
     DestroyWindow(hwnd);
     return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Embedded offscreen + readback path (AioEmbed contract, see cube_embed.h).
+//
+// Renders one D3D9 frame to an OFFSCREEN render target on a private device that
+// owns a HIDDEN popup window (never shown), reads the pixels back through a
+// SYSTEMMEM plain surface, and publishes them to the ImGui shell. No MessageBox,
+// no ShowWindow, d3d9.dll loaded dynamically. Reuses this file's static helpers
+// (build_cube, Mat4 math, to_d3d, Vertex, CUBE_FVF, PFN_Direct3DCreate9).
+// ---------------------------------------------------------------------------
+
+static IDirect3D9        *g_embed_d3d = NULL;
+static IDirect3DDevice9  *g_embed_dev = NULL;
+static IDirect3DSurface9 *g_embed_rt = NULL;   // offscreen render target (lockable=FALSE)
+static IDirect3DSurface9 *g_embed_ds = NULL;   // matching depth-stencil surface
+static IDirect3DSurface9 *g_embed_sys = NULL;  // SYSTEMMEM readback surface
+static unsigned char     *g_embed_px = NULL;   // CPU pixel buffer, w*h*4 bytes
+static int                g_embed_w = 0, g_embed_h = 0;
+static HWND               g_embed_hwnd = NULL; // hidden device window
+static HMODULE            g_embed_lib = NULL;  // dynamically loaded d3d9.dll
+static double             g_embed_ms = 0.0;
+
+int aio_dx9_embed_init(int w, int h) {
+    HINSTANCE hinst;
+    const char *cls = "AIOD3D9Embed";
+    static int class_registered = 0;
+    PFN_Direct3DCreate9 p_create;
+    D3DPRESENT_PARAMETERS pp;
+    HRESULT hr;
+
+    if (g_embed_dev || g_embed_px || g_embed_hwnd) aio_dx9_embed_cleanup();
+
+    if (w < 8) w = 8;
+    if (h < 8) h = 8;
+
+    hinst = GetModuleHandleA(NULL);
+
+    if (!class_registered) {
+        WNDCLASSA wc;
+        memset(&wc, 0, sizeof(wc));
+        wc.lpfnWndProc = DefWindowProcA;
+        wc.hInstance = hinst;
+        wc.lpszClassName = cls;
+        RegisterClassA(&wc);
+        class_registered = 1;
+    }
+
+    g_embed_hwnd = CreateWindowA(cls, "", WS_POPUP, 0, 0, w, h, NULL, NULL, hinst, NULL);
+    if (!g_embed_hwnd) { aio_dx9_embed_cleanup(); return 1; }
+
+    g_embed_lib = LoadLibraryA("d3d9.dll");
+    p_create = g_embed_lib
+                   ? (PFN_Direct3DCreate9)GetProcAddress(g_embed_lib, "Direct3DCreate9")
+                   : NULL;
+    if (!p_create) { aio_dx9_embed_cleanup(); return 1; }
+
+    g_embed_d3d = p_create(D3D_SDK_VERSION);
+    if (!g_embed_d3d) { aio_dx9_embed_cleanup(); return 1; }
+
+    memset(&pp, 0, sizeof(pp));
+    pp.Windowed = TRUE;
+    pp.SwapEffect = D3DSWAPEFFECT_DISCARD;
+    pp.BackBufferFormat = D3DFMT_X8R8G8B8;
+    pp.BackBufferWidth = w;
+    pp.BackBufferHeight = h;
+    pp.EnableAutoDepthStencil = TRUE;
+    pp.AutoDepthStencilFormat = D3DFMT_D24S8;
+    pp.hDeviceWindow = g_embed_hwnd;
+    pp.PresentationInterval = D3DPRESENT_INTERVAL_IMMEDIATE;
+
+    hr = IDirect3D9_CreateDevice(g_embed_d3d, D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, g_embed_hwnd,
+                                 D3DCREATE_HARDWARE_VERTEXPROCESSING, &pp, &g_embed_dev);
+    if (FAILED(hr) || !g_embed_dev)
+        hr = IDirect3D9_CreateDevice(g_embed_d3d, D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, g_embed_hwnd,
+                                     D3DCREATE_SOFTWARE_VERTEXPROCESSING, &pp, &g_embed_dev);
+    if (FAILED(hr) || !g_embed_dev) { aio_dx9_embed_cleanup(); return 1; }
+
+    IDirect3DDevice9_SetRenderState(g_embed_dev, D3DRS_ZENABLE, D3DZB_TRUE);
+    IDirect3DDevice9_SetRenderState(g_embed_dev, D3DRS_LIGHTING, FALSE);
+    IDirect3DDevice9_SetRenderState(g_embed_dev, D3DRS_CULLMODE, D3DCULL_NONE);
+
+    hr = IDirect3DDevice9_CreateRenderTarget(g_embed_dev, w, h, D3DFMT_X8R8G8B8,
+                                             D3DMULTISAMPLE_NONE, 0, FALSE, &g_embed_rt, NULL);
+    if (FAILED(hr) || !g_embed_rt) { aio_dx9_embed_cleanup(); return 1; }
+
+    hr = IDirect3DDevice9_CreateDepthStencilSurface(g_embed_dev, w, h, D3DFMT_D24S8,
+                                                    D3DMULTISAMPLE_NONE, 0, TRUE, &g_embed_ds, NULL);
+    if (FAILED(hr) || !g_embed_ds) { aio_dx9_embed_cleanup(); return 1; }
+
+    if (FAILED(IDirect3DDevice9_SetRenderTarget(g_embed_dev, 0, g_embed_rt))) {
+        aio_dx9_embed_cleanup();
+        return 1;
+    }
+    if (FAILED(IDirect3DDevice9_SetDepthStencilSurface(g_embed_dev, g_embed_ds))) {
+        aio_dx9_embed_cleanup();
+        return 1;
+    }
+
+    hr = IDirect3DDevice9_CreateOffscreenPlainSurface(g_embed_dev, w, h, D3DFMT_X8R8G8B8,
+                                                      D3DPOOL_SYSTEMMEM, &g_embed_sys, NULL);
+    if (FAILED(hr) || !g_embed_sys) { aio_dx9_embed_cleanup(); return 1; }
+
+    g_embed_px = (unsigned char *)malloc((size_t)w * (size_t)h * 4);
+    if (!g_embed_px) { aio_dx9_embed_cleanup(); return 1; }
+
+    g_embed_w = w;
+    g_embed_h = h;
+    return 0;
+}
+
+int aio_dx9_embed_resize(int w, int h) {
+    if (w < 8) w = 8;
+    if (h < 8) h = 8;
+    if (w == g_embed_w && h == g_embed_h) return 0;
+    aio_dx9_embed_cleanup();
+    return aio_dx9_embed_init(w, h);
+}
+
+void aio_dx9_embed_render(double t) {
+    static LARGE_INTEGER qpf;
+    static int qpf_init = 0;
+    LARGE_INTEGER t0, t1;
+    float aspect, a;
+    Mat4 model;
+    D3DMATRIX world, view, proj;
+    Vertex verts[36];
+    D3DVIEWPORT9 vp;
+
+    if (!g_embed_dev) return;
+
+    if (!qpf_init) { QueryPerformanceFrequency(&qpf); qpf_init = 1; }
+    QueryPerformanceCounter(&t0);
+
+    aspect = (g_embed_h > 0) ? (float)g_embed_w / (float)g_embed_h : 1.0f;
+
+    a = (float)t * 0.6f;
+    model = mat_mul(mat_rotate(0, 1, 0, a), mat_rotate(1, 0, 0, 0.5f));
+    world = to_d3d(model);
+    view = to_d3d(mat_translate(0, 0, -6.5f));
+    proj = to_d3d(mat_perspective(0.6f, aspect, 0.1f, 100.0f));
+
+    build_cube(verts);
+
+    vp.X = 0;
+    vp.Y = 0;
+    vp.Width = (DWORD)g_embed_w;
+    vp.Height = (DWORD)g_embed_h;
+    vp.MinZ = 0.0f;
+    vp.MaxZ = 1.0f;
+    IDirect3DDevice9_SetViewport(g_embed_dev, &vp);
+
+    IDirect3DDevice9_Clear(g_embed_dev, 0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER,
+                           D3DCOLOR_XRGB(8, 12, 17), 1.0f, 0);
+    if (SUCCEEDED(IDirect3DDevice9_BeginScene(g_embed_dev))) {
+        IDirect3DDevice9_SetTransform(g_embed_dev, D3DTS_WORLD, &world);
+        IDirect3DDevice9_SetTransform(g_embed_dev, D3DTS_VIEW, &view);
+        IDirect3DDevice9_SetTransform(g_embed_dev, D3DTS_PROJECTION, &proj);
+        IDirect3DDevice9_SetFVF(g_embed_dev, CUBE_FVF);
+        IDirect3DDevice9_DrawPrimitiveUP(g_embed_dev, D3DPT_TRIANGLELIST, 12, verts,
+                                         sizeof(Vertex));
+        IDirect3DDevice9_EndScene(g_embed_dev);
+    }
+
+    if (SUCCEEDED(IDirect3DDevice9_GetRenderTargetData(g_embed_dev, g_embed_rt, g_embed_sys))) {
+        D3DLOCKED_RECT lr;
+        if (SUCCEEDED(IDirect3DSurface9_LockRect(g_embed_sys, &lr, NULL, D3DLOCK_READONLY))) {
+            int y;
+            for (y = 0; y < g_embed_h; y++)
+                memcpy(g_embed_px + (size_t)y * g_embed_w * 4,
+                       (BYTE *)lr.pBits + (size_t)y * lr.Pitch, (size_t)g_embed_w * 4);
+            IDirect3DSurface9_UnlockRect(g_embed_sys);
+        }
+    }
+
+    QueryPerformanceCounter(&t1);
+    g_embed_ms = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)qpf.QuadPart;
+}
+
+int aio_dx9_embed_get_frame(AioEmbedFrame *out) {
+    if (!g_embed_px) return 1;
+    out->pixels = g_embed_px;
+    out->width = g_embed_w;
+    out->height = g_embed_h;
+    out->pitch = g_embed_w * 4;
+    out->fmt = AIO_EMBED_FMT_BGRA8;
+    out->flip_y = 0;
+    return 0;
+}
+
+double aio_dx9_embed_gpu_ms(void) {
+    return g_embed_ms;
+}
+
+void aio_dx9_embed_cleanup(void) {
+    if (g_embed_sys) { IDirect3DSurface9_Release(g_embed_sys); g_embed_sys = NULL; }
+    if (g_embed_ds)  { IDirect3DSurface9_Release(g_embed_ds);  g_embed_ds = NULL; }
+    if (g_embed_rt)  { IDirect3DSurface9_Release(g_embed_rt);  g_embed_rt = NULL; }
+    if (g_embed_dev) { IDirect3DDevice9_Release(g_embed_dev);  g_embed_dev = NULL; }
+    if (g_embed_d3d) { IDirect3D9_Release(g_embed_d3d);        g_embed_d3d = NULL; }
+    if (g_embed_px)  { free(g_embed_px);                       g_embed_px = NULL; }
+    if (g_embed_lib) { FreeLibrary(g_embed_lib);              g_embed_lib = NULL; }
+    if (g_embed_hwnd) { DestroyWindow(g_embed_hwnd);           g_embed_hwnd = NULL; }
+    g_embed_w = 0;
+    g_embed_h = 0;
+    g_embed_ms = 0.0;
 }

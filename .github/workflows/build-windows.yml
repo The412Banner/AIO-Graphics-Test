@@ -52,6 +52,9 @@ jobs:
           glslangValidator -V -x -o src/cube.vert.inc src/cube.vert
           glslangValidator -V -x -o src/cube.frag.inc src/cube.frag
           glslangValidator -V -x -o src/cube_phong.frag.inc src/cube_phong.frag
+          # Phase 4: the Vulkan embed cube's own solid-color shaders (aio_vk_embed_*).
+          glslangValidator -V -x -o src/embed_cube.vert.inc src/embed_cube.vert
+          glslangValidator -V -x -o src/embed_cube.frag.inc src/embed_cube.frag
 
       - name: Compile resources (app icon)
         run: ${{ matrix.prefix }}-windres -I src src/app.rc -o app_res.o

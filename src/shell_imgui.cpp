@@ -37,6 +37,8 @@
 #include "shell_imgui.h"
 #include "menu.h"  // AIO_VERSION
 #include "cube_d3d11_scene.h"  // Phase 2: embed the DX11 scene registry in the viewport
+#include "cube_embed.h"        // Phase 4: embed the cross-API backends via offscreen readback
+#include <algorithm>           // std::sort for the percentile lows
 
 // C tool backends (no extern "C" guards of their own -> wrap for C++ linkage).
 extern "C" {
@@ -408,6 +410,142 @@ static bool g_present_vsync = true;
 static int g_bench_active_scene = -1;
 static int g_bench_active_draws = 0;
 
+// ===========================================================================
+// Phase 4: authoritative FPS counter - a faithful C++ port of the emulator's
+// com.winlator.star.widget.FpsCounter, fed ONCE PER PRESENTED FRAME (each shell
+// Present() - the frame that reaches glass), so AIO's HUD number matches the
+// emulator's Fusion HUD. Counter math only. Single-threaded (the shell loop), so
+// no locking. Time source is QPC milliseconds (double) in place of Android's
+// SystemClock.elapsedRealtime(). GPU-timestamp deltas are NOT used for the FPS
+// headline - that was the ~30,000-"fps" bug (it timed a 0.03 ms draw, not a frame).
+// ===========================================================================
+struct FpsCounter {
+    static const int COMPUTE_WINDOW_MS = 500;
+    static const int READING_INTERVAL_MS = 1000;
+    static const int STALE_FPS_MS = 1500;
+    static const int RING_CAP = 8192;
+    static constexpr float MAX_SANE_MS = 10000.0f;
+
+    double lastTime = 0.0;
+    int frameCount = 0;
+    float lastFPS = 0.0f;
+
+    float ring[RING_CAP];
+    int head = 0;
+    int size = 0;
+    double lastFrameTime = 0.0;
+
+    double sessionStart = 0.0;
+    int readingCount = 0;
+    int maxFPS = 0;
+    int minFPS = 0x7fffffff;
+    double lastReadingTime = 0.0;
+    long long fpsSum = 0;
+
+    // Cached percentile lows (shared by the three getters at the HUD's ~1s cadence).
+    float low1 = 0, low01 = 0, low001 = 0, minMs = 0, maxMs = 0;
+
+    void reset() {
+        lastTime = 0.0; frameCount = 0; lastFPS = 0.0f;
+        head = 0; size = 0; lastFrameTime = 0.0;
+        sessionStart = 0.0; readingCount = 0; maxFPS = 0; minFPS = 0x7fffffff;
+        lastReadingTime = 0.0; fpsSum = 0;
+        low1 = low01 = low001 = minMs = maxMs = 0.0f;
+        memset(ring, 0, sizeof(ring));  // clear so the sparkline starts fresh per test
+    }
+
+    void tick(double now) {
+        if (lastTime == 0.0) { lastTime = now; sessionStart = now; }
+        if (lastFrameTime != 0.0) {
+            float interval = (float)(now - lastFrameTime);
+            if (interval > 0.0f && interval < MAX_SANE_MS) {
+                ring[head] = interval;
+                head = (head + 1) % RING_CAP;
+                if (size < RING_CAP) size++;
+            }
+        }
+        lastFrameTime = now;
+        if (now >= lastTime + COMPUTE_WINDOW_MS) {
+            lastFPS = (float)(frameCount * 1000) / (float)(now - lastTime);
+            if (lastReadingTime == 0.0 || now >= lastReadingTime + READING_INTERVAL_MS) {
+                int cur = (int)(lastFPS + 0.5f);
+                readingCount++;
+                fpsSum += cur;
+                if (cur > maxFPS) maxFPS = cur;
+                if (cur > 1 && cur < minFPS) minFPS = cur;
+                lastReadingTime = now;
+            }
+            lastTime = now;
+            frameCount = 0;
+        }
+        frameCount++;
+    }
+
+    float currentFPS(double now) const {
+        if (lastFrameTime != 0.0 && now - lastFrameTime > STALE_FPS_MS) return 0.0f;
+        return lastFPS;
+    }
+    float avgFPS() const { return readingCount == 0 ? 0.0f : (float)fpsSum / (float)readingCount; }
+    int getMinFPS() const { return minFPS == 0x7fffffff ? 0 : minFPS; }
+    int getMaxFPS() const { return maxFPS; }
+
+    // Recompute percentile lows from the ring (ascending sort; high index = slow
+    // frame = low fps). Cheap at the HUD's ~1s cadence.
+    void computeLows() {
+        int n = size;
+        if (n < 2) { low1 = low01 = low001 = minMs = maxMs = 0.0f; return; }
+        static float tmp[RING_CAP];
+        int start = (head - n + RING_CAP) % RING_CAP;
+        for (int i = 0; i < n; i++) tmp[i] = ring[(start + i) % RING_CAP];
+        std::sort(tmp, tmp + n);
+        low1 = fpsAtPct(tmp, n, 0.99);
+        low01 = fpsAtPct(tmp, n, 0.999);
+        low001 = fpsAtPct(tmp, n, 0.9999);
+        minMs = tmp[0];
+        maxMs = tmp[n - 1];
+    }
+    static float fpsAtPct(const float *asc, int n, double p) {
+        int idx = (int)(p * (n - 1) + 0.5);
+        if (idx < 0) idx = 0;
+        if (idx >= n) idx = n - 1;
+        float ft = asc[idx];
+        return ft > 0.0f ? 1000.0f / ft : 0.0f;
+    }
+};
+static FpsCounter g_fps;
+static double g_lows_last = 0.0;  // last time computeLows() ran (throttle to ~1s)
+
+// ---- cross-API embedded backends (Vulkan / GL / DX12 / DX10 / DX9 / DX8 / DDraw) ----
+// Each renders one frame to its own offscreen target, reads it back to CPU pixels,
+// and the shell uploads those into g_embed_tex (a dynamic D3D11 texture) sampled by
+// ImGui::Image - the readback baseline that guarantees every API embeds.
+static const AioEmbedBackend kEmbedVk    = {aio_vk_embed_init, aio_vk_embed_resize, aio_vk_embed_render, aio_vk_embed_get_frame, aio_vk_embed_gpu_ms, aio_vk_embed_cleanup};
+static const AioEmbedBackend kEmbedGl    = {aio_gl_embed_init, aio_gl_embed_resize, aio_gl_embed_render, aio_gl_embed_get_frame, aio_gl_embed_gpu_ms, aio_gl_embed_cleanup};
+static const AioEmbedBackend kEmbedDx12  = {aio_dx12_embed_init, aio_dx12_embed_resize, aio_dx12_embed_render, aio_dx12_embed_get_frame, aio_dx12_embed_gpu_ms, aio_dx12_embed_cleanup};
+static const AioEmbedBackend kEmbedDx10  = {aio_dx10_embed_init, aio_dx10_embed_resize, aio_dx10_embed_render, aio_dx10_embed_get_frame, aio_dx10_embed_gpu_ms, aio_dx10_embed_cleanup};
+static const AioEmbedBackend kEmbedDx9   = {aio_dx9_embed_init, aio_dx9_embed_resize, aio_dx9_embed_render, aio_dx9_embed_get_frame, aio_dx9_embed_gpu_ms, aio_dx9_embed_cleanup};
+static const AioEmbedBackend kEmbedDx8   = {aio_dx8_embed_init, aio_dx8_embed_resize, aio_dx8_embed_render, aio_dx8_embed_get_frame, aio_dx8_embed_gpu_ms, aio_dx8_embed_cleanup};
+static const AioEmbedBackend kEmbedDdraw = {aio_ddraw_embed_init, aio_ddraw_embed_resize, aio_ddraw_embed_render, aio_ddraw_embed_get_frame, aio_ddraw_embed_gpu_ms, aio_ddraw_embed_cleanup};
+// Indexed by kBackends[] position: Vulkan, OpenGL, DX12, DX11(NULL=DX11-scene path),
+// DX10, DX9, DX8, DirectDraw.
+static const AioEmbedBackend *kBackendEmbed[8] = {
+    &kEmbedVk, &kEmbedGl, &kEmbedDx12, nullptr, &kEmbedDx10, &kEmbedDx9, &kEmbedDx8, &kEmbedDdraw};
+
+// Shell-owned dynamic texture the cross-API readback pixels upload into.
+static ID3D11Texture2D *g_embed_tex = nullptr;
+static ID3D11ShaderResourceView *g_embed_srv = nullptr;
+static int g_embed_tw = 0, g_embed_th = 0;
+static const AioEmbedBackend *g_embed_active = nullptr;  // currently-init'd backend
+static bool g_embed_ok = false;                          // last init/resize succeeded
+static int g_embed_bw = 0, g_embed_bh = 0;               // backend target size
+static double g_embed_ms = 0.0;                          // backend's own render ms
+
+// Unified viewport source, set each frame by render_scene_to_offscreen: the DX11
+// offscreen SRV, or the cross-API readback SRV. draw_viewport composites whichever.
+static ID3D11ShaderResourceView *g_view_srv = nullptr;
+static int g_view_w = 0, g_view_h = 0;
+static double g_view_gpu_ms = 0.0;  // backend/scene GPU cost (secondary HUD stat, 0 = n/a)
+
 static void create_timing_queries() {
     if (!g_dev) return;
     D3D11_QUERY_DESC qd;
@@ -542,31 +680,100 @@ static int cube_scene_for(const Test *t, const char *group, int *draws_out) {
     return -1;  // tools
 }
 
-// For a Graphics-Backends row that can't be embedded, the --cube launch arg
-// (nullptr = embeddable D3D11 / not a backend). Used to mark rows + launch.
-static const char *launch_arg_for(const Test *t, const char *group) {
+// A Graphics-Backends row -> its cross-API embed driver (nullptr = the DX11 row,
+// which uses the in-device DX11-scene path, or a non-backend row). Phase 4: these
+// embed IN the viewport via offscreen readback; nothing launches a window.
+static const AioEmbedBackend *embed_backend_for(const Test *t, const char *group) {
     if (strcmp(group, "Graphics Backends") != 0) return nullptr;
-    static const char *arg[8] = {"vk", "gl", "dx12", nullptr, "dx10", "dx9", "dx8", "dx7"};
     int li = 0;
     const Group *grp = sel_group_and_index(t, group, &li);
     if (!grp || grp->items != kBackends) return nullptr;
-    return arg[li];
+    if (li < 0 || li >= 8) return nullptr;
+    return kBackendEmbed[li];  // NULL for DX11 (index 3)
 }
 
-static void launch_backend(const char *arg) {
-    char self[MAX_PATH];
-    if (!GetModuleFileNameA(nullptr, self, MAX_PATH)) return;
-    char cmd[MAX_PATH + 64];
-    snprintf(cmd, sizeof(cmd), "\"%s\" --cube %s", self, arg);
-    STARTUPINFOA si;
-    ZeroMemory(&si, sizeof(si));
-    si.cb = sizeof(si);
-    PROCESS_INFORMATION pi;
-    ZeroMemory(&pi, sizeof(pi));
-    if (CreateProcessA(self, cmd, nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
-        CloseHandle(pi.hThread);
-        CloseHandle(pi.hProcess);
+// Recreate the shell-side upload texture on size change (guard 0-size).
+static bool ensure_embed_tex(int w, int h) {
+    if (w < 8) w = 8;
+    if (h < 8) h = 8;
+    if (w == g_embed_tw && h == g_embed_th && g_embed_srv) return true;
+    if (g_embed_srv) { g_embed_srv->Release(); g_embed_srv = nullptr; }
+    if (g_embed_tex) { g_embed_tex->Release(); g_embed_tex = nullptr; }
+    g_embed_tw = g_embed_th = 0;
+    D3D11_TEXTURE2D_DESC td;
+    ZeroMemory(&td, sizeof(td));
+    td.Width = (UINT)w;
+    td.Height = (UINT)h;
+    td.MipLevels = 1;
+    td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_DYNAMIC;
+    td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    td.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    if (FAILED(g_dev->CreateTexture2D(&td, nullptr, &g_embed_tex))) return false;
+    if (FAILED(g_dev->CreateShaderResourceView(g_embed_tex, nullptr, &g_embed_srv))) return false;
+    g_embed_tw = w;
+    g_embed_th = h;
+    return true;
+}
+
+// Copy a backend's CPU readback frame into g_embed_tex, honoring pitch, BGRA->RGBA
+// swizzle, and the GL bottom-up flip.
+static void upload_embed_frame(const AioEmbedFrame *fr) {
+    D3D11_MAPPED_SUBRESOURCE ms;
+    if (FAILED(g_ctx->Map(g_embed_tex, 0, D3D11_MAP_WRITE_DISCARD, 0, &ms))) return;
+    int w = fr->width, h = fr->height;
+    const unsigned char *base = (const unsigned char *)fr->pixels;
+    for (int y = 0; y < h; ++y) {
+        int srcRow = fr->flip_y ? (h - 1 - y) : y;
+        const unsigned char *s = base + (size_t)srcRow * fr->pitch;
+        unsigned char *d = (unsigned char *)ms.pData + (size_t)y * ms.RowPitch;
+        if (fr->fmt == AIO_EMBED_FMT_BGRA8) {
+            for (int x = 0; x < w; ++x) {
+                d[0] = s[2]; d[1] = s[1]; d[2] = s[0]; d[3] = s[3];
+                d += 4; s += 4;
+            }
+        } else {
+            memcpy(d, s, (size_t)w * 4);
+        }
     }
+    g_ctx->Unmap(g_embed_tex, 0);
+}
+
+static void destroy_embed() {
+    if (g_embed_active) { g_embed_active->cleanup(); g_embed_active = nullptr; }
+    if (g_embed_srv) { g_embed_srv->Release(); g_embed_srv = nullptr; }
+    if (g_embed_tex) { g_embed_tex->Release(); g_embed_tex = nullptr; }
+    g_embed_tw = g_embed_th = 0;
+    g_embed_bw = g_embed_bh = 0;
+    g_embed_ok = false;
+}
+
+// Drive the selected cross-API backend: (re)init/resize to the viewport pixel size,
+// render one frame, read it back, upload into g_embed_tex. Sets g_view_* / g_scene_live.
+static void drive_embed_backend(const AioEmbedBackend *bk, int w, int h, double t) {
+    if (bk != g_embed_active) {
+        if (g_embed_active) g_embed_active->cleanup();
+        g_embed_active = bk;
+        g_embed_ok = (bk->init(w, h) == 0);
+        g_embed_bw = w; g_embed_bh = h;
+    } else if (g_embed_ok && (w != g_embed_bw || h != g_embed_bh)) {
+        g_embed_ok = (bk->resize(w, h) == 0);
+        g_embed_bw = w; g_embed_bh = h;
+    }
+    if (!g_embed_ok) { g_scene_live = false; return; }
+    bk->render(t);
+    AioEmbedFrame fr;
+    if (bk->get_frame(&fr) != 0 || !fr.pixels) { g_scene_live = false; return; }
+    g_embed_ms = bk->gpu_ms();
+    if (!ensure_embed_tex(fr.width, fr.height)) { g_scene_live = false; return; }
+    upload_embed_frame(&fr);
+    g_view_srv = g_embed_srv;
+    g_view_w = fr.width;
+    g_view_h = fr.height;
+    g_view_gpu_ms = g_embed_ms;
+    g_scene_live = true;
 }
 
 // Render the selected embeddable scene into the offscreen target at (w,h) pixels.
@@ -582,8 +789,27 @@ static void render_scene_to_offscreen(int w, int h, double t) {
     } else {
         sc = cube_scene_for(g_sel, g_sel_group, &draws);
     }
+
+    // Cross-API backend selected (and no in-process bench running): drive its own
+    // offscreen render + readback into the shell's upload texture. Tear down any
+    // live DX11 scene first so the two paths never fight over the device.
+    const AioEmbedBackend *bk =
+        (g_bench_active_scene < 0) ? embed_backend_for(g_sel, g_sel_group) : nullptr;
+    if (bk) {
+        if (g_cur_scene >= 0) { aio_d3d11_scene_cleanup(g_cur_scene); g_cur_scene = -1; }
+        drive_embed_backend(bk, w, h, t);
+        return;
+    }
+    // Not a cross-API backend: release any backend still holding a device.
+    if (g_embed_active) {
+        g_embed_active->cleanup();
+        g_embed_active = nullptr;
+        g_embed_ok = false;
+        g_embed_bw = g_embed_bh = 0;
+    }
+
     if (sc < 0) {
-        // Not an in-process scene (launched backend / tool): tear down any live one.
+        // Tool / non-render selection: tear down any live DX11 scene.
         if (g_cur_scene >= 0) { aio_d3d11_scene_cleanup(g_cur_scene); g_cur_scene = -1; }
         g_scene_live = false;
         return;
@@ -626,6 +852,10 @@ static void render_scene_to_offscreen(int w, int h, double t) {
     // Unbind the RTV so the texture can be sampled as an SRV by ImGui (no hazard).
     ID3D11RenderTargetView *nullrtv = nullptr;
     g_ctx->OMSetRenderTargets(1, &nullrtv, nullptr);
+    g_view_srv = g_off_srv;
+    g_view_w = g_off_w;
+    g_view_h = g_off_h;
+    g_view_gpu_ms = g_scene_timed ? g_scene_ms : 0.0;
     g_scene_live = true;
 }
 
@@ -1351,15 +1581,14 @@ static void draw_tool_pane(ImVec2 o, float w, float h) {
     else if (strcmp(g_sel->name, "Disk Speed") == 0) draw_disk_pane(o, w, h);
 }
 
-static void draw_viewport(ImDrawList *dl, ImVec2 o, float w, float h, float fps,
-                          const float *ring, int cap, int offset, bool full) {
+static void draw_viewport(ImDrawList *dl, ImVec2 o, float w, float h, float fps, bool full) {
     ImVec2 mx(o.x + w, o.y + h);
 
-    // Background: the LIVE scene image, else the themed screen gradient. Tools always
-    // get the dark gradient (a datapane owns the surface; any offscreen bench scene
-    // rendered for timing must not bleed through behind the cards).
-    if (g_scene_live && g_off_srv && !g_sel->tool) {
-        dl->AddImage((ImTextureID)(intptr_t)g_off_srv, o, mx);
+    // Background: the LIVE embedded image (DX11 scene OR cross-API readback via the
+    // unified g_view_srv), else the themed screen gradient. Tools always get the dark
+    // gradient (a datapane owns the surface).
+    if (g_scene_live && g_view_srv && !g_sel->tool) {
+        dl->AddImage((ImTextureID)(intptr_t)g_view_srv, o, mx);
     } else {
         dl->AddRectFilledMultiColor(o, mx, PAL.scr2, PAL.scr2, PAL.scr, PAL.scr);
     }
@@ -1373,16 +1602,15 @@ static void draw_viewport(ImDrawList *dl, ImVec2 o, float w, float h, float fps,
         return;
     }
 
-    // Non-DX11 backends can't share this device yet (Phase 3): they run in their own
-    // standalone window (launched on selection). Show a centered notice, no HUD.
-    const char *larg = launch_arg_for(g_sel, g_sel_group);
-    if (larg) {
-        char line1[64];
-        snprintf(line1, sizeof(line1), "%s runs in its own window", g_sel->api);
+    // Every backend now embeds in the viewport. If a cross-API backend failed to
+    // create a device (no ICD / DLL set), show an inline notice - never a pop-out.
+    if (g_embed_active && !g_embed_ok) {
+        char line1[80];
+        snprintf(line1, sizeof(line1), "%s is unavailable in this container", g_sel->api);
         float tw = text_w(g_ui_big, 22.0f, line1);
         text_at(dl, g_ui_big, 22.0f, ImVec2(o.x + (w - tw) * 0.5f, o.y + h * 0.5f - 30.0f),
                 PAL.scrText, line1);
-        const char *sub = "opens on selection - reselect to relaunch";
+        const char *sub = "the DXVK / VKD3D / driver for this API isn't present";
         float sw = text_w(g_mono, 12.0f, sub);
         text_at(dl, g_mono, 12.0f, ImVec2(o.x + (w - sw) * 0.5f, o.y + h * 0.5f + 6.0f),
                 PAL.scrMuted, sub);
@@ -1408,18 +1636,25 @@ static void draw_viewport(ImDrawList *dl, ImVec2 o, float w, float h, float fps,
     bold_at(dl, g_mono_bg, 20.0f, ImVec2(fx, hcy - 11.0f), PAL.accentInk, fpsbuf);
     text_at(dl, g_mono_sm, 10.0f, ImVec2(fx + fpsW + 4.0f, hcy - 1.0f), PAL.scrMuted, "FPS");
 
-    // frametime label + sparkline + ms line
+    // frametime label + sparkline + lows line (all from the FpsCounter = REAL presented
+    // frames, matching the emulator's Fusion HUD). The GPU-draw cost is a small
+    // SECONDARY stat only, never the big number.
     ImVec2 slp(o.x + 14.0f, hp.y + pillH + 10.0f);
     caps_at(dl, g_mono_sm, 9.5f, slp, PAL.scrMuted, "Frametime", 2.0f);
     ImVec2 spk(o.x + 14.0f, slp.y + 15.0f);
-    draw_sparkline(dl, spk, ImVec2(200.0f, 34.0f), ring, cap, offset);
-    // ms / avg / 1% from the ring buffer
-    float sum = 0.0f, worst = 0.0f;
-    for (int i = 0; i < cap; ++i) { sum += ring[i]; if (ring[i] > worst) worst = ring[i]; }
-    float avg = sum / cap, cur = fps > 0 ? 1000.0f / fps : 0.0f;
-    char msbuf[80];
-    snprintf(msbuf, sizeof(msbuf), "%.2f ms   avg %.2f   1%% %.2f", cur, avg, worst);
+    draw_sparkline(dl, spk, ImVec2(200.0f, 34.0f), g_fps.ring, FpsCounter::RING_CAP, g_fps.head);
+    float cur = fps > 0.0f ? 1000.0f / fps : 0.0f;
+    char msbuf[96];
+    snprintf(msbuf, sizeof(msbuf), "%.2f ms   avg %.0f   1%% %.0f   0.1%% %.0f", cur, g_fps.avgFPS(),
+             g_fps.low1, g_fps.low01);
     text_at(dl, g_mono_sm, 11.0f, ImVec2(spk.x + 2.0f, spk.y + 40.0f), PAL.scrMuted, msbuf);
+    if (g_view_gpu_ms > 0.0001) {
+        // Secondary stat only: GPU draw cost (DX11 scenes) / offscreen render cost
+        // (cross-API backends). NEVER the big FPS number - that's the FpsCounter.
+        char gbuf[48];
+        snprintf(gbuf, sizeof(gbuf), "GPU %.2f ms", g_view_gpu_ms);
+        text_at(dl, g_mono_sm, 10.0f, ImVec2(spk.x + 2.0f, spk.y + 55.0f), PAL.scrMuted, gbuf);
+    }
 
     // ---- telemetry strip (bottom) ---- (hidden in fullscreen; HUD stays)
     if (full) return;
@@ -1428,9 +1663,9 @@ static void draw_viewport(ImDrawList *dl, ImVec2 o, float w, float h, float fps,
                                 IM_COL32(4, 7, 10, 210), IM_COL32(4, 7, 10, 210));
     struct Cell { const char *k; const char *v; bool path; };
     char resbuf[24];
-    // Live offscreen size (native pixels) when a scene is running, else the rect.
-    if (g_scene_live && g_off_w > 0)
-        snprintf(resbuf, sizeof(resbuf), "%d x %d", g_off_w, g_off_h);
+    // Live embedded target size (native pixels) when a scene is running, else the rect.
+    if (g_scene_live && g_view_w > 0)
+        snprintf(resbuf, sizeof(resbuf), "%d x %d", g_view_w, g_view_h);
     else
         snprintf(resbuf, sizeof(resbuf), "%d x %d", (int)w, (int)h);
     // Present reflects the live shell present-mode toggle when a scene is embedded.
@@ -1489,12 +1724,7 @@ static void menu_row(const Test *t, const char *group, float w) {
         text_at(dl, g_mono, 10.5f, ImVec2(mx.x - fw - 10.0f, cy - 5.5f), PAL.muted, fb);
         fpsRight = mx.x - fw - 10.0f;
     }
-    // Subtle "opens a separate window" marker for the non-embeddable backends.
-    if (launch_arg_for(t, group)) {
-        float gx = fpsRight - 18.0f, gy = cy - 5.0f;
-        dl->AddRect(ImVec2(gx, gy), ImVec2(gx + 11.0f, gy + 9.0f), PAL.faint, 1.5f, 0, 1.0f);
-        dl->AddLine(ImVec2(gx, gy + 2.5f), ImVec2(gx + 11.0f, gy + 2.5f), PAL.faint, 1.0f);
-    }
+    (void)fpsRight;  // (Phase 4: every backend embeds now - the pop-out marker is gone.)
     if (clicked) { g_sel = t; g_sel_group = group; }
 }
 
@@ -1656,7 +1886,12 @@ extern "C" int aio_run_imgui_shell(HINSTANCE hInstance) {
     wc.lpszClassName = "AIOImGuiShell";
     RegisterClassExA(&wc);
 
-    HWND hwnd = CreateWindowA(wc.lpszClassName, "AIO Graphics Test", WS_OVERLAPPEDWINDOW, 100, 100,
+    // Empty native caption: the shell draws its OWN titlebar ("AIO Graphics Test" +
+    // version) as ImGui chrome. Under Wine the native window caption would otherwise
+    // render a duplicate "AIO Graphics Test" that overlaps/bleeds through the top-left
+    // of the ImGui titlebar. We also never SetWindowText a live FPS string (the FPS
+    // lives only in the in-viewport HUD), so nothing dynamic can bleed here.
+    HWND hwnd = CreateWindowA(wc.lpszClassName, "", WS_OVERLAPPEDWINDOW, 100, 100,
                               1180, 720, nullptr, nullptr, hInstance, nullptr);
     if (!hwnd) {
         UnregisterClassA(wc.lpszClassName, hInstance);
@@ -1707,7 +1942,7 @@ extern "C" int aio_run_imgui_shell(HINSTANCE hInstance) {
     QueryPerformanceCounter(&prev);
     start = prev;
     float fps_smooth = 0.0f;
-    const Test *last_launched = nullptr;  // dedupe standalone-backend launches
+    (void)fps_smooth;  // (Phase 4: HUD fps now comes from g_fps, not this EMA.)
 
     bool done = false;
     while (!done) {
@@ -1779,25 +2014,14 @@ extern "C" int aio_run_imgui_shell(HINSTANCE hInstance) {
         ImVec2 view_o = g_fullscreen ? o : ImVec2(o.x, bodyTop);
         render_scene_to_offscreen((int)rvW, (int)rvH, t_sec);
 
-        // HUD source: the scene's REAL GPU render rate when timed + live (reads like
-        // the standalone cube), else the shell's present rate. Present mode is shown
-        // honestly in the telemetry strip.
-        float hud_fps = fps_smooth;
-        const float *hud_ring = frametimes;
-        int hud_off = ft_offset;
-        if (g_scene_live && g_scene_timed && g_scene_ms > 0.0001) {
-            if (!g_scene_ft_init) {
-                for (int i = 0; i < 120; ++i) g_scene_ft[i] = (float)g_scene_ms;
-                g_scene_ft_init = true;
-            }
-            g_scene_ft[g_scene_ft_off] = (float)g_scene_ms;
-            g_scene_ft_off = (g_scene_ft_off + 1) % 120;
-            float f = (float)(1000.0 / g_scene_ms);
-            g_scene_fps_smooth = g_scene_fps_smooth <= 0.0f ? f : g_scene_fps_smooth * 0.9f + f * 0.1f;
-            hud_fps = g_scene_fps_smooth;
-            hud_ring = g_scene_ft;
-            hud_off = g_scene_ft_off;
-        }
+        // HUD fps = the authoritative FpsCounter (real presented frames, fed once per
+        // Present below), NOT a GPU-timestamp delta. Reset when the selected test
+        // changes so the graph + session stats scope to the current backend/scene.
+        double now_ms = (double)now.QuadPart * 1000.0 / (double)freq.QuadPart;
+        static const Test *hud_test = nullptr;
+        if (g_sel != hud_test) { g_fps.reset(); hud_test = g_sel; }
+        if (now_ms - g_lows_last > 1000.0) { g_fps.computeLows(); g_lows_last = now_ms; }
+        float hud_fps = g_fps.currentFPS(now_ms);
 
         // Route viewport input into the interactive demos (Free Look / Planet Fly)
         // only while the pointer is over the viewport, so ImGui controls aren't hijacked.
@@ -1832,20 +2056,19 @@ extern "C" int aio_run_imgui_shell(HINSTANCE hInstance) {
         }
 
         if (g_fullscreen) {
-            draw_viewport(dl, o, W, Hh, hud_fps, hud_ring, 120, hud_off, true);
+            draw_viewport(dl, o, W, Hh, hud_fps, true);
         } else {
             dl->AddRectFilled(o, ImVec2(o.x + W, o.y + Hh), PAL.bg, 0);
             draw_titlebar(dl, o, W, TITLE_H);
             draw_toolbar(dl, ImVec2(o.x, o.y + TITLE_H), W, TOOL_H);
-            draw_viewport(dl, ImVec2(o.x, bodyTop), vpW, bodyH, hud_fps, hud_ring, 120,
-                          hud_off, false);
+            draw_viewport(dl, ImVec2(o.x, bodyTop), vpW, bodyH, hud_fps, false);
             draw_menu(dl, ImVec2(o.x + vpW, bodyTop), PANEL_W, bodyH);
             draw_footer(dl, ImVec2(o.x, o.y + Hh - FOOT_H), W, FOOT_H);
         }
 
-        // Fullscreen toggle control, pinned to the active viewport's top-right. Only
-        // shown for the embeddable in-viewport render (not tools / launched backends).
-        bool can_fs = !g_sel->tool && !launch_arg_for(g_sel, g_sel_group);
+        // Fullscreen toggle control, pinned to the active viewport's top-right. Every
+        // backend embeds now, so it's shown for any non-tool selection.
+        bool can_fs = !g_sel->tool;
         if (can_fs || g_fullscreen) {
             float fsRight = g_fullscreen ? (o.x + W) : (o.x + vpW);
             float fsTop = g_fullscreen ? o.y : bodyTop;
@@ -1854,15 +2077,6 @@ extern "C" int aio_run_imgui_shell(HINSTANCE hInstance) {
 
         ImGui::End();
         ImGui::PopStyleVar();
-
-        // Launch a standalone window for a non-embeddable backend on selection change
-        // (deduped so it doesn't relaunch every frame; reselecting relaunches).
-        const char *larg = launch_arg_for(g_sel, g_sel_group);
-        if (larg) {
-            if (g_sel != last_launched) { launch_backend(larg); last_launched = g_sel; }
-        } else {
-            last_launched = nullptr;
-        }
 
         ImGui::Render();
         const float clear[4] = {0.027f, 0.039f, 0.055f, 1.0f};
@@ -1873,9 +2087,12 @@ extern "C" int aio_run_imgui_shell(HINSTANCE hInstance) {
         // it samples the scene as fast as the GPU allows.
         UINT sync = (g_present_vsync && g_bench_ip_row < 0) ? 1 : 0;
         g_swap->Present(sync, 0);
+        // Count the frame that just reached glass (drives the whole HUD).
+        g_fps.tick(now_ms);
     }
 
     if (g_cur_scene >= 0) aio_d3d11_scene_cleanup(g_cur_scene);
+    destroy_embed();  // cleanup any live cross-API backend + upload texture
     destroy_offscreen();
     if (g_off_dss) { g_off_dss->Release(); g_off_dss = nullptr; }
     if (g_off_rs) { g_off_rs->Release(); g_off_rs = nullptr; }

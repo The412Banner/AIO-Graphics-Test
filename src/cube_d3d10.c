@@ -30,6 +30,7 @@
 #include <string.h>
 
 #include "cube_d3d10.h"
+#include "cube_embed.h"
 #include "hud.h"
 #include "bench.h"
 #include "watchdog.h"
@@ -461,3 +462,302 @@ int aio_run_d3d10_cube(HINSTANCE hinst) {
     DestroyWindow(hwnd);
     return 0;
 }
+
+// ---------------------------------------------------------------------------
+// Embedded offscreen + CPU-readback backend (AioEmbed contract, cube_embed.h).
+//
+// D3D10 needs NO window: we create a headless HARDWARE device with
+// D3D10CreateDevice, render one frame into an offscreen R8G8B8A8 render-target,
+// CopyResource it into a STAGING texture, Map that for CPU read and copy the
+// rows into g_embed_px. The shell uploads those pixels into its own D3D11
+// texture (RGBA8, top-down), exactly like the DX11 path.
+// ---------------------------------------------------------------------------
+
+typedef HRESULT(WINAPI *PFN_D3D10CreateDevice)(IDXGIAdapter *, D3D10_DRIVER_TYPE, HMODULE, UINT,
+                                               UINT, ID3D10Device **);
+
+static ID3D10Device *g_dev;
+static ID3D10Texture2D *g_rt;
+static ID3D10RenderTargetView *g_rtv;
+static ID3D10Texture2D *g_depth;
+static ID3D10DepthStencilView *g_dsv;
+static ID3D10Texture2D *g_stage;
+static ID3D10VertexShader *g_vs;
+static ID3D10PixelShader *g_ps;
+static ID3D10InputLayout *g_layout;
+static ID3D10Buffer *g_vbo;
+static ID3D10Buffer *g_cbo;
+static ID3D10RasterizerState *g_rs;
+static ID3D10DepthStencilState *g_dss;
+
+static unsigned char *g_embed_px;
+static int g_embed_w, g_embed_h;
+static double g_embed_ms;
+static LARGE_INTEGER g_embed_freq;
+
+void aio_dx10_embed_cleanup(void) {
+    if (g_stage) { ID3D10Texture2D_Release(g_stage); g_stage = NULL; }
+    if (g_cbo) { ID3D10Buffer_Release(g_cbo); g_cbo = NULL; }
+    if (g_vbo) { ID3D10Buffer_Release(g_vbo); g_vbo = NULL; }
+    if (g_layout) { ID3D10InputLayout_Release(g_layout); g_layout = NULL; }
+    if (g_ps) { ID3D10PixelShader_Release(g_ps); g_ps = NULL; }
+    if (g_vs) { ID3D10VertexShader_Release(g_vs); g_vs = NULL; }
+    if (g_rs) { ID3D10RasterizerState_Release(g_rs); g_rs = NULL; }
+    if (g_dss) { ID3D10DepthStencilState_Release(g_dss); g_dss = NULL; }
+    if (g_dsv) { ID3D10DepthStencilView_Release(g_dsv); g_dsv = NULL; }
+    if (g_depth) { ID3D10Texture2D_Release(g_depth); g_depth = NULL; }
+    if (g_rtv) { ID3D10RenderTargetView_Release(g_rtv); g_rtv = NULL; }
+    if (g_rt) { ID3D10Texture2D_Release(g_rt); g_rt = NULL; }
+    if (g_dev) { ID3D10Device_Release(g_dev); g_dev = NULL; }
+    if (g_embed_px) { free(g_embed_px); g_embed_px = NULL; }
+    g_embed_w = 0;
+    g_embed_h = 0;
+}
+
+int aio_dx10_embed_init(int w, int h) {
+    if (w < 8) w = 8;
+    if (h < 8) h = 8;
+    if (g_dev) aio_dx10_embed_cleanup();
+
+    QueryPerformanceFrequency(&g_embed_freq);
+
+    HMODULE d3d10lib = LoadLibraryA("d3d10.dll");
+    PFN_D3D10CreateDevice p_create =
+        d3d10lib ? (PFN_D3D10CreateDevice)GetProcAddress(d3d10lib, "D3D10CreateDevice") : NULL;
+    if (!p_create) { aio_dx10_embed_cleanup(); return 1; }
+
+    HRESULT hr = p_create(NULL, D3D10_DRIVER_TYPE_HARDWARE, NULL, 0, D3D10_SDK_VERSION, &g_dev);
+    if (FAILED(hr) || !g_dev) { aio_dx10_embed_cleanup(); return 1; }
+
+    if (!g_compile) {
+        HMODULE d3dc = LoadLibraryA("d3dcompiler_47.dll");
+        if (!d3dc) d3dc = LoadLibraryA("d3dcompiler_43.dll");
+        g_compile = d3dc ? (PFN_D3DCompile)GetProcAddress(d3dc, "D3DCompile") : NULL;
+    }
+    if (!g_compile) { aio_dx10_embed_cleanup(); return 1; }
+
+    // Offscreen render-target color texture + view.
+    D3D10_TEXTURE2D_DESC td;
+    memset(&td, 0, sizeof(td));
+    td.Width = (UINT)w;
+    td.Height = (UINT)h;
+    td.MipLevels = 1;
+    td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D10_USAGE_DEFAULT;
+    td.BindFlags = D3D10_BIND_RENDER_TARGET;
+    if (FAILED(ID3D10Device_CreateTexture2D(g_dev, &td, NULL, &g_rt)) || !g_rt) {
+        aio_dx10_embed_cleanup();
+        return 1;
+    }
+    if (FAILED(ID3D10Device_CreateRenderTargetView(g_dev, (ID3D10Resource *)g_rt, NULL, &g_rtv)) ||
+        !g_rtv) {
+        aio_dx10_embed_cleanup();
+        return 1;
+    }
+
+    // Depth-stencil texture + view.
+    D3D10_TEXTURE2D_DESC dd;
+    memset(&dd, 0, sizeof(dd));
+    dd.Width = (UINT)w;
+    dd.Height = (UINT)h;
+    dd.MipLevels = 1;
+    dd.ArraySize = 1;
+    dd.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+    dd.SampleDesc.Count = 1;
+    dd.Usage = D3D10_USAGE_DEFAULT;
+    dd.BindFlags = D3D10_BIND_DEPTH_STENCIL;
+    if (FAILED(ID3D10Device_CreateTexture2D(g_dev, &dd, NULL, &g_depth)) || !g_depth) {
+        aio_dx10_embed_cleanup();
+        return 1;
+    }
+    if (FAILED(ID3D10Device_CreateDepthStencilView(g_dev, (ID3D10Resource *)g_depth, NULL,
+                                                   &g_dsv)) ||
+        !g_dsv) {
+        aio_dx10_embed_cleanup();
+        return 1;
+    }
+
+    // Staging texture for CPU readback (same size/format as the color RT).
+    D3D10_TEXTURE2D_DESC sd;
+    memset(&sd, 0, sizeof(sd));
+    sd.Width = (UINT)w;
+    sd.Height = (UINT)h;
+    sd.MipLevels = 1;
+    sd.ArraySize = 1;
+    sd.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    sd.SampleDesc.Count = 1;
+    sd.Usage = D3D10_USAGE_STAGING;
+    sd.BindFlags = 0;
+    sd.CPUAccessFlags = D3D10_CPU_ACCESS_READ;
+    if (FAILED(ID3D10Device_CreateTexture2D(g_dev, &sd, NULL, &g_stage)) || !g_stage) {
+        aio_dx10_embed_cleanup();
+        return 1;
+    }
+
+    // Depth-stencil state (LESS) + rasterizer (CULL_NONE, matches standalone).
+    D3D10_DEPTH_STENCIL_DESC dsd;
+    memset(&dsd, 0, sizeof(dsd));
+    dsd.DepthEnable = TRUE;
+    dsd.DepthWriteMask = D3D10_DEPTH_WRITE_MASK_ALL;
+    dsd.DepthFunc = D3D10_COMPARISON_LESS;
+    if (FAILED(ID3D10Device_CreateDepthStencilState(g_dev, &dsd, &g_dss)) || !g_dss) {
+        aio_dx10_embed_cleanup();
+        return 1;
+    }
+    ID3D10Device_OMSetDepthStencilState(g_dev, g_dss, 1);
+
+    D3D10_RASTERIZER_DESC rsd;
+    memset(&rsd, 0, sizeof(rsd));
+    rsd.FillMode = D3D10_FILL_SOLID;
+    rsd.CullMode = D3D10_CULL_NONE;
+    rsd.DepthClipEnable = TRUE;
+    if (FAILED(ID3D10Device_CreateRasterizerState(g_dev, &rsd, &g_rs)) || !g_rs) {
+        aio_dx10_embed_cleanup();
+        return 1;
+    }
+    ID3D10Device_RSSetState(g_dev, g_rs);
+
+    // Shaders + input layout.
+    ID3DBlob *vsb = compile_hlsl(kSpinHLSL, "VSMain", "vs_4_0");
+    ID3DBlob *psb = compile_hlsl(kSpinHLSL, "PSMain", "ps_4_0");
+    if (!vsb || !psb) {
+        if (vsb) ID3D10Blob_Release(vsb);
+        if (psb) ID3D10Blob_Release(psb);
+        aio_dx10_embed_cleanup();
+        return 1;
+    }
+    if (FAILED(ID3D10Device_CreateVertexShader(g_dev, ID3D10Blob_GetBufferPointer(vsb),
+                                               ID3D10Blob_GetBufferSize(vsb), &g_vs)) ||
+        FAILED(ID3D10Device_CreatePixelShader(g_dev, ID3D10Blob_GetBufferPointer(psb),
+                                              ID3D10Blob_GetBufferSize(psb), &g_ps))) {
+        ID3D10Blob_Release(vsb);
+        ID3D10Blob_Release(psb);
+        aio_dx10_embed_cleanup();
+        return 1;
+    }
+
+    D3D10_INPUT_ELEMENT_DESC il[] = {
+        {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D10_INPUT_PER_VERTEX_DATA, 0},
+        {"COLOR", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D10_INPUT_PER_VERTEX_DATA, 0},
+    };
+    HRESULT lhr = ID3D10Device_CreateInputLayout(g_dev, il, 2, ID3D10Blob_GetBufferPointer(vsb),
+                                                 ID3D10Blob_GetBufferSize(vsb), &g_layout);
+    ID3D10Blob_Release(vsb);
+    ID3D10Blob_Release(psb);
+    if (FAILED(lhr) || !g_layout) { aio_dx10_embed_cleanup(); return 1; }
+
+    // Vertex buffer (immutable) + constant buffer (dynamic).
+    ColVertex verts[36];
+    build_color_cube(verts);
+    D3D10_BUFFER_DESC vbd;
+    memset(&vbd, 0, sizeof(vbd));
+    vbd.ByteWidth = sizeof(verts);
+    vbd.Usage = D3D10_USAGE_IMMUTABLE;
+    vbd.BindFlags = D3D10_BIND_VERTEX_BUFFER;
+    D3D10_SUBRESOURCE_DATA sr;
+    memset(&sr, 0, sizeof(sr));
+    sr.pSysMem = verts;
+    if (FAILED(ID3D10Device_CreateBuffer(g_dev, &vbd, &sr, &g_vbo)) || !g_vbo) {
+        aio_dx10_embed_cleanup();
+        return 1;
+    }
+
+    D3D10_BUFFER_DESC cbd;
+    memset(&cbd, 0, sizeof(cbd));
+    cbd.ByteWidth = sizeof(Mat4);
+    cbd.Usage = D3D10_USAGE_DYNAMIC;
+    cbd.BindFlags = D3D10_BIND_CONSTANT_BUFFER;
+    cbd.CPUAccessFlags = D3D10_CPU_ACCESS_WRITE;
+    if (FAILED(ID3D10Device_CreateBuffer(g_dev, &cbd, NULL, &g_cbo)) || !g_cbo) {
+        aio_dx10_embed_cleanup();
+        return 1;
+    }
+
+    g_embed_px = (unsigned char *)malloc((size_t)w * (size_t)h * 4);
+    if (!g_embed_px) { aio_dx10_embed_cleanup(); return 1; }
+
+    g_embed_w = w;
+    g_embed_h = h;
+    return 0;
+}
+
+int aio_dx10_embed_resize(int w, int h) {
+    if (w < 8) w = 8;
+    if (h < 8) h = 8;
+    if (g_dev && w == g_embed_w && h == g_embed_h) return 0;
+    aio_dx10_embed_cleanup();
+    return aio_dx10_embed_init(w, h);
+}
+
+void aio_dx10_embed_render(double t) {
+    if (!g_dev) return;
+
+    LARGE_INTEGER t0, t1;
+    QueryPerformanceCounter(&t0);
+
+    float aspect = (g_embed_h > 0) ? (float)g_embed_w / (float)g_embed_h : 1.0f;
+    float a = (float)t * 0.6f;
+    Mat4 model = mat_mul(mat_rotate(0, 1, 0, a), mat_rotate(1, 0, 0, 0.5f));
+    Mat4 mvp = mat_mul(mat_mul(model, mat_translate(0, 0, -6.5f)),
+                       mat_perspective(0.6f, aspect, 0.1f, 100.0f));
+
+    void *p = NULL;
+    if (SUCCEEDED(ID3D10Buffer_Map(g_cbo, D3D10_MAP_WRITE_DISCARD, 0, &p)) && p) {
+        memcpy(p, mvp.m, sizeof(mvp.m));
+        ID3D10Buffer_Unmap(g_cbo);
+    }
+
+    ID3D10Device_OMSetRenderTargets(g_dev, 1, &g_rtv, g_dsv);
+
+    D3D10_VIEWPORT vp;
+    memset(&vp, 0, sizeof(vp));
+    vp.Width = (UINT)g_embed_w;
+    vp.Height = (UINT)g_embed_h;
+    vp.MaxDepth = 1.0f;
+    ID3D10Device_RSSetViewports(g_dev, 1, &vp);
+
+    const float clear[4] = {8 / 255.f, 12 / 255.f, 17 / 255.f, 1.f};
+    ID3D10Device_ClearRenderTargetView(g_dev, g_rtv, clear);
+    ID3D10Device_ClearDepthStencilView(g_dev, g_dsv, D3D10_CLEAR_DEPTH, 1.0f, 0);
+
+    UINT stride = sizeof(ColVertex), offset = 0;
+    ID3D10Device_IASetInputLayout(g_dev, g_layout);
+    ID3D10Device_IASetVertexBuffers(g_dev, 0, 1, &g_vbo, &stride, &offset);
+    ID3D10Device_IASetPrimitiveTopology(g_dev, D3D10_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ID3D10Device_VSSetShader(g_dev, g_vs);
+    ID3D10Device_VSSetConstantBuffers(g_dev, 0, 1, &g_cbo);
+    ID3D10Device_PSSetShader(g_dev, g_ps);
+    ID3D10Device_Draw(g_dev, 36, 0);
+
+    // GPU -> staging -> CPU readback, honoring the staging RowPitch.
+    ID3D10Device_CopyResource(g_dev, (ID3D10Resource *)g_stage, (ID3D10Resource *)g_rt);
+    D3D10_MAPPED_TEXTURE2D map;
+    memset(&map, 0, sizeof(map));
+    if (g_embed_px && SUCCEEDED(ID3D10Texture2D_Map(g_stage, 0, D3D10_MAP_READ, 0, &map)) &&
+        map.pData) {
+        int rowbytes = g_embed_w * 4;
+        for (int y = 0; y < g_embed_h; y++)
+            memcpy(g_embed_px + (size_t)y * rowbytes,
+                   (BYTE *)map.pData + (size_t)y * map.RowPitch, rowbytes);
+        ID3D10Texture2D_Unmap(g_stage, 0);
+    }
+
+    QueryPerformanceCounter(&t1);
+    if (g_embed_freq.QuadPart > 0)
+        g_embed_ms = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)g_embed_freq.QuadPart;
+}
+
+int aio_dx10_embed_get_frame(AioEmbedFrame *out) {
+    if (!g_embed_px) return 1;
+    out->pixels = g_embed_px;
+    out->width = g_embed_w;
+    out->height = g_embed_h;
+    out->pitch = g_embed_w * 4;
+    out->fmt = AIO_EMBED_FMT_RGBA8;
+    out->flip_y = 0;
+    return 0;
+}
+
+double aio_dx10_embed_gpu_ms(void) { return g_embed_ms; }

@@ -284,3 +284,64 @@ only; no live per-test render in the viewport yet (that is Phase 2).
 - NEXT (Phase 2): render each test to an offscreen DX11 texture and blit/ImGui::Image
   it into the viewport rect (HUD/telemetry composite on top); wire real backend launch
   on selection; feed HUD FPS from the test's own present loop, not the shell's.
+
+## Phase 4 - EVERY backend embeds in the viewport (zero pop-outs) + honest FPS HUD
+
+PRIORITY PASS: the single-window rebuild's whole point. Previously only the DX11 scene
+family embedded (ImGui::Image of an offscreen SRV on the shell's device); Vulkan/OpenGL/
+DX12/DX10/DX9/DX8/DirectDraw each `CreateProcess "--cube <api>"`'d their own top-level
+window. That pop-out behavior is REMOVED. Every backend now renders INSIDE the viewport
+and swaps in place - identical UX to the DX11 scenes (HUD, fullscreen, aspect-correct
+resize all work). Reliability > max fps. DEVICE-UNVERIFIED (CI proves compile/link only).
+
+- METHOD = universal offscreen render + CPU readback baseline (new `cube_embed.h`
+  contract: init/resize/render/get_frame/gpu_ms/cleanup per backend, `extern "C"`,
+  mirrors cube_d3d11_scene.h). Each backend renders ONE frame to an offscreen target on
+  its OWN device (no window shown; GL/DX9/DX8/DDraw use a HIDDEN WS_POPUP window, DX10/
+  DX12/Vulkan need none), reads pixels back to a CPU buffer, and the shell uploads them
+  into a DYNAMIC D3D11 texture (`g_embed_tex`) sampled by ImGui::Image via a unified
+  `g_view_srv` (DX11 offscreen SRV OR cross-API readback SRV). Readback ALWAYS works
+  regardless of interop, so it is the reliability floor. Row-pitch + BGRA/RGBA swizzle +
+  GL bottom-up flip handled on upload.
+  - PER-BACKEND embed method (all readback baseline this phase; zero-copy shared-texture
+    is a future optimization, none shipped yet):
+    * Vulkan  - own VkInstance/device (no surface), offscreen R8G8B8A8 image +
+      vkCmdCopyImageToBuffer -> host buffer. New `aio_vk_embed_*` in cube.c + new
+      solid-color shaders embed_cube.vert/.frag (CI glslang -> .inc). RGBA8.
+    * OpenGL  - hidden WGL window, GL 1.1 fixed-function to back buffer, glReadPixels.
+      RGBA8, bottom-up (flip_y=1).
+    * DX12    - D3D12CreateDevice (no window), offscreen RT -> READBACK buffer
+      (256-aligned row pitch) via CopyTextureRegion, drain per frame. RGBA8.
+    * DX10    - D3D10CreateDevice (no window), RT -> STAGING texture -> Map. RGBA8.
+    * DX9     - hidden window device, offscreen RT + GetRenderTargetData -> SYSTEMMEM
+      surface -> LockRect. BGRA8 (X8R8G8B8).
+    * DX8     - hidden window device, render to backbuffer (no Present), CopyRects ->
+      sysmem ImageSurface -> LockRect (D3D8 has no GetRenderTargetData). BGRA8.
+    * DirectDraw/D3D7 - hidden cooperative window, offscreen 3D-target surface in
+      system memory, Lock the surface directly. BGRA8.
+  - Failed init (no ICD / missing DLL set) shows an inline "unavailable" notice in the
+    viewport - NEVER a MessageBox, never a pop-out.
+- SHELL: deleted the `CreateProcess "--cube <api>"` branch, the "opens a separate
+  window" row marker, and the launch dedupe. On selection swap the shell cleans up the
+  prior path (DX11 scene OR embed backend) and inits the new one. Fullscreen + resize
+  recreate the offscreen/shared target AND `g_embed_tex` at the viewport pixel size and
+  recompute aspect for every backend (0-size guarded). Standalone `aio_run_*_cube`
+  (the --cube CLI) + the headless `--cube --bench` child-process bench are UNTOUCHED.
+- HUD FPS FIX (device-confirmed bug: spin cube read ~29,727 fps / 0.03 ms). Cause: the
+  headline used a GPU TIMESTAMP delta around the scene's draw calls = raw GPU-draw cost,
+  not a frame rate. Fixed by a faithful C++ port of the emulator's `FpsCounter`
+  (com.winlator.star.widget.FpsCounter), fed ONCE PER PRESENTED FRAME (each shell
+  Present): 500 ms compute window FPS, 8192-entry inter-present frametime ring (ignore
+  >10 s gaps), 1%/0.1%/0.01% lows = fps at the 99/99.9/99.99th-pct frametime, session
+  avg/min/max at 1 s cadence, 1.5 s staleness -> 0. Same counter drives the headline
+  FPS + graph + avg + lows for the DX11 family AND every embedded backend (real presents
+  per second, respecting the Present toggle - lands ~1700-3200 for spin, not ~30000).
+  GPU-draw cost is kept only as a small labeled SECONDARY "GPU x.xx ms" stat. The
+  GPU-timestamp queries remain for the in-process Benchmark pane (separate math). No
+  fabricated GPU%/CPU%/RAM/battery/watts (host metrics the guest can't read).
+- Native caption cleared to "" so the Wine titlebar can't render a duplicate
+  "AIO Graphics Test" overlapping the ImGui titlebar; the shell never SetWindowText's a
+  live FPS string.
+- CI: added two glslang lines for embed_cube.vert/.frag; no object-list/link change
+  (embed code lives in already-compiled files; all APIs dynamically loaded).
+- Branch feat/imgui-shell (NOT merged).

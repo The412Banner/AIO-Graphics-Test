@@ -35,6 +35,7 @@
 #include <string.h>
 
 #include "cube_d3d12.h"
+#include "cube_embed.h"
 #include "hud.h"
 #include "bench.h"
 #include "watchdog.h"
@@ -633,3 +634,410 @@ int aio_run_d3d12_cube(HINSTANCE hinst) {
     DestroyWindow(hwnd);
     return 0;
 }
+
+// ===================== embedded offscreen + readback path =====================
+// Renders the D3D12 cube to an OFFSCREEN render target on a private device (NO
+// window, NO swapchain), copies it into a READBACK buffer, and hands the CPU
+// pixels to the ImGui shell (see cube_embed.h). For a one-frame offscreen render
+// we drain the GPU each frame (reliability > fps) so the readback is always ready.
+static ID3D12Device *g_e12_dev;
+static ID3D12CommandQueue *g_e12_queue;
+static ID3D12CommandAllocator *g_e12_alloc;
+static ID3D12GraphicsCommandList *g_e12_cl;
+static ID3D12DescriptorHeap *g_e12_rtvHeap, *g_e12_dsvHeap;
+static ID3D12Resource *g_e12_rt, *g_e12_depth, *g_e12_vbo, *g_e12_cbo, *g_e12_readback;
+static ID3D12RootSignature *g_e12_rootsig;
+static ID3D12PipelineState *g_e12_pso;
+static ID3D12Fence *g_e12_fence;
+static HANDLE g_e12_fenceEvent;
+static UINT64 g_e12_fenceVal;
+static void *g_e12_cbptr;
+static D3D12_VERTEX_BUFFER_VIEW g_e12_vbv;
+static unsigned char *g_e12_px;
+static int g_e12_w, g_e12_h;
+static UINT g_e12_rowpitch;
+static double g_e12_ms;
+static LARGE_INTEGER g_e12_freq;
+static HMODULE g_e12_d3d12lib, g_e12_d3dclib;
+
+static void e12_wait_idle(void) {
+    if (!g_e12_queue || !g_e12_fence) return;
+    g_e12_fenceVal++;
+    ID3D12CommandQueue_Signal(g_e12_queue, g_e12_fence, g_e12_fenceVal);
+    if (ID3D12Fence_GetCompletedValue(g_e12_fence) < g_e12_fenceVal) {
+        ID3D12Fence_SetEventOnCompletion(g_e12_fence, g_e12_fenceVal, g_e12_fenceEvent);
+        WaitForSingleObject(g_e12_fenceEvent, INFINITE);
+    }
+}
+
+void aio_dx12_embed_cleanup(void) {
+    if (g_e12_dev) e12_wait_idle();
+    if (g_e12_cbptr && g_e12_cbo) { ID3D12Resource_Unmap(g_e12_cbo, 0, NULL); g_e12_cbptr = NULL; }
+    if (g_e12_fenceEvent) { CloseHandle(g_e12_fenceEvent); g_e12_fenceEvent = NULL; }
+    if (g_e12_fence) { ID3D12Fence_Release(g_e12_fence); g_e12_fence = NULL; }
+    if (g_e12_readback) { ID3D12Resource_Release(g_e12_readback); g_e12_readback = NULL; }
+    if (g_e12_cbo) { ID3D12Resource_Release(g_e12_cbo); g_e12_cbo = NULL; }
+    if (g_e12_vbo) { ID3D12Resource_Release(g_e12_vbo); g_e12_vbo = NULL; }
+    if (g_e12_pso) { ID3D12PipelineState_Release(g_e12_pso); g_e12_pso = NULL; }
+    if (g_e12_rootsig) { ID3D12RootSignature_Release(g_e12_rootsig); g_e12_rootsig = NULL; }
+    if (g_e12_depth) { ID3D12Resource_Release(g_e12_depth); g_e12_depth = NULL; }
+    if (g_e12_rt) { ID3D12Resource_Release(g_e12_rt); g_e12_rt = NULL; }
+    if (g_e12_dsvHeap) { ID3D12DescriptorHeap_Release(g_e12_dsvHeap); g_e12_dsvHeap = NULL; }
+    if (g_e12_rtvHeap) { ID3D12DescriptorHeap_Release(g_e12_rtvHeap); g_e12_rtvHeap = NULL; }
+    if (g_e12_cl) { ID3D12GraphicsCommandList_Release(g_e12_cl); g_e12_cl = NULL; }
+    if (g_e12_alloc) { ID3D12CommandAllocator_Release(g_e12_alloc); g_e12_alloc = NULL; }
+    if (g_e12_queue) { ID3D12CommandQueue_Release(g_e12_queue); g_e12_queue = NULL; }
+    if (g_e12_dev) { ID3D12Device_Release(g_e12_dev); g_e12_dev = NULL; }
+    if (g_e12_px) { free(g_e12_px); g_e12_px = NULL; }
+    g_e12_w = g_e12_h = 0;
+    g_e12_rowpitch = 0;
+    g_e12_ms = 0.0;
+    g_e12_fenceVal = 0;
+}
+
+int aio_dx12_embed_init(int w, int h) {
+    if (w < 8) w = 8;
+    if (h < 8) h = 8;
+    if (g_e12_dev) aio_dx12_embed_cleanup();
+    if (g_e12_freq.QuadPart == 0) QueryPerformanceFrequency(&g_e12_freq);
+
+    g_e12_d3d12lib = LoadLibraryA("d3d12.dll");
+    g_e12_d3dclib = LoadLibraryA("d3dcompiler_47.dll");
+    if (!g_e12_d3dclib) g_e12_d3dclib = LoadLibraryA("d3dcompiler_43.dll");
+    PFN_D3D12CreateDevice p_create =
+        g_e12_d3d12lib ? (PFN_D3D12CreateDevice)GetProcAddress(g_e12_d3d12lib, "D3D12CreateDevice") : NULL;
+    PFN_D3D12SerializeRootSignature p_serialize =
+        g_e12_d3d12lib ? (PFN_D3D12SerializeRootSignature)GetProcAddress(g_e12_d3d12lib,
+                                                                         "D3D12SerializeRootSignature")
+                       : NULL;
+    PFN_D3DCompile p_compile =
+        g_e12_d3dclib ? (PFN_D3DCompile)GetProcAddress(g_e12_d3dclib, "D3DCompile") : NULL;
+    if (!p_create || !p_serialize || !p_compile) { aio_dx12_embed_cleanup(); return 1; }
+
+    if (FAILED(p_create(NULL, D3D_FEATURE_LEVEL_11_0, &IID_ID3D12Device, (void **)&g_e12_dev)) ||
+        !g_e12_dev) {
+        aio_dx12_embed_cleanup();
+        return 1;
+    }
+
+    D3D12_COMMAND_QUEUE_DESC qd;
+    memset(&qd, 0, sizeof(qd));
+    qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+    if (FAILED(ID3D12Device_CreateCommandQueue(g_e12_dev, &qd, &IID_ID3D12CommandQueue,
+                                               (void **)&g_e12_queue))) {
+        aio_dx12_embed_cleanup();
+        return 1;
+    }
+
+    D3D12_DESCRIPTOR_HEAP_DESC hd;
+    memset(&hd, 0, sizeof(hd));
+    hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    hd.NumDescriptors = 1;
+    ID3D12Device_CreateDescriptorHeap(g_e12_dev, &hd, &IID_ID3D12DescriptorHeap, (void **)&g_e12_rtvHeap);
+    hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+    ID3D12Device_CreateDescriptorHeap(g_e12_dev, &hd, &IID_ID3D12DescriptorHeap, (void **)&g_e12_dsvHeap);
+    if (!g_e12_rtvHeap || !g_e12_dsvHeap) { aio_dx12_embed_cleanup(); return 1; }
+
+    // Offscreen render target (created directly in RENDER_TARGET state; transitioned
+    // back to it after each frame's copy so no per-frame PRESENT<->RT juggling).
+    {
+        D3D12_HEAP_PROPERTIES hp = heap_props(D3D12_HEAP_TYPE_DEFAULT);
+        D3D12_RESOURCE_DESC rd;
+        memset(&rd, 0, sizeof(rd));
+        rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        rd.Width = w;
+        rd.Height = h;
+        rd.DepthOrArraySize = 1;
+        rd.MipLevels = 1;
+        rd.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        rd.SampleDesc.Count = 1;
+        rd.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+        rd.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+        D3D12_CLEAR_VALUE cv;
+        memset(&cv, 0, sizeof(cv));
+        cv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        cv.Color[0] = 8 / 255.0f; cv.Color[1] = 12 / 255.0f; cv.Color[2] = 17 / 255.0f; cv.Color[3] = 1.0f;
+        if (FAILED(ID3D12Device_CreateCommittedResource(g_e12_dev, &hp, D3D12_HEAP_FLAG_NONE, &rd,
+                                                        D3D12_RESOURCE_STATE_RENDER_TARGET, &cv,
+                                                        &IID_ID3D12Resource, (void **)&g_e12_rt))) {
+            aio_dx12_embed_cleanup();
+            return 1;
+        }
+    }
+    ID3D12Device_CreateRenderTargetView(g_e12_dev, g_e12_rt, NULL, cpu_heap_start(g_e12_rtvHeap));
+
+    // Depth buffer.
+    {
+        D3D12_HEAP_PROPERTIES hp = heap_props(D3D12_HEAP_TYPE_DEFAULT);
+        D3D12_RESOURCE_DESC rd;
+        memset(&rd, 0, sizeof(rd));
+        rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        rd.Width = w;
+        rd.Height = h;
+        rd.DepthOrArraySize = 1;
+        rd.MipLevels = 1;
+        rd.Format = DXGI_FORMAT_D32_FLOAT;
+        rd.SampleDesc.Count = 1;
+        rd.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+        rd.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+        D3D12_CLEAR_VALUE cv;
+        memset(&cv, 0, sizeof(cv));
+        cv.Format = DXGI_FORMAT_D32_FLOAT;
+        cv.DepthStencil.Depth = 1.0f;
+        ID3D12Device_CreateCommittedResource(g_e12_dev, &hp, D3D12_HEAP_FLAG_NONE, &rd,
+                                             D3D12_RESOURCE_STATE_DEPTH_WRITE, &cv, &IID_ID3D12Resource,
+                                             (void **)&g_e12_depth);
+    }
+    if (!g_e12_depth) { aio_dx12_embed_cleanup(); return 1; }
+    ID3D12Device_CreateDepthStencilView(g_e12_dev, g_e12_depth, NULL, cpu_heap_start(g_e12_dsvHeap));
+
+    // Root signature (single root CBV at b0).
+    {
+        D3D12_ROOT_PARAMETER rp;
+        memset(&rp, 0, sizeof(rp));
+        rp.ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+        rp.Descriptor.ShaderRegister = 0;
+        rp.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        D3D12_ROOT_SIGNATURE_DESC rs;
+        memset(&rs, 0, sizeof(rs));
+        rs.NumParameters = 1;
+        rs.pParameters = &rp;
+        rs.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+        ID3DBlob *sig = NULL, *serr = NULL;
+        if (FAILED(p_serialize(&rs, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &serr)) || !sig) {
+            if (serr) ID3D10Blob_Release(serr);
+            aio_dx12_embed_cleanup();
+            return 1;
+        }
+        ID3D12Device_CreateRootSignature(g_e12_dev, 0, ID3D10Blob_GetBufferPointer(sig),
+                                         ID3D10Blob_GetBufferSize(sig), &IID_ID3D12RootSignature,
+                                         (void **)&g_e12_rootsig);
+        ID3D10Blob_Release(sig);
+        if (serr) ID3D10Blob_Release(serr);
+    }
+    if (!g_e12_rootsig) { aio_dx12_embed_cleanup(); return 1; }
+
+    // Shaders + PSO.
+    {
+        ID3DBlob *vsb = NULL, *psb = NULL, *cerr = NULL;
+        if (FAILED(p_compile(kHLSL, strlen(kHLSL), "cube.hlsl", NULL, NULL, "VSMain", "vs_5_0", 0, 0,
+                             &vsb, &cerr)) ||
+            FAILED(p_compile(kHLSL, strlen(kHLSL), "cube.hlsl", NULL, NULL, "PSMain", "ps_5_0", 0, 0,
+                             &psb, &cerr))) {
+            if (vsb) ID3D10Blob_Release(vsb);
+            if (psb) ID3D10Blob_Release(psb);
+            if (cerr) ID3D10Blob_Release(cerr);
+            aio_dx12_embed_cleanup();
+            return 1;
+        }
+        D3D12_INPUT_ELEMENT_DESC il[] = {
+            {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+            {"COLOR", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+        };
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC pd;
+        memset(&pd, 0, sizeof(pd));
+        pd.pRootSignature = g_e12_rootsig;
+        pd.VS.pShaderBytecode = ID3D10Blob_GetBufferPointer(vsb);
+        pd.VS.BytecodeLength = ID3D10Blob_GetBufferSize(vsb);
+        pd.PS.pShaderBytecode = ID3D10Blob_GetBufferPointer(psb);
+        pd.PS.BytecodeLength = ID3D10Blob_GetBufferSize(psb);
+        pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+        pd.SampleMask = 0xFFFFFFFFu;
+        pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+        pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+        pd.RasterizerState.DepthClipEnable = TRUE;
+        pd.DepthStencilState.DepthEnable = TRUE;
+        pd.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+        pd.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+        pd.InputLayout.pInputElementDescs = il;
+        pd.InputLayout.NumElements = 2;
+        pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        pd.NumRenderTargets = 1;
+        pd.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
+        pd.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+        pd.SampleDesc.Count = 1;
+        ID3D12Device_CreateGraphicsPipelineState(g_e12_dev, &pd, &IID_ID3D12PipelineState,
+                                                 (void **)&g_e12_pso);
+        ID3D10Blob_Release(vsb);
+        ID3D10Blob_Release(psb);
+        if (cerr) ID3D10Blob_Release(cerr);
+    }
+    if (!g_e12_pso) { aio_dx12_embed_cleanup(); return 1; }
+
+    // Vertex buffer (upload heap).
+    {
+        Vertex verts[36];
+        build_cube(verts);
+        D3D12_HEAP_PROPERTIES hp = heap_props(D3D12_HEAP_TYPE_UPLOAD);
+        D3D12_RESOURCE_DESC rd;
+        memset(&rd, 0, sizeof(rd));
+        rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        rd.Width = sizeof(verts);
+        rd.Height = 1;
+        rd.DepthOrArraySize = 1;
+        rd.MipLevels = 1;
+        rd.SampleDesc.Count = 1;
+        rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        ID3D12Device_CreateCommittedResource(g_e12_dev, &hp, D3D12_HEAP_FLAG_NONE, &rd,
+                                             D3D12_RESOURCE_STATE_GENERIC_READ, NULL, &IID_ID3D12Resource,
+                                             (void **)&g_e12_vbo);
+        if (!g_e12_vbo) { aio_dx12_embed_cleanup(); return 1; }
+        void *p = NULL;
+        D3D12_RANGE rr = {0, 0};
+        ID3D12Resource_Map(g_e12_vbo, 0, &rr, &p);
+        memcpy(p, verts, sizeof(verts));
+        ID3D12Resource_Unmap(g_e12_vbo, 0, NULL);
+        g_e12_vbv.BufferLocation = ID3D12Resource_GetGPUVirtualAddress(g_e12_vbo);
+        g_e12_vbv.SizeInBytes = sizeof(verts);
+        g_e12_vbv.StrideInBytes = sizeof(Vertex);
+    }
+
+    // Constant buffer (256-byte upload, persistently mapped).
+    {
+        D3D12_HEAP_PROPERTIES hp = heap_props(D3D12_HEAP_TYPE_UPLOAD);
+        D3D12_RESOURCE_DESC rd;
+        memset(&rd, 0, sizeof(rd));
+        rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        rd.Width = 256;
+        rd.Height = 1;
+        rd.DepthOrArraySize = 1;
+        rd.MipLevels = 1;
+        rd.SampleDesc.Count = 1;
+        rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        ID3D12Device_CreateCommittedResource(g_e12_dev, &hp, D3D12_HEAP_FLAG_NONE, &rd,
+                                             D3D12_RESOURCE_STATE_GENERIC_READ, NULL, &IID_ID3D12Resource,
+                                             (void **)&g_e12_cbo);
+        if (!g_e12_cbo) { aio_dx12_embed_cleanup(); return 1; }
+        D3D12_RANGE rr = {0, 0};
+        ID3D12Resource_Map(g_e12_cbo, 0, &rr, &g_e12_cbptr);
+    }
+
+    // Readback buffer (256-aligned row pitch, per D3D12_TEXTURE_DATA_PITCH_ALIGNMENT).
+    g_e12_rowpitch = ((UINT)(w * 4) + 255u) & ~255u;
+    {
+        D3D12_HEAP_PROPERTIES hp = heap_props(D3D12_HEAP_TYPE_READBACK);
+        D3D12_RESOURCE_DESC rd;
+        memset(&rd, 0, sizeof(rd));
+        rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        rd.Width = (UINT64)g_e12_rowpitch * h;
+        rd.Height = 1;
+        rd.DepthOrArraySize = 1;
+        rd.MipLevels = 1;
+        rd.SampleDesc.Count = 1;
+        rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        ID3D12Device_CreateCommittedResource(g_e12_dev, &hp, D3D12_HEAP_FLAG_NONE, &rd,
+                                             D3D12_RESOURCE_STATE_COPY_DEST, NULL, &IID_ID3D12Resource,
+                                             (void **)&g_e12_readback);
+        if (!g_e12_readback) { aio_dx12_embed_cleanup(); return 1; }
+    }
+
+    ID3D12Device_CreateCommandAllocator(g_e12_dev, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                        &IID_ID3D12CommandAllocator, (void **)&g_e12_alloc);
+    if (!g_e12_alloc) { aio_dx12_embed_cleanup(); return 1; }
+    ID3D12Device_CreateCommandList(g_e12_dev, 0, D3D12_COMMAND_LIST_TYPE_DIRECT, g_e12_alloc, NULL,
+                                   &IID_ID3D12GraphicsCommandList, (void **)&g_e12_cl);
+    if (!g_e12_cl) { aio_dx12_embed_cleanup(); return 1; }
+    ID3D12GraphicsCommandList_Close(g_e12_cl);
+
+    ID3D12Device_CreateFence(g_e12_dev, 0, D3D12_FENCE_FLAG_NONE, &IID_ID3D12Fence, (void **)&g_e12_fence);
+    g_e12_fenceEvent = CreateEventA(NULL, FALSE, FALSE, NULL);
+    g_e12_fenceVal = 0;
+    if (!g_e12_fence || !g_e12_fenceEvent) { aio_dx12_embed_cleanup(); return 1; }
+
+    g_e12_px = (unsigned char *)malloc((size_t)w * h * 4);
+    if (!g_e12_px) { aio_dx12_embed_cleanup(); return 1; }
+    g_e12_w = w;
+    g_e12_h = h;
+    return 0;
+}
+
+int aio_dx12_embed_resize(int w, int h) {
+    if (w < 8) w = 8;
+    if (h < 8) h = 8;
+    if (w == g_e12_w && h == g_e12_h && g_e12_dev) return 0;
+    aio_dx12_embed_cleanup();
+    return aio_dx12_embed_init(w, h);
+}
+
+void aio_dx12_embed_render(double t) {
+    if (!g_e12_dev) return;
+    LARGE_INTEGER a, b;
+    QueryPerformanceCounter(&a);
+
+    int w = g_e12_w, h = g_e12_h;
+    float ang = (float)t * 0.6f;
+    Mat4 model = mat_mul(mat_rotate(0, 1, 0, ang), mat_rotate(1, 0, 0, 0.5f));
+    Mat4 mvp = mat_mul(mat_mul(model, mat_translate(0, 0, -6.5f)),
+                       mat_perspective(0.6f, (h > 0) ? (float)w / h : 1.0f, 0.1f, 100.0f));
+    memcpy(g_e12_cbptr, mvp.m, sizeof(mvp.m));
+
+    ID3D12CommandAllocator_Reset(g_e12_alloc);
+    ID3D12GraphicsCommandList_Reset(g_e12_cl, g_e12_alloc, g_e12_pso);
+    ID3D12GraphicsCommandList_SetGraphicsRootSignature(g_e12_cl, g_e12_rootsig);
+    ID3D12GraphicsCommandList_SetGraphicsRootConstantBufferView(
+        g_e12_cl, 0, ID3D12Resource_GetGPUVirtualAddress(g_e12_cbo));
+    D3D12_VIEWPORT vp = {0.0f, 0.0f, (float)w, (float)h, 0.0f, 1.0f};
+    D3D12_RECT scissor = {0, 0, w, h};
+    ID3D12GraphicsCommandList_RSSetViewports(g_e12_cl, 1, &vp);
+    ID3D12GraphicsCommandList_RSSetScissorRects(g_e12_cl, 1, &scissor);
+    D3D12_CPU_DESCRIPTOR_HANDLE rtv = cpu_heap_start(g_e12_rtvHeap);
+    D3D12_CPU_DESCRIPTOR_HANDLE dsv = cpu_heap_start(g_e12_dsvHeap);
+    ID3D12GraphicsCommandList_OMSetRenderTargets(g_e12_cl, 1, &rtv, FALSE, &dsv);
+    const float clear[4] = {8 / 255.0f, 12 / 255.0f, 17 / 255.0f, 1.0f};
+    ID3D12GraphicsCommandList_ClearRenderTargetView(g_e12_cl, rtv, clear, 0, NULL);
+    ID3D12GraphicsCommandList_ClearDepthStencilView(g_e12_cl, dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0,
+                                                    NULL);
+    ID3D12GraphicsCommandList_IASetPrimitiveTopology(g_e12_cl, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ID3D12GraphicsCommandList_IASetVertexBuffers(g_e12_cl, 0, 1, &g_e12_vbv);
+    ID3D12GraphicsCommandList_DrawInstanced(g_e12_cl, 36, 1, 0, 0);
+
+    barrier(g_e12_cl, g_e12_rt, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    D3D12_TEXTURE_COPY_LOCATION dst;
+    memset(&dst, 0, sizeof(dst));
+    dst.pResource = g_e12_readback;
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    dst.PlacedFootprint.Offset = 0;
+    dst.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    dst.PlacedFootprint.Footprint.Width = w;
+    dst.PlacedFootprint.Footprint.Height = h;
+    dst.PlacedFootprint.Footprint.Depth = 1;
+    dst.PlacedFootprint.Footprint.RowPitch = g_e12_rowpitch;
+    D3D12_TEXTURE_COPY_LOCATION src;
+    memset(&src, 0, sizeof(src));
+    src.pResource = g_e12_rt;
+    src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    src.SubresourceIndex = 0;
+    ID3D12GraphicsCommandList_CopyTextureRegion(g_e12_cl, &dst, 0, 0, 0, &src, NULL);
+    barrier(g_e12_cl, g_e12_rt, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    ID3D12GraphicsCommandList_Close(g_e12_cl);
+
+    ID3D12CommandList *lists[1] = {(ID3D12CommandList *)g_e12_cl};
+    ID3D12CommandQueue_ExecuteCommandLists(g_e12_queue, 1, lists);
+    e12_wait_idle();
+
+    void *map = NULL;
+    D3D12_RANGE rr = {0, (SIZE_T)g_e12_rowpitch * h};
+    if (SUCCEEDED(ID3D12Resource_Map(g_e12_readback, 0, &rr, &map)) && map) {
+        for (int y = 0; y < h; y++)
+            memcpy(g_e12_px + (size_t)y * w * 4, (unsigned char *)map + (size_t)y * g_e12_rowpitch,
+                   (size_t)w * 4);
+        D3D12_RANGE wr = {0, 0};
+        ID3D12Resource_Unmap(g_e12_readback, 0, &wr);
+    }
+
+    QueryPerformanceCounter(&b);
+    g_e12_ms = (double)(b.QuadPart - a.QuadPart) * 1000.0 / (double)g_e12_freq.QuadPart;
+}
+
+int aio_dx12_embed_get_frame(AioEmbedFrame *out) {
+    if (!g_e12_px || !out) return 1;
+    out->pixels = g_e12_px;
+    out->width = g_e12_w;
+    out->height = g_e12_h;
+    out->pitch = g_e12_w * 4;
+    out->fmt = AIO_EMBED_FMT_RGBA8;
+    out->flip_y = 0;
+    return 0;
+}
+
+double aio_dx12_embed_gpu_ms(void) { return g_e12_ms; }

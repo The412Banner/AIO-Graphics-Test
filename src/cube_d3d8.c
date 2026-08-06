@@ -27,6 +27,7 @@
 #include <string.h>
 
 #include "cube_d3d8.h"
+#include "cube_embed.h"
 #include "hud.h"
 #include "bench.h"
 #include "watchdog.h"
@@ -327,4 +328,190 @@ int aio_run_d3d8_cube(HINSTANCE hinst) {
     IDirect3D8_Release(d3d);
     DestroyWindow(hwnd);
     return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Embedded offscreen + CPU-readback path (AioEmbed contract, see cube_embed.h).
+//
+// The ImGui shell composites every non-DX11 backend by having it render one
+// frame to its OWN device with NO visible window, then reading the pixels back
+// to a CPU buffer. D3D8 has no GetRenderTargetData, so we render to the device's
+// implicit back buffer (WITHOUT Present), then CopyRects it into a system-memory
+// image surface and Lock that to read the rows out. DXVK's d3d8 wrapper supports
+// an RT-surface -> sysmem CopyRects, which is our readback.
+// ---------------------------------------------------------------------------
+
+static IDirect3D8 *g_embed_d3d;
+static IDirect3DDevice8 *g_embed_dev;
+static IDirect3DSurface8 *g_embed_bb;   // implicit back buffer (retained)
+static IDirect3DSurface8 *g_embed_sys;  // system-memory readback surface
+static unsigned char *g_embed_px;
+static int g_embed_w, g_embed_h;
+static HWND g_embed_hwnd;
+static D3DFORMAT g_embed_fmt;
+static double g_embed_ms;
+static LARGE_INTEGER g_embed_qpf;
+
+int aio_dx8_embed_init(int w, int h) {
+    if (g_embed_dev) aio_dx8_embed_cleanup();  // already init'd -> restart clean
+    if (w < 8) w = 8;
+    if (h < 8) h = 8;
+
+    if (g_embed_qpf.QuadPart == 0) QueryPerformanceFrequency(&g_embed_qpf);
+
+    HINSTANCE hinst = GetModuleHandleA(NULL);
+    const char *cls = "AIOD3D8Embed";
+
+    static int s_class_registered = 0;
+    if (!s_class_registered) {
+        WNDCLASSA wc;
+        memset(&wc, 0, sizeof(wc));
+        wc.lpfnWndProc = DefWindowProcA;
+        wc.hInstance = hinst;
+        wc.lpszClassName = cls;
+        RegisterClassA(&wc);
+        s_class_registered = 1;
+    }
+
+    // Hidden popup window - a device needs an HWND, but it is never shown.
+    g_embed_hwnd = CreateWindowA(cls, "", WS_POPUP, 0, 0, w, h, NULL, NULL, hinst, NULL);
+    if (!g_embed_hwnd) goto fail;
+
+    HMODULE d3d8lib = LoadLibraryA("d3d8.dll");
+    PFN_Direct3DCreate8 p_create =
+        d3d8lib ? (PFN_Direct3DCreate8)GetProcAddress(d3d8lib, "Direct3DCreate8") : NULL;
+    if (!p_create) goto fail;
+
+    g_embed_d3d = p_create(D3D_SDK_VERSION);
+    if (!g_embed_d3d) goto fail;
+
+    D3DDISPLAYMODE mode;
+    memset(&mode, 0, sizeof(mode));
+    if (FAILED(IDirect3D8_GetAdapterDisplayMode(g_embed_d3d, D3DADAPTER_DEFAULT, &mode))) goto fail;
+    g_embed_fmt = mode.Format;
+
+    D3DPRESENT_PARAMETERS pp;
+    memset(&pp, 0, sizeof(pp));
+    pp.Windowed = TRUE;
+    pp.SwapEffect = D3DSWAPEFFECT_DISCARD;
+    pp.BackBufferFormat = mode.Format;
+    pp.BackBufferWidth = w;
+    pp.BackBufferHeight = h;
+    pp.BackBufferCount = 1;
+    pp.EnableAutoDepthStencil = TRUE;
+    pp.AutoDepthStencilFormat = D3DFMT_D24S8;
+    pp.hDeviceWindow = g_embed_hwnd;
+    pp.FullScreen_PresentationInterval = D3DPRESENT_INTERVAL_IMMEDIATE;
+
+    HRESULT hr = IDirect3D8_CreateDevice(g_embed_d3d, D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL,
+                                         g_embed_hwnd, D3DCREATE_HARDWARE_VERTEXPROCESSING, &pp,
+                                         &g_embed_dev);
+    if (FAILED(hr) || !g_embed_dev)
+        hr = IDirect3D8_CreateDevice(g_embed_d3d, D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, g_embed_hwnd,
+                                     D3DCREATE_SOFTWARE_VERTEXPROCESSING, &pp, &g_embed_dev);
+    if (FAILED(hr) || !g_embed_dev) goto fail;
+
+    IDirect3DDevice8_SetRenderState(g_embed_dev, D3DRS_ZENABLE, D3DZB_TRUE);
+    IDirect3DDevice8_SetRenderState(g_embed_dev, D3DRS_LIGHTING, FALSE);
+    IDirect3DDevice8_SetRenderState(g_embed_dev, D3DRS_CULLMODE, D3DCULL_NONE);
+
+    if (FAILED(IDirect3DDevice8_GetBackBuffer(g_embed_dev, 0, D3DBACKBUFFER_TYPE_MONO, &g_embed_bb)))
+        goto fail;
+    if (FAILED(IDirect3DDevice8_CreateImageSurface(g_embed_dev, w, h, mode.Format, &g_embed_sys)))
+        goto fail;
+
+    g_embed_px = (unsigned char *)malloc((size_t)w * (size_t)h * 4);
+    if (!g_embed_px) goto fail;
+
+    g_embed_w = w;
+    g_embed_h = h;
+    return 0;
+
+fail:
+    if (g_embed_sys) { IDirect3DSurface8_Release(g_embed_sys); g_embed_sys = NULL; }
+    if (g_embed_bb) { IDirect3DSurface8_Release(g_embed_bb); g_embed_bb = NULL; }
+    if (g_embed_dev) { IDirect3DDevice8_Release(g_embed_dev); g_embed_dev = NULL; }
+    if (g_embed_d3d) { IDirect3D8_Release(g_embed_d3d); g_embed_d3d = NULL; }
+    if (g_embed_px) { free(g_embed_px); g_embed_px = NULL; }
+    if (g_embed_hwnd) { DestroyWindow(g_embed_hwnd); g_embed_hwnd = NULL; }
+    g_embed_w = g_embed_h = 0;
+    return 1;
+}
+
+int aio_dx8_embed_resize(int w, int h) {
+    if (w < 8) w = 8;
+    if (h < 8) h = 8;
+    if (g_embed_dev && w == g_embed_w && h == g_embed_h) return 0;
+    aio_dx8_embed_cleanup();
+    return aio_dx8_embed_init(w, h);
+}
+
+void aio_dx8_embed_render(double t) {
+    if (!g_embed_dev) return;
+
+    LARGE_INTEGER t0, t1;
+    QueryPerformanceCounter(&t0);
+
+    float aspect = (g_embed_h > 0) ? (float)g_embed_w / (float)g_embed_h : 1.0f;
+    float a = (float)t * 0.6f;
+    Mat4 model = mat_mul(mat_rotate(0, 1, 0, a), mat_rotate(1, 0, 0, 0.5f));
+    D3DMATRIX world = to_d3d(model);
+    D3DMATRIX view = to_d3d(mat_translate(0, 0, -6.5f));
+    D3DMATRIX proj = to_d3d(mat_perspective(0.6f, aspect, 0.1f, 100.0f));
+
+    Vertex verts[36];
+    build_cube(verts);
+
+    IDirect3DDevice8_Clear(g_embed_dev, 0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER,
+                           D3DCOLOR_XRGB(8, 12, 17), 1.0f, 0);
+    if (SUCCEEDED(IDirect3DDevice8_BeginScene(g_embed_dev))) {
+        IDirect3DDevice8_SetTransform(g_embed_dev, D3DTS_WORLD, &world);
+        IDirect3DDevice8_SetTransform(g_embed_dev, D3DTS_VIEW, &view);
+        IDirect3DDevice8_SetTransform(g_embed_dev, D3DTS_PROJECTION, &proj);
+        IDirect3DDevice8_SetVertexShader(g_embed_dev, CUBE_FVF);  // D3D8: FVF via SetVertexShader
+        IDirect3DDevice8_DrawPrimitiveUP(g_embed_dev, D3DPT_TRIANGLELIST, 12, verts, sizeof(Vertex));
+        IDirect3DDevice8_EndScene(g_embed_dev);
+    }
+    // NB: no Present - the embedded path never shows a swapchain.
+
+    // Readback: back buffer (RT surface) -> system-memory surface -> CPU rows.
+    if (SUCCEEDED(IDirect3DDevice8_CopyRects(g_embed_dev, g_embed_bb, NULL, 0, g_embed_sys, NULL))) {
+        D3DLOCKED_RECT lr;
+        if (SUCCEEDED(IDirect3DSurface8_LockRect(g_embed_sys, &lr, NULL, D3DLOCK_READONLY))) {
+            int w = g_embed_w, h = g_embed_h;
+            for (int y = 0; y < h; y++)
+                memcpy(g_embed_px + (size_t)y * w * 4,
+                       (BYTE *)lr.pBits + (size_t)y * lr.Pitch, (size_t)w * 4);
+            IDirect3DSurface8_UnlockRect(g_embed_sys);
+        }
+    }
+
+    QueryPerformanceCounter(&t1);
+    if (g_embed_qpf.QuadPart)
+        g_embed_ms = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)g_embed_qpf.QuadPart;
+}
+
+int aio_dx8_embed_get_frame(AioEmbedFrame *out) {
+    if (!g_embed_px || !out) return 1;
+    out->pixels = g_embed_px;
+    out->width = g_embed_w;
+    out->height = g_embed_h;
+    out->pitch = g_embed_w * 4;
+    out->fmt = AIO_EMBED_FMT_BGRA8;
+    out->flip_y = 0;
+    return 0;
+}
+
+double aio_dx8_embed_gpu_ms(void) {
+    return g_embed_ms;
+}
+
+void aio_dx8_embed_cleanup(void) {
+    if (g_embed_sys) { IDirect3DSurface8_Release(g_embed_sys); g_embed_sys = NULL; }
+    if (g_embed_bb) { IDirect3DSurface8_Release(g_embed_bb); g_embed_bb = NULL; }
+    if (g_embed_dev) { IDirect3DDevice8_Release(g_embed_dev); g_embed_dev = NULL; }
+    if (g_embed_d3d) { IDirect3D8_Release(g_embed_d3d); g_embed_d3d = NULL; }
+    if (g_embed_px) { free(g_embed_px); g_embed_px = NULL; }
+    if (g_embed_hwnd) { DestroyWindow(g_embed_hwnd); g_embed_hwnd = NULL; }
+    g_embed_w = g_embed_h = 0;
 }
