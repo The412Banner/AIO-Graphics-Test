@@ -440,3 +440,34 @@ All embedded, windowless; version bumped to v2.0.1.
 - Copied to /sdcard/Download/AIO/AIO-Graphics-Test-64bit.exe AND overwrote the live shortcut
   target /storage/emulated/0/Winlator/Games/aio graphics test/AIO-Graphics-Test-imgui-scaffold-64bit.exe
   (owner 10156:1023, perms 0660) — so re-tapping "AIO ImGui Test" launches 2.0.1. NOT merged.
+
+## 2026-08-06 — v2.0.1 black-screen regression report: startup diagnostic added
+- Symptom: staged 2.0.1 (sha 8f4f587b) crashed on launch in the "AIO" container (D:\AIO\
+  AIO-Graphics-Test-64bit.exe). Fresh crash log /sdcard/Download/bannerlator/AIO/wine_debug.log:
+  `err:seh:NtRaiseException Unhandled exception code c000001d flags 0 addr 0x6ffca966dc`
+  (c000001d = ILLEGAL INSTRUCTION), dying at the Mesa/GL bring-up stage BEFORE any
+  `info:  DXVK:` banner — i.e. before create_device's D3D11CreateDeviceAndSwapChain reaches DXVK.
+- Code review of the 6-fix diff found NO startup regression: the only code that runs before
+  create_device is unchanged from 2.0.0 (RegisterClass/CreateWindow/WinMain); both new history
+  loaders are no-ops when their files are absent (they are absent in D:\AIO — verified on device);
+  fix-6's aio_embed_clear_rgb write is a plain same-module x64 data-symbol write; the
+  render_scene_to_offscreen refactor's new branch is skipped at startup (g_bench_active_embed=null).
+  CI build log shows NO -Wreturn-type/uninitialized/overflow warnings in the changed files.
+  The fault ADDRESS 0x6ffca966dc is a high-VA system/wine DLL, NOT our exe (mingw base 0x140000000)
+  — the illegal instruction is in the container's GL/Mesa/wine stack, not our code. Strong evidence
+  this is a fault in the "AIO" container's early graphics bring-up, not a regression in the 6 fixes.
+  (2.0.0's working log is from a DIFFERENT container, "AIO ImGui Test", with a different DXVK/VKD3D
+   set — not an apples-to-apples baseline.)
+- FIX/INSTRUMENT: added an always-on STARTUP BREADCRUMB LOG + SetUnhandledExceptionFilter
+  (src/shell_imgui.cpp aio_diag_init/aio_diag_log/aio_seh_filter; declared in shell_imgui.h; wired
+  into WinMain in cube.c). Log path: <exe_dir>\AIO-Graphics-Test_startup.log (fallback %TEMP%, then
+  CWD). Milestones (each flushed): WinMain entry + raw args, dispatch branch, aio_run_imgui_shell
+  entry, window created, D3D11 device+swapchain created, ImGui context+fonts, bench history
+  load begin/end (N runs), disk history load begin/end (N runs), backends init/entering loop,
+  first frame begin, first frame presented OK, main loop exited, exit OK. The exception filter
+  records code + faulting address + module for the WHOLE session (catches pane-navigation crashes
+  too). Next launch is self-diagnosing.
+- Rebuilt CI GREEN both arches (run 31085081126, headSha 86d7d52). Re-staged the diagnostic 64-bit
+  exe (sha ec8f2f5c659d2f5ee93ff4507513f714ede6bfad912c24eee5eaf038c8a14315) to /sdcard/Download/AIO/
+  AND the shortcut target (owner 10156:1023, perms 0660). NOT merged. NEXT: user relaunches; read
+  <exe_dir>\AIO-Graphics-Test_startup.log to pinpoint the exact failing milestone/module.
