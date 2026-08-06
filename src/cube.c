@@ -4766,6 +4766,18 @@ static int aio_cli_has(int argc, char **argv, const char *flag) {
         }                                             \
     } while (0)
 
+// Earliest-possible startup breadcrumb. A highest-priority (101) static constructor
+// runs during C++/CRT static init, BEFORE WinMain and before the default-priority
+// global constructors. It opens the diagnostic log and writes one flushed line, so:
+//   - line present, WinMain milestones absent  -> crash is in a LATER constructor
+//   - line absent entirely                     -> crash is before ANY user ctor
+//     (CRT startup / DLL load / relocation)  -- e.g. the FEX illegal-instruction fault.
+// Fully guarded (aio_diag_init/aio_diag_log never crash or stall).
+__attribute__((constructor(101))) static void aio_earliest_ctor(void) {
+    aio_diag_init();
+    aio_diag_log("[ctor] static-init reached (priority 101)");
+}
+
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR pCmdLine, int nCmdShow) {
     MSG msg;    // message
     bool done;  // flag saying when app is complete

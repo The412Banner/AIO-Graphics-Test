@@ -72,7 +72,7 @@ jobs:
               -DVK_USE_PLATFORM_WIN32_KHR -DWIN32_LEAN_AND_MEAN \
               -D_WIN32_WINNT=0x0A00 \
               -mno-avx -mno-avx2 \
-              -O2 -o $f.o
+              -O0 -o $f.o
           done
 
       - name: Fetch + compile Dear ImGui shell (C++ / DX11)
@@ -88,7 +88,7 @@ jobs:
               -I imgui -I imgui/backends -I src \
               -DWIN32_LEAN_AND_MEAN -D_WIN32_WINNT=0x0A00 -fcf-protection=none \
               -mno-avx -mno-avx2 \
-              -O2 -o $(basename $f).o
+              -O0 -o $(basename $f).o
           done
           # -mno-avx/-mno-avx2: FEX/arm64ec can't execute AVX; without it the added
           # v2.0.1 C++ (bench/disk/theme) made GCC emit AVX in the C++ static-init
@@ -98,7 +98,7 @@ jobs:
             -I imgui -I imgui/backends -I src \
             -DWIN32_LEAN_AND_MEAN -D_WIN32_WINNT=0x0A00 -fcf-protection=none \
             -mno-avx -mno-avx2 \
-            -O2 -o shell_imgui.o
+            -O0 -o shell_imgui.o
 
       - name: Build vulkan-1 import lib from the symbols actually referenced
         run: |
