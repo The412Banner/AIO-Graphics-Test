@@ -345,3 +345,42 @@ resize all work). Reliability > max fps. DEVICE-UNVERIFIED (CI proves compile/li
 - CI: added two glslang lines for embed_cube.vert/.frag; no object-list/link change
   (embed code lives in already-compiled files; all APIs dynamically loaded).
 - Branch feat/imgui-shell (NOT merged).
+
+## Phase 5 — Fusion HUD side-channel (app-declared active API)
+
+The readback shell ALWAYS presents via D3D11 (every cross-API backend renders
+offscreen then blits into the ImGui/DX11 swapchain), so Bannerlator's Fusion HUD
+would forever detect "D3D11 · DXVK". This adds the AIO-side WRITER of a tiny status
+file the HUD (already built + staged on the emulator side) polls, so the HUD shows
+the TRUE per-test API.
+
+- Writer in `src/shell_imgui.cpp` (`aio_hud_write_status` + `aio_hud_build_label` /
+  `aio_hud_build_path` / `aio_wallclock_ms`), placed just before the entry point;
+  cadence wired into the render loop after the FpsCounter block.
+- Source of truth = the SAME `g_sel` Test the HUD chip + telemetry strip already draw
+  (`->api`, `->path`, `->tool`). No new state.
+- Contract (fixed by emulator side, matched exactly):
+  - path `Z:\usr\tmp\hud_active_api.json` (Z: = imagefs root; \usr\tmp = shared tmp).
+  - ATOMIC: CreateFileA/WriteFile to `...json.tmp` then
+    `MoveFileExA(..., MOVEFILE_REPLACE_EXISTING)`.
+  - schema `{"label":"D3D9 · DXVK","path":"d3d9 → DXVK → Turnip","ts":<epoch ms>}`.
+  - `label` = "<API> · <wrapper>" (spaced U+00B7). API short-name collapses
+    "Direct3D N" -> "D3DN"; wrapper lifted from the path (DXVK/VKD3D/Zink/Turnip,
+    that priority so DX* -> DXVK, D3D12 -> VKD3D beat the trailing "-> Turnip").
+    Verified: Vulkan·Turnip, OpenGL·Zink, D3D12·VKD3D, D3D11/10/9/8·DXVK,
+    DirectDraw·DXVK.
+  - `path` = AIO's displayed translation path, ASCII "->" rewritten to U+2192 "→".
+  - `ts` = epoch ms on the Java System.currentTimeMillis() clock via
+    GetSystemTimeAsFileTime -> (t - 116444736000000000)/10000. NOT QPC.
+- CADENCE: written IMMEDIATELY on a backend/scene switch, then heartbeat every ~500 ms
+  while authoritatively rendering (host polls at 2 s, gates on <2000 ms). Time-gated by
+  a `now_ms` accumulator — never per-frame.
+- STOP-WHEN-NOT-AUTHORITATIVE: gate = `!g_sel->tool && g_scene_live`, so a Tools panel
+  (GPU Info / Benchmark / Disk Speed), a failed-init "unavailable" backend, or exit
+  simply stops refreshing `ts`; the file goes stale and the HUD reverts to its own
+  detection within ~2 s. (File is not deleted.)
+- ROBUSTNESS: every IO step guarded — if `Z:\usr\tmp\` isn't writable (AIO run outside a
+  Bannerlator container) the writer silently no-ops; never crashes/stalls the loop.
+- This build also carries the V2 app icon (`src/app.ico`, id 1 in app.rc) — embedded in
+  both exes via windres.
+- Branch feat/imgui-shell (NOT merged).

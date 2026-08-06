@@ -1873,6 +1873,101 @@ static bool fs_toggle_control(float right_x, float top_y, bool fs) {
 }
 
 // ===========================================================================
+// Fusion HUD side-channel: publish the TRUE active API to the host.
+//
+// The readback shell always PRESENTS via D3D11 (every cross-API backend renders
+// offscreen then blits into the ImGui/DX11 swapchain), so the emulator's Fusion
+// HUD would otherwise always detect "D3D11 · DXVK". To let the HUD show the real
+// per-test API we drop a tiny status file into the container's shared tmp that
+// the HUD polls. Contract is FIXED by the emulator side:
+//   - path  : Z:\usr\tmp\hud_active_api.json  (Z: = imagefs root; \usr\tmp shared)
+//   - atomic: write <file>.tmp then MoveFileExA(REPLACE_EXISTING) rename
+//   - schema: {"label":"D3D9 · DXVK","path":"d3d9 → DXVK → Turnip","ts":<epoch ms>}
+//   - ts     : epoch ms on the Java System.currentTimeMillis() wall clock
+// Best-effort side-channel: if Z:\usr\tmp isn't writable (AIO run outside a
+// Bannerlator container) EVERY step silently no-ops - never crash, never stall
+// the render loop.
+// ===========================================================================
+static const char *kHudApiFinal = "Z:\\usr\\tmp\\hud_active_api.json";
+static const char *kHudApiTmp   = "Z:\\usr\\tmp\\hud_active_api.json.tmp";
+
+// Epoch milliseconds on the SAME wall clock as Java System.currentTimeMillis().
+// (GetSystemTimeAsFileTime is 100ns ticks since 1601-01-01 UTC; shift the epoch
+// and scale to ms. NOT QueryPerformanceCounter - that's not wall-clock epoch.)
+static uint64_t aio_wallclock_ms(void) {
+    FILETIME ft;
+    GetSystemTimeAsFileTime(&ft);
+    uint64_t t = ((uint64_t)ft.dwHighDateTime << 32) | (uint64_t)ft.dwLowDateTime;
+    return (t - 116444736000000000ULL) / 10000ULL;
+}
+
+// Compact "<API> · <wrapper>" HUD label derived from AIO's OWN active-test source
+// of truth (the same Test the HUD chip + telemetry strip draw). API short-name
+// collapses "Direct3D N" -> "D3DN"; the wrapper is lifted from the translation
+// path (DXVK / VKD3D / Zink / Turnip, matched in that priority so DX* -> DXVK and
+// D3D12 -> VKD3D win over the trailing "-> Turnip"). Middle dot is the emulator's
+// separator (U+00B7, UTF-8 C2 B7).
+static void aio_hud_build_label(const Test *t, char *out, size_t cap) {
+    // Short API name.
+    char api[32];
+    if (t->api && strncmp(t->api, "Direct3D ", 9) == 0)
+        snprintf(api, sizeof(api), "D3D%s", t->api + 9);   // "Direct3D 11" -> "D3D11"
+    else
+        snprintf(api, sizeof(api), "%s", t->api ? t->api : "?");
+    // Wrapper from the translation path (priority order matters).
+    const char *wrap = "DXVK";
+    const char *p = t->path ? t->path : "";
+    if      (strstr(p, "DXVK"))   wrap = "DXVK";
+    else if (strstr(p, "VKD3D"))  wrap = "VKD3D";
+    else if (strstr(p, "Zink"))   wrap = "Zink";
+    else if (strstr(p, "Turnip")) wrap = "Turnip";
+    snprintf(out, cap, "%s \xC2\xB7 %s", api, wrap);        // "<API> \u00B7 <wrapper>"
+}
+
+// Copy the translation path into a JSON-friendly buffer, rewriting the ASCII
+// "->" arrows into the U+2192 arrow the emulator contract shows.
+static void aio_hud_build_path(const Test *t, char *out, size_t cap) {
+    const char *s = t->path ? t->path : "-";
+    size_t o = 0;
+    for (size_t i = 0; s[i] && o + 4 < cap;) {
+        if (s[i] == '-' && s[i + 1] == '>') {           // "->" -> "→" (E2 86 92)
+            out[o++] = (char)0xE2; out[o++] = (char)0x86; out[o++] = (char)0x92;
+            i += 2;
+        } else {
+            out[o++] = s[i++];
+        }
+    }
+    out[o] = '\0';
+}
+
+// Atomically publish the active-test status file. Fully guarded / silent no-op.
+static void aio_hud_write_status(const Test *t) {
+    if (!t) return;
+    char label[80], path[128];
+    aio_hud_build_label(t, label, sizeof(label));
+    aio_hud_build_path(t, path, sizeof(path));
+    uint64_t ts = aio_wallclock_ms();
+
+    char json[320];
+    int n = snprintf(json, sizeof(json),
+                     "{\"label\":\"%s\",\"path\":\"%s\",\"ts\":%llu}",
+                     label, path, (unsigned long long)ts);
+    if (n <= 0 || n >= (int)sizeof(json)) return;
+
+    // Write the temp file (same dir as the final so the rename is atomic), then
+    // MoveFileExA over the target. Any failure -> silent no-op.
+    HANDLE h = CreateFileA(kHudApiTmp, GENERIC_WRITE, 0, nullptr,
+                           CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return;
+    DWORD wrote = 0;
+    BOOL ok = WriteFile(h, json, (DWORD)n, &wrote, nullptr);
+    CloseHandle(h);
+    if (!ok || wrote != (DWORD)n) { DeleteFileA(kHudApiTmp); return; }
+    if (!MoveFileExA(kHudApiTmp, kHudApiFinal, MOVEFILE_REPLACE_EXISTING))
+        DeleteFileA(kHudApiTmp);  // couldn't rename: drop the temp, leave stale file
+}
+
+// ===========================================================================
 // Entry point.
 // ===========================================================================
 extern "C" int aio_run_imgui_shell(HINSTANCE hInstance) {
@@ -2021,6 +2116,27 @@ extern "C" int aio_run_imgui_shell(HINSTANCE hInstance) {
         static const Test *hud_test = nullptr;
         if (g_sel != hud_test) { g_fps.reset(); hud_test = g_sel; }
         if (now_ms - g_lows_last > 1000.0) { g_fps.computeLows(); g_lows_last = now_ms; }
+
+        // Fusion HUD side-channel: while AIO is AUTHORITATIVELY rendering a backend
+        // (a real backend/scene actually presenting - not a Tools panel, not a
+        // failed-init "unavailable" state), publish the true active API. Write
+        // immediately on a switch, then heartbeat every ~500 ms (host polls at 2 s
+        // and gates on <2000 ms). When we're not authoritative we simply STOP
+        // refreshing so the file goes stale and the HUD reverts to its own detection.
+        {
+            static const Test *pub_test = nullptr;
+            static double pub_last_ms = -1.0e9;
+            bool authoritative = !g_sel->tool && g_scene_live;
+            if (authoritative) {
+                if (g_sel != pub_test || (now_ms - pub_last_ms) >= 500.0) {
+                    aio_hud_write_status(g_sel);
+                    pub_test = g_sel;
+                    pub_last_ms = now_ms;
+                }
+            } else {
+                pub_test = nullptr;  // force an immediate write when we resume rendering
+            }
+        }
         float hud_fps = g_fps.currentFPS(now_ms);
 
         // Route viewport input into the interactive demos (Free Look / Planet Fly)
