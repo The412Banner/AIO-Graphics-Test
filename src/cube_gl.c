@@ -333,7 +333,7 @@ void aio_gl_embed_render(double t) {
 
     int w = g_embed_w, h = g_embed_h;
     glViewport(0, 0, w, h);
-    glClearColor(8.0f / 255.0f, 12.0f / 255.0f, 17.0f / 255.0f, 1.0f);
+    glClearColor(aio_embed_clear_rgb[0], aio_embed_clear_rgb[1], aio_embed_clear_rgb[2], 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     glEnable(GL_DEPTH_TEST);
 

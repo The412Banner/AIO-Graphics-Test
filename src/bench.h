@@ -36,4 +36,20 @@ void aio_bench_add(double frame_ms);
 // heap-allocated human-readable summary (caller frees). Ends the benchmark.
 char *aio_bench_finish(const char *api_label, double total_seconds);
 
+// Numeric benchmark stats (FPS), filled by aio_bench_finish_ex so the in-app
+// shell can record a run into its history without re-parsing the summary text.
+typedef struct AioBenchStats {
+    int frames;      // kept (post-warm-up) frames
+    double dur_s;    // measured duration passed in
+    double avg;      // average FPS
+    double min;      // min FPS (slowest frame)
+    double max;      // robust max FPS (1%-fastest frametime)
+    double low1;     // 1% low FPS
+} AioBenchStats;
+
+// Same as aio_bench_finish but ALSO fills *out (may be NULL) with the numeric
+// FPS stats. Writes the same CSV + _bench_<label>.txt and returns the heap
+// summary (caller frees). Ends the benchmark.
+char *aio_bench_finish_ex(const char *api_label, double total_seconds, AioBenchStats *out);
+
 #endif  // AIO_BENCH_H

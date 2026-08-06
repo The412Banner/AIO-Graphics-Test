@@ -42,6 +42,36 @@ typedef struct {
 char *aio_disk_run_ex(int size_mb, int defeat_cache, aio_disk_progress_fn progress, void *user,
                       AioDiskResult *out);
 
+// Live incremental progress the worker publishes as it runs, so the UI can poll
+// it each frame and draw moving progress bars + partial MB/s instead of a frozen
+// "loading". Written by the disk thread, read by the UI thread; fields are plain
+// (display-only) so a torn read is at worst one stale frame - never a crash. All
+// figures are decimal MB/s, matching the final report.
+enum {
+    AIO_DISK_PHASE_IDLE = 0,
+    AIO_DISK_PHASE_SEQ_WRITE,
+    AIO_DISK_PHASE_SEQ_READ,
+    AIO_DISK_PHASE_RAND_READ,
+    AIO_DISK_PHASE_RAND_WRITE,
+    AIO_DISK_PHASE_BUSTER,   // writing the cache-buster (real-flash mode)
+    AIO_DISK_PHASE_DONE
+};
+typedef struct {
+    volatile long phase;         // AIO_DISK_PHASE_*
+    volatile long phase_x1000;   // within-phase progress, 0..1000 (fixed point)
+    volatile long overall_x1000; // whole-run progress, 0..1000
+    double cur_mbps;             // partial MB/s of the phase in flight
+    double seq_write_mbps;       // per-phase results, filled as each completes
+    double seq_read_mbps;
+    double rand_read_mbps, rand_read_iops;
+    double rand_write_mbps, rand_write_iops;
+} AioDiskProgress;
+
+// Same as aio_disk_run_ex but also updates *prog (may be NULL) continuously so a
+// UI can render live progress. Returns the heap text report (caller frees).
+char *aio_disk_run_ex2(int size_mb, int defeat_cache, aio_disk_progress_fn progress, void *user,
+                       AioDiskResult *out, AioDiskProgress *prog);
+
 // Delete any leftover temp files (test file + cache-buster) from an interrupted
 // run and report how much space was freed. Normal runs clean up automatically;
 // this is the manual safety net. Returns a heap report the caller must free().

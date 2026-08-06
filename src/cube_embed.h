@@ -41,6 +41,14 @@ extern "C" {
 // memcpy and BGRA8 needs an R/B swap per pixel.
 enum { AIO_EMBED_FMT_RGBA8 = 0, AIO_EMBED_FMT_BGRA8 = 1 };
 
+// Theme-aware backdrop clear color (linear 0..1 RGB) for the embedded offscreen
+// backends. The ImGui shell writes this from the active light/dark theme BEFORE
+// driving a backend so every embedded render area (Vulkan / GL / DX12 / DX10 /
+// DX9 / DX8 / DirectDraw) follows the theme, matching the DX11 scene path. Each
+// backend reads it at clear time. Defined once (in cube.c); defaults to the dark
+// instrument backdrop so the standalone --cube runners are unaffected.
+extern float aio_embed_clear_rgb[3];
+
 typedef struct AioEmbedFrame {
     const void *pixels;  // CPU pointer to the last rendered frame; owned by the
                          // backend, valid until the next render/get_frame/cleanup.

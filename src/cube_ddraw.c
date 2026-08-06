@@ -721,7 +721,11 @@ void aio_ddraw_embed_render(double t) {
     D3DLVERTEX verts[36];
     build_lvert_cube(verts);
 
-    IDirect3DDevice7_Clear(g_dev, 0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER, 0x00080C11, 1.0f, 0);
+    IDirect3DDevice7_Clear(g_dev, 0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER,
+                           (DWORD)(((int)(aio_embed_clear_rgb[0] * 255.0f + 0.5f) << 16) |
+                                   ((int)(aio_embed_clear_rgb[1] * 255.0f + 0.5f) << 8) |
+                                   (int)(aio_embed_clear_rgb[2] * 255.0f + 0.5f)),
+                           1.0f, 0);
     if (SUCCEEDED(IDirect3DDevice7_BeginScene(g_dev))) {
         IDirect3DDevice7_SetTransform(g_dev, D3DTRANSFORMSTATE_WORLD, &world);
         IDirect3DDevice7_SetTransform(g_dev, D3DTRANSFORMSTATE_VIEW, &view);

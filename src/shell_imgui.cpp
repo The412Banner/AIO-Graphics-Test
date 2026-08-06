@@ -213,6 +213,13 @@ struct Palette {
 static Palette PAL;
 static bool g_dark = true;
 
+// Theme-following render backdrop (fix 6). g_scene_clear is the clear color the
+// DX11 offscreen + every cross-API embedded backend use, so the CUBE background
+// follows the theme; g_view_bg/g_view_bg2 are the empty-viewport gradient. Set in
+// apply_theme, which also mirrors g_scene_clear into aio_embed_clear_rgb.
+static float g_scene_clear[3] = {8.0f / 255.0f, 12.0f / 255.0f, 17.0f / 255.0f};
+static ImU32 g_view_bg = 0, g_view_bg2 = 0;
+
 // Per-API chip hues (theme-independent). H_TOOL resolves to the theme accent.
 enum { H_VK, H_GL, H_DX12, H_DX11, H_DX10, H_DX9, H_DX8, H_DDRAW, H_DEMO, H_TOOL, H_COUNT };
 static ImU32 g_hue[H_COUNT];
@@ -248,6 +255,20 @@ static void apply_theme(bool dark) {
         PAL.line2 = H(0xc3ccd6); PAL.text = H(0x141b23); PAL.muted = H(0x5b6775);
         PAL.faint = H(0x8592a0); PAL.accent = H(0x0f9e8f); PAL.accentInk = H(0x0b7a6e);
     }
+
+    // The render viewport now follows the theme (fix 6): light backdrop + light
+    // cube clear in light mode, the dark instrument surface in dark mode. The clear
+    // is mirrored to the cross-API embedded backends via aio_embed_clear_rgb.
+    if (dark) {
+        g_view_bg = PAL.scr; g_view_bg2 = PAL.scr2;
+        g_scene_clear[0] = 8.0f / 255.0f; g_scene_clear[1] = 12.0f / 255.0f; g_scene_clear[2] = 17.0f / 255.0f;
+    } else {
+        g_view_bg = H(0xdfe4ea); g_view_bg2 = H(0xeef2f6);
+        g_scene_clear[0] = 0xe6 / 255.0f; g_scene_clear[1] = 0xea / 255.0f; g_scene_clear[2] = 0xef / 255.0f;
+    }
+    aio_embed_clear_rgb[0] = g_scene_clear[0];
+    aio_embed_clear_rgb[1] = g_scene_clear[1];
+    aio_embed_clear_rgb[2] = g_scene_clear[2];
 
     ImGuiStyle &s = ImGui::GetStyle();
     if (dark) ImGui::StyleColorsDark(); else ImGui::StyleColorsLight();
@@ -409,6 +430,10 @@ static bool g_present_vsync = true;
 // so its GPU cost can be timed. Driven by the Benchmark datapane / bench_tick.
 static int g_bench_active_scene = -1;
 static int g_bench_active_draws = 0;
+// Cross-API benchmark override: while set, the offscreen drives THIS embedded
+// backend (Vulkan/GL/DX12/DX10/DX9/DX8/DDraw) each frame so its embedded render
+// rate can be timed windowlessly - no CreateProcess, no pop-out (fix 1).
+static const AioEmbedBackend *g_bench_active_embed = nullptr;
 
 // ===========================================================================
 // Phase 4: authoritative FPS counter - a faithful C++ port of the emulator's
@@ -779,6 +804,13 @@ static void drive_embed_backend(const AioEmbedBackend *bk, int w, int h, double 
 // Render the selected embeddable scene into the offscreen target at (w,h) pixels.
 // Switches scenes (cleanup old / init new) with no flicker. Sets g_scene_live.
 static void render_scene_to_offscreen(int w, int h, double t) {
+    // A running CROSS-API benchmark drives ITS embedded backend offscreen (fix 1:
+    // windowless), regardless of the current selection (the Benchmark tool).
+    if (g_bench_active_embed) {
+        if (g_cur_scene >= 0) { aio_d3d11_scene_cleanup(g_cur_scene); g_cur_scene = -1; }
+        drive_embed_backend(g_bench_active_embed, w, h, t);
+        return;
+    }
     int draws = 0;
     int sc;
     // A running in-process benchmark drives the offscreen with ITS scene (so its GPU
@@ -837,7 +869,7 @@ static void render_scene_to_offscreen(int w, int h, double t) {
     g_ctx->RSSetViewports(1, &vp);
     g_ctx->OMSetDepthStencilState(g_off_dss, 1);
     g_ctx->RSSetState(g_off_rs);
-    const float scr[4] = {8 / 255.0f, 12 / 255.0f, 17 / 255.0f, 1.0f};  // mockup screen bg
+    const float scr[4] = {g_scene_clear[0], g_scene_clear[1], g_scene_clear[2], 1.0f};  // theme-following bg
     g_ctx->ClearRenderTargetView(g_off_rtv, scr);
     g_ctx->ClearDepthStencilView(g_off_dsv, D3D11_CLEAR_DEPTH, 1.0f, 0);
     float aspect = g_off_h > 0 ? (float)g_off_w / (float)g_off_h : 1.0f;
@@ -1082,17 +1114,20 @@ static void gpu_query_kick() {
         g_gpu_thread = CreateThread(nullptr, 0, gpu_query_thread, nullptr, 0, nullptr);
 }
 
-// ---- Disk Speed: background run + structured result ----
+// ---- Disk Speed: background run + LIVE progress + structured result ----
+static void aio_local_timestamp(char *out, size_t cap);  // fwd (defined in bench section)
 static volatile LONG g_disk_state = TQ_IDLE;
 static AioDiskResult g_diskres;
+static AioDiskProgress g_disk_prog;   // live progress the worker publishes (fix 5)
 static HANDLE g_disk_thread = nullptr;
 static int g_disk_run_mb = 1024;      // size fed to the running thread
 static int g_disk_defeat = 1;         // real-flash mode (defeat page cache)
 static int g_disk_size_idx = 2;       // index into {256,512,1024,2048}
 static const int kDiskSizes[4] = {256, 512, 1024, 2048};
 static char g_disk_cleanup_msg[96] = "";
+static int g_disk_view = 0;           // 0 = Live, 1 = History (fix 5)
 static DWORD WINAPI disk_run_thread(LPVOID) {
-    char *rep = aio_disk_run_ex(g_disk_run_mb, g_disk_defeat, nullptr, nullptr, &g_diskres);
+    char *rep = aio_disk_run_ex2(g_disk_run_mb, g_disk_defeat, nullptr, nullptr, &g_diskres, &g_disk_prog);
     if (rep) free(rep);
     InterlockedExchange(&g_disk_state, TQ_DONE);
     return 0;
@@ -1100,8 +1135,59 @@ static DWORD WINAPI disk_run_thread(LPVOID) {
 static void disk_run_kick() {
     if (InterlockedCompareExchange(&g_disk_state, TQ_RUNNING, TQ_IDLE) == TQ_IDLE) {
         g_disk_run_mb = kDiskSizes[g_disk_size_idx];
+        memset((void *)&g_disk_prog, 0, sizeof(g_disk_prog));
         g_disk_thread = CreateThread(nullptr, 0, disk_run_thread, nullptr, 0, nullptr);
     }
+}
+
+// --- persisted disk-run history (survives restarts; fix 5) ---
+struct DHistRun { char ts[24]; int size_mb; int defeat; double sr, sw, rr, rw; char cls[48]; };
+static DHistRun g_dhist[40];
+static int g_dhist_n = 0;
+static int g_dhist_sel = 0;
+#define AIO_DISK_HIST_FILE "AIO-Graphics-Test_disk_history.txt"
+static void disk_hist_load() {
+    g_dhist_n = 0;
+    FILE *f = fopen(AIO_DISK_HIST_FILE, "r");
+    if (!f) return;
+    char line[256];
+    while (fgets(line, sizeof(line), f)) {
+        char *tab = strchr(line, '\t');
+        if (!tab) continue;
+        *tab = '\0';
+        int size = 0, defeat = 0; double sr = 0, sw = 0, rr = 0, rw = 0;
+        char *p = tab + 1;
+        if (sscanf(p, "%d\t%d\t%lf\t%lf\t%lf\t%lf", &size, &defeat, &sr, &sw, &rr, &rw) < 6) continue;
+        char *q = p;  // storage class = text after the 6th tab
+        for (int k = 0; k < 6 && q; ++k) { q = strchr(q, '\t'); if (q) q++; }
+        if (g_dhist_n >= 40) { memmove(&g_dhist[0], &g_dhist[1], 39 * sizeof(DHistRun)); g_dhist_n = 39; }
+        DHistRun *r = &g_dhist[g_dhist_n++];
+        memset(r, 0, sizeof(*r));
+        snprintf(r->ts, sizeof(r->ts), "%s", line);
+        r->size_mb = size; r->defeat = defeat; r->sr = sr; r->sw = sw; r->rr = rr; r->rw = rw;
+        if (q) { char *nl = strpbrk(q, "\r\n"); if (nl) *nl = '\0'; snprintf(r->cls, sizeof(r->cls), "%s", q); }
+    }
+    fclose(f);
+}
+static void disk_hist_record() {
+    if (!g_diskres.ok) return;
+    char ts[24]; aio_local_timestamp(ts, sizeof(ts));
+    FILE *f = fopen(AIO_DISK_HIST_FILE, "a");
+    if (f) {
+        fprintf(f, "%s\t%d\t%d\t%.1f\t%.1f\t%.1f\t%.1f\t%s\n", ts, g_disk_run_mb, g_disk_defeat,
+                g_diskres.seq_read_mbps, g_diskres.seq_write_mbps, g_diskres.rand_read_mbps,
+                g_diskres.rand_write_mbps, g_diskres.storage_class);
+        fclose(f);
+    }
+    if (g_dhist_n >= 40) { memmove(&g_dhist[0], &g_dhist[1], 39 * sizeof(DHistRun)); g_dhist_n = 39; }
+    DHistRun *r = &g_dhist[g_dhist_n++];
+    memset(r, 0, sizeof(*r));
+    snprintf(r->ts, sizeof(r->ts), "%s", ts);
+    r->size_mb = g_disk_run_mb; r->defeat = g_disk_defeat;
+    r->sr = g_diskres.seq_read_mbps; r->sw = g_diskres.seq_write_mbps;
+    r->rr = g_diskres.rand_read_mbps; r->rw = g_diskres.rand_write_mbps;
+    snprintf(r->cls, sizeof(r->cls), "%s", g_diskres.storage_class);
+    g_dhist_sel = 0;
 }
 
 // ---- Benchmark engine ----
@@ -1155,106 +1241,221 @@ static BRow g_brows[] = {
 };
 static const int g_nbrows = (int)(sizeof(g_brows) / sizeof(g_brows[0]));
 
-static int g_bench_secs = 15;       // per-test duration (15/30/45/60)
-static bool g_bench_vsync = false;   // external rows honor --vsync
+static int g_bench_secs = 15;        // per-test duration (15/30/45/60)
+static bool g_bench_vsync = false;   // UI toggle (embedded runs are always uncapped)
 
-// (g_bench_active_scene / g_bench_active_draws are declared earlier, near the timing
-// state, because render_scene_to_offscreen reads them.)
-static int g_bench_ip_row = -1;      // row currently in-process benching (-1 none)
-static double g_bench_ip_start = 0.0;
-static double g_bench_sum = 0.0;
-static double g_bench_min_ms = 1e9, g_bench_max_ms = 0.0;
-static int g_bench_n = 0;
-// Simple sequential queue for Run / Run All.
+// (g_bench_active_scene / g_bench_active_draws / g_bench_active_embed are declared
+// earlier, near the timing state, because render_scene_to_offscreen reads them.)
+static int g_bench_ip_row = -1;       // active row (-1 none); now used for ALL APIs
+static double g_bench_ip_start = 0.0;  // scene-clock seconds at row start
+static int g_bench_live_frames = 0;    // frames actually accumulated for this row
+static unsigned char g_bcheck[64];     // per-row multi-select checkbox state (fix 2)
+static float g_brow_low1[64];          // per-row last 1%-low FPS (fix 4)
+// Simple sequential queue for Run / Run All / Run Selected.
 static int g_bench_queue[64];
 static int g_bench_qpos = 0, g_bench_qn = 0;
+static int g_bench_view = 0;         // 0 = Tests, 1 = History (fix 4)
+static float g_bench_progress = 0.0f;  // 0..1 elapsed of the active row (progress UI, fix 1)
+static float g_bench_run_fps = 0.0f;   // smoothed live fps of the active row (progress UI)
 
-static bool bench_any_active() {
-    if (g_bench_ip_row >= 0) return true;
-    for (int i = 0; i < g_nbrows; ++i) if (g_brows[i].state != 0) return true;
-    return false;
+// Local wall-clock timestamp "YYYY-MM-DD HH:MM:SS" (shared by bench + disk history).
+static void aio_local_timestamp(char *out, size_t cap) {
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    snprintf(out, cap, "%04d-%02d-%02d %02d:%02d:%02d", st.wYear, st.wMonth, st.wDay, st.wHour,
+             st.wMinute, st.wSecond);
+}
+
+// --- persisted benchmark run history (survives app restarts; fix 4) ---
+struct BHistRow { char label[40]; float avg, mn, mx, low1; };
+struct BHistRun { char ts[24]; int secs; BHistRow rows[40]; int nrows; };
+static BHistRun g_bhist[40];
+static int g_bhist_n = 0;
+static int g_bhist_sel = 0;  // selected run in the History view (0 = newest)
+static bool g_bench_sweep_active = false;
+static BHistRun g_bench_sweep;  // accumulates the in-progress Run/Run All/Run Selected
+#define AIO_BENCH_HIST_FILE "AIO-Graphics-Test_history.txt"
+
+static bool bench_any_active() { return g_bench_ip_row >= 0; }
+
+// Map a cross-API bench row to its embedded backend driver (fix 1: no CreateProcess).
+static const AioEmbedBackend *bench_embed_for(const BRow &r) {
+    if (r.scene >= 0) return nullptr;  // D3D11 rows use the in-device scene path
+    const char *a = r.arg;
+    if (strncmp(a, "vk", 2) == 0) return &kEmbedVk;
+    if (strncmp(a, "gl", 2) == 0) return &kEmbedGl;
+    if (strncmp(a, "dx12", 4) == 0) return &kEmbedDx12;
+    if (strncmp(a, "dx10", 4) == 0) return &kEmbedDx10;
+    if (strncmp(a, "dx9", 3) == 0) return &kEmbedDx9;
+    if (strncmp(a, "dx8", 3) == 0) return &kEmbedDx8;
+    if (strncmp(a, "dx7", 3) == 0) return &kEmbedDdraw;      // DirectDraw / D3D7
+    if (strncmp(a, "ddraw2d", 7) == 0) return &kEmbedDdraw;  // DirectDraw 2D
+    return nullptr;
+}
+
+static void bench_hist_load() {
+    g_bhist_n = 0;
+    FILE *f = fopen(AIO_BENCH_HIST_FILE, "r");
+    if (!f) return;
+    char line[256];
+    BHistRun *cur = nullptr;
+    while (fgets(line, sizeof(line), f)) {
+        if (strncmp(line, "RUN\t", 4) == 0) {
+            if (g_bhist_n >= 40) { memmove(&g_bhist[0], &g_bhist[1], 39 * sizeof(BHistRun)); g_bhist_n = 39; }
+            cur = &g_bhist[g_bhist_n++];
+            memset(cur, 0, sizeof(*cur));
+            char *ts = line + 4, *tab = strchr(ts, '\t');
+            if (tab) { *tab = '\0'; cur->secs = atoi(tab + 1); }
+            snprintf(cur->ts, sizeof(cur->ts), "%s", ts);
+        } else if (cur && cur->nrows < 40) {
+            char *t1 = strchr(line, '\t');
+            if (!t1) continue;
+            *t1 = '\0';
+            float a = 0, mn = 0, mx = 0, lo = 0;
+            int got = sscanf(t1 + 1, "%f\t%f\t%f\t%f", &a, &mn, &mx, &lo);
+            if (got >= 3) {
+                BHistRow *r = &cur->rows[cur->nrows++];
+                snprintf(r->label, sizeof(r->label), "%s", line);
+                r->avg = a; r->mn = mn; r->mx = mx; r->low1 = (got >= 4) ? lo : 0.0f;
+            }
+        }
+    }
+    fclose(f);
+}
+
+static void bench_sweep_begin() {
+    aio_local_timestamp(g_bench_sweep.ts, sizeof(g_bench_sweep.ts));
+    g_bench_sweep.secs = g_bench_secs;
+    g_bench_sweep.nrows = 0;
+    g_bench_sweep_active = true;
+}
+static void bench_sweep_add(const char *label, float a, float mn, float mx, float lo) {
+    if (g_bench_sweep.nrows >= 40) return;
+    BHistRow *r = &g_bench_sweep.rows[g_bench_sweep.nrows++];
+    snprintf(r->label, sizeof(r->label), "%s", label);
+    r->avg = a; r->mn = mn; r->mx = mx; r->low1 = lo;
+}
+static void bench_sweep_finish() {
+    if (!g_bench_sweep_active) return;
+    g_bench_sweep_active = false;
+    if (g_bench_sweep.nrows == 0) return;
+    // Append to the persistent tab-separated history file.
+    FILE *f = fopen(AIO_BENCH_HIST_FILE, "a");
+    if (f) {
+        fprintf(f, "RUN\t%s\t%d\n", g_bench_sweep.ts, g_bench_sweep.secs);
+        for (int i = 0; i < g_bench_sweep.nrows; ++i) {
+            BHistRow *r = &g_bench_sweep.rows[i];
+            fprintf(f, "%s\t%.1f\t%.1f\t%.1f\t%.1f\n", r->label, r->avg, r->mn, r->mx, r->low1);
+        }
+        fclose(f);
+    }
+    // Timestamped human-readable report file.
+    char safe[24];
+    snprintf(safe, sizeof(safe), "%s", g_bench_sweep.ts);
+    for (char *p = safe; *p; ++p) if (*p == ':' || *p == ' ') *p = '-';
+    char fn[96];
+    snprintf(fn, sizeof(fn), "AIO-Graphics-Test_bench_report_%s.txt", safe);
+    FILE *rf = fopen(fn, "w");
+    if (rf) {
+        fprintf(rf, "AIO Graphics Test - benchmark report\r\n%s   %d s per test\r\n\r\n",
+                g_bench_sweep.ts, g_bench_sweep.secs);
+        fprintf(rf, "%-30s %8s %8s %8s %8s\r\n", "Test", "Avg", "Min", "Max", "1%low");
+        for (int i = 0; i < g_bench_sweep.nrows; ++i) {
+            BHistRow *r = &g_bench_sweep.rows[i];
+            fprintf(rf, "%-30s %8.0f %8.0f %8.0f %8.0f\r\n", r->label, r->avg, r->mn, r->mx, r->low1);
+        }
+        fclose(rf);
+    }
+    // Push into the in-memory list (newest kept) + select it in the History view.
+    if (g_bhist_n >= 40) { memmove(&g_bhist[0], &g_bhist[1], 39 * sizeof(BHistRun)); g_bhist_n = 39; }
+    g_bhist[g_bhist_n++] = g_bench_sweep;
+    g_bhist_sel = 0;
 }
 
 static void bench_start_row(int i, double now) {
     if (i < 0 || i >= g_nbrows) return;
     BRow &r = g_brows[i];
+    g_bench_ip_row = i;
+    g_bench_ip_start = now;
+    g_bench_live_frames = 0;
+    g_scene_timed = false;
+    aio_bench_set_label(r.apilabel);
+    aio_bench_begin(g_bench_secs);
     if (r.scene >= 0) {
         g_bench_active_scene = r.scene;
         g_bench_active_draws = r.draws;
-        g_bench_ip_row = i;
-        g_bench_ip_start = now;
-        g_bench_sum = 0.0; g_bench_min_ms = 1e9; g_bench_max_ms = 0.0; g_bench_n = 0;
-        g_scene_timed = false;
-        r.state = 1;
+        g_bench_active_embed = nullptr;
     } else {
-        char exe[MAX_PATH];
-        if (!GetModuleFileNameA(nullptr, exe, MAX_PATH)) return;
-        char cmd[512];
-        snprintf(cmd, sizeof(cmd), "\"%s\" --cube %s --bench %d --autoclose 3%s", exe, r.arg,
-                 g_bench_secs, g_bench_vsync ? " --vsync" : "");
-        STARTUPINFOA si; ZeroMemory(&si, sizeof(si)); si.cb = sizeof(si);
-        PROCESS_INFORMATION pi; ZeroMemory(&pi, sizeof(pi));
-        if (CreateProcessA(exe, cmd, nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
-            CloseHandle(pi.hThread);
-            r.proc = pi.hProcess;
-            r.state = 2;
-        }
+        g_bench_active_scene = -1;
+        g_bench_active_draws = 0;
+        g_bench_active_embed = bench_embed_for(r);  // cross-API embedded (fix 1)
     }
+    r.state = 1;
 }
 
-// Per-frame bench progression: sample the in-process run, reap external ones, and
-// start the next queued row when idle. Called once per frame with the scene clock.
-static void bench_tick(double now) {
-    // in-process GPU-time sampling (drop the first 0.5 s as warm-up + sub-frame glitches)
+// Finalize the active row: compute stats via bench.c (reuses its CSV + _bench_<API>
+// .txt + summary), store the result, and add it to the running sweep (fix 4).
+static void bench_finish_row(double elapsed) {
+    int i = g_bench_ip_row;
+    if (i < 0) return;
+    BRow &r = g_brows[i];
+    AioBenchStats st;
+    char *sum = aio_bench_finish_ex(r.apilabel, elapsed, &st);
+    if (sum) free(sum);
+    r.avg = (float)st.avg; r.mn = (float)st.min; r.mx = (float)st.max;
+    g_brow_low1[i] = (float)st.low1;
+    if (g_bench_sweep_active) bench_sweep_add(r.apilabel, r.avg, r.mn, r.mx, g_brow_low1[i]);
+    r.state = 0;
+    g_bench_ip_row = -1;
+    g_bench_active_scene = -1;
+    g_bench_active_draws = 0;
+    g_bench_active_embed = nullptr;
+}
+
+// Per-frame bench progression: sample the embedded run with the SAME wall-clock
+// per-frame timing the HUD FpsCounter uses (present forced uncapped while a bench
+// is active), then advance the queue. Called once per frame with the scene clock
+// and this frame's delta in ms.
+static void bench_tick(double now, double dt_ms) {
     if (g_bench_ip_row >= 0) {
-        BRow &r = g_brows[g_bench_ip_row];
         double el = now - g_bench_ip_start;
-        if (el > 0.5 && g_scene_timed && g_scene_ms >= 0.02) {
-            g_bench_sum += g_scene_ms;
-            if (g_scene_ms < g_bench_min_ms) g_bench_min_ms = g_scene_ms;
-            if (g_scene_ms > g_bench_max_ms) g_bench_max_ms = g_scene_ms;
-            g_bench_n++;
+        g_bench_progress = (g_bench_secs > 0) ? (float)(el / (double)g_bench_secs) : 0.0f;
+        if (dt_ms > 0.0) {
+            float f = (float)(1000.0 / dt_ms);
+            g_bench_run_fps = g_bench_run_fps <= 0.0f ? f : g_bench_run_fps * 0.9f + f * 0.1f;
         }
-        if (el >= (double)g_bench_secs) {
-            if (g_bench_n > 0 && g_bench_sum > 0.0) {
-                r.avg = (float)(1000.0 * g_bench_n / g_bench_sum);
-                r.mn = (float)(g_bench_max_ms > 0.0 ? 1000.0 / g_bench_max_ms : 0.0);
-                r.mx = (float)(g_bench_min_ms > 0.0 ? 1000.0 / g_bench_min_ms : 0.0);
-            }
-            r.state = 0;
-            g_bench_ip_row = -1;
-            g_bench_active_scene = -1;
-            g_bench_active_draws = 0;
-        }
+        // Count a frame only while the bench scene/backend actually rendered.
+        if (g_scene_live && dt_ms > 0.0) { aio_bench_add(dt_ms); g_bench_live_frames++; }
+        // Backend unavailable (nothing rendered within the grace window) -> abort.
+        if (el > 1.0 && g_bench_live_frames == 0 && !g_scene_live)
+            bench_finish_row(el);
+        else if (el >= (double)g_bench_secs)
+            bench_finish_row(el);
     }
-    // external process completion -> read result file "avg|min|max"
-    for (int i = 0; i < g_nbrows; ++i) {
-        BRow &r = g_brows[i];
-        if (r.state == 2 && r.proc && WaitForSingleObject(r.proc, 0) == WAIT_OBJECT_0) {
-            CloseHandle(r.proc);
-            r.proc = nullptr;
-            r.state = 0;
-            char path[192], buf[128];
-            snprintf(path, sizeof(path), "AIO-Graphics-Test_bench_%s.txt", r.apilabel);
-            FILE *f = fopen(path, "r");
-            if (f) {
-                size_t n = fread(buf, 1, sizeof(buf) - 1, f);
-                buf[n] = '\0';
-                fclose(f);
-                float a = 0, mn = 0, mx = 0;
-                if (sscanf(buf, "%f|%f|%f", &a, &mn, &mx) == 3) { r.avg = a; r.mn = mn; r.mx = mx; }
-            }
-        }
+    // Start the next queued row once idle; close the sweep when the queue drains.
+    if (g_bench_ip_row < 0) {
+        if (g_bench_qpos < g_bench_qn)
+            bench_start_row(g_bench_queue[g_bench_qpos++], now);
+        else if (g_bench_sweep_active)
+            bench_sweep_finish();
     }
-    // start next queued row once nothing is active
-    if (!bench_any_active() && g_bench_qpos < g_bench_qn)
-        bench_start_row(g_bench_queue[g_bench_qpos++], now);
 }
 
-static void bench_enqueue(int single) {
+static void bench_enqueue_list(const int *rows, int n) {
     g_bench_qn = 0; g_bench_qpos = 0;
-    if (single >= 0) g_bench_queue[g_bench_qn++] = single;
-    else for (int i = 0; i < g_nbrows && g_bench_qn < 64; ++i) g_bench_queue[g_bench_qn++] = i;
+    for (int i = 0; i < n && g_bench_qn < 64; ++i) g_bench_queue[g_bench_qn++] = rows[i];
+    if (g_bench_qn > 0) bench_sweep_begin();
+}
+static void bench_enqueue(int single) {  // single >= 0 = one row; -1 = all rows
+    int tmp[64]; int n = 0;
+    if (single >= 0) tmp[n++] = single;
+    else for (int i = 0; i < g_nbrows && n < 64; ++i) tmp[n++] = i;
+    bench_enqueue_list(tmp, n);
+}
+static void bench_enqueue_selected() {  // Run Selected: only the checked rows (fix 2)
+    int tmp[64]; int n = 0;
+    for (int i = 0; i < g_nbrows && n < 64; ++i) if (g_bcheck[i]) tmp[n++] = i;
+    bench_enqueue_list(tmp, n);
 }
 
 // A compact button drawn on the dark screen surface (datapane controls).
@@ -1276,6 +1477,30 @@ static bool screen_button(const char *id, ImVec2 pos, ImVec2 size, const char *l
     float tw = text_w(g_ui, 12.0f, label);
     text_at(dl, g_ui, 12.0f, ImVec2(pos.x + (size.x - tw) * 0.5f, pos.y + (size.y - 12.0f) * 0.5f), tc,
             label);
+    return clk;
+}
+
+// A small checkbox drawn on the dark screen surface (bench multi-select, fix 2).
+// Toggles *state on click; returns true when clicked.
+static bool screen_checkbox(const char *id, ImVec2 pos, float sz, unsigned char *state) {
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    ImGui::SetCursorScreenPos(pos);
+    ImGui::PushID(id);
+    bool clk = ImGui::InvisibleButton("k", ImVec2(sz, sz));
+    bool hov = ImGui::IsItemHovered();
+    ImGui::PopID();
+    ImVec2 mx(pos.x + sz, pos.y + sz);
+    bool on = state && *state;
+    dl->AddRectFilled(pos, mx, on ? (PAL.accent & 0x00ffffff) | 0x33000000 : IM_COL32(255, 255, 255, 10), 3.0f);
+    dl->AddRect(pos, mx, hov ? PAL.accent : PAL.scrLine, 3.0f, 0, 1.4f);
+    if (on) {
+        // check mark
+        dl->AddLine(ImVec2(pos.x + sz * 0.24f, pos.y + sz * 0.52f),
+                    ImVec2(pos.x + sz * 0.44f, pos.y + sz * 0.72f), PAL.accent, 1.8f);
+        dl->AddLine(ImVec2(pos.x + sz * 0.44f, pos.y + sz * 0.72f),
+                    ImVec2(pos.x + sz * 0.78f, pos.y + sz * 0.28f), PAL.accent, 1.8f);
+    }
+    if (clk && state) *state = on ? 0 : 1;
     return clk;
 }
 
@@ -1377,95 +1602,301 @@ static void draw_gpu_pane(ImVec2 o, float w, float h) {
     ImGui::EndChild();
 }
 
-// Benchmark: mockup bench rows (bar + value) + per-row Run + Run All + controls.
+// Two small sub-tab buttons (Tests / History) drawn on the screen surface. Sets
+// *view to the tapped index. Returns the right edge x of the cluster.
+static float screen_subtabs(ImVec2 right_top, const char *const *labels, int n, int *view) {
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    float bw = 78.0f, bh = 24.0f, gap = 6.0f;
+    float x = right_top.x - (bw * n + gap * (n - 1));
+    float left = x;
+    for (int i = 0; i < n; ++i) {
+        ImVec2 p(x, right_top.y), mx(x + bw, right_top.y + bh);
+        ImGui::SetCursorScreenPos(p);
+        ImGui::PushID(i + 991);
+        bool clk = ImGui::InvisibleButton("t", ImVec2(bw, bh));
+        bool hov = ImGui::IsItemHovered();
+        ImGui::PopID();
+        bool active = (*view == i);
+        dl->AddRectFilled(p, mx, active ? PAL.accent : (hov ? H(0x18222d) : IM_COL32(255, 255, 255, 12)), 6.0f);
+        dl->AddRect(p, mx, active ? PAL.accent : PAL.scrLine, 6.0f, 0, 1.0f);
+        ImU32 tc = active ? H(0x04231f) : (hov ? PAL.accentInk : PAL.scrText);
+        float tw = text_w(g_ui, 12.0f, labels[i]);
+        text_at(dl, g_ui, 12.0f, ImVec2(p.x + (bw - tw) * 0.5f, p.y + (bh - 12.0f) * 0.5f), tc, labels[i]);
+        if (clk) *view = i;
+        x += bw + gap;
+    }
+    return left;
+}
+
+// Benchmark HISTORY view: past runs (newest first) with per-test avg/min/max/1%low.
+// Survives restarts (loaded from AIO-Graphics-Test_history.txt at launch). Fix 4.
+static void draw_bench_history(ImVec2 base, float w, float h) {
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    float pad = 20.0f, x0 = base.x + pad, y0 = base.y + 14.0f, availW = w - 2.0f * pad;
+    dp_header(dl, ImVec2(x0, y0), "Benchmark history");
+    const char *tabs[2] = {"Tests", "History"};
+    screen_subtabs(ImVec2(x0 + availW, y0 - 4.0f), tabs, 2, &g_bench_view);
+
+    float listTop = y0 + 34.0f;
+    ImGui::SetCursorScreenPos(ImVec2(base.x, listTop));
+    ImGui::BeginChild("##bhist", ImVec2(w, (base.y + h) - listTop - 8.0f), false, ImGuiWindowFlags_NoBackground);
+    ImDrawList *ldl = ImGui::GetWindowDrawList();
+    ImVec2 lb = ImGui::GetCursorScreenPos();
+    float rx = lb.x + pad, ry = lb.y + 4.0f;
+    if (g_bhist_n == 0) {
+        text_at(ldl, g_mono, 12.0f, ImVec2(rx, ry + 4.0f), PAL.scrMuted,
+                "No past runs yet. Run a benchmark on the Tests tab to record one.");
+        ImGui::Dummy(ImVec2(availW, 40.0f));
+        ImGui::EndChild();
+        return;
+    }
+    for (int d = 0; d < g_bhist_n; ++d) {
+        int idx = g_bhist_n - 1 - d;  // newest first
+        BHistRun &run = g_bhist[idx];
+        bool sel = (g_bhist_sel == d);
+        float hdrH = 26.0f;
+        ImGui::SetCursorScreenPos(ImVec2(rx, ry));
+        ImGui::PushID(idx + 4000);
+        bool clk = ImGui::InvisibleButton("r", ImVec2(availW, hdrH));
+        bool hov = ImGui::IsItemHovered();
+        ImGui::PopID();
+        ImVec2 hp(rx, ry), hmx(rx + availW, ry + hdrH);
+        ldl->AddRectFilled(hp, hmx, sel ? H(0x18222d) : (hov ? IM_COL32(255, 255, 255, 10) : IM_COL32(255, 255, 255, 4)), 6.0f);
+        if (sel) ldl->AddRectFilled(hp, ImVec2(hp.x + 2.0f, hmx.y), PAL.accent, 0);
+        char hb[96];
+        snprintf(hb, sizeof(hb), "%s   -   %d tests   -   %ds", run.ts, run.nrows, run.secs);
+        text_at(ldl, g_mono, 11.5f, ImVec2(rx + 10.0f, ry + 6.0f), sel ? PAL.accentInk : PAL.scrText, hb);
+        text_at(ldl, g_mono_sm, 10.0f, ImVec2(hmx.x - 54.0f, ry + 7.0f), PAL.scrMuted, sel ? "hide" : "open");
+        if (clk) g_bhist_sel = sel ? -1 : d;
+        ry += hdrH + 3.0f;
+        if (sel) {
+            // Column header + one line per test.
+            text_at(ldl, g_mono_sm, 9.5f, ImVec2(rx + 14.0f, ry), PAL.scrMuted, "TEST");
+            text_at(ldl, g_mono_sm, 9.5f, ImVec2(rx + availW - 250.0f, ry), PAL.scrMuted, "AVG");
+            text_at(ldl, g_mono_sm, 9.5f, ImVec2(rx + availW - 185.0f, ry), PAL.scrMuted, "MIN");
+            text_at(ldl, g_mono_sm, 9.5f, ImVec2(rx + availW - 120.0f, ry), PAL.scrMuted, "MAX");
+            text_at(ldl, g_mono_sm, 9.5f, ImVec2(rx + availW - 55.0f, ry), PAL.scrMuted, "1%LOW");
+            ry += 16.0f;
+            for (int i = 0; i < run.nrows; ++i) {
+                BHistRow &rr = run.rows[i];
+                if (i & 1) ldl->AddRectFilled(ImVec2(rx + 8.0f, ry - 1.0f), ImVec2(rx + availW - 8.0f, ry + 17.0f), IM_COL32(255, 255, 255, 4), 0);
+                text_at(ldl, g_mono, 11.0f, ImVec2(rx + 14.0f, ry + 1.0f), PAL.scrText, rr.label);
+                char nb[16];
+                snprintf(nb, sizeof(nb), "%.0f", rr.avg);   text_at(ldl, g_mono, 11.0f, ImVec2(rx + availW - 250.0f, ry + 1.0f), PAL.accentInk, rr.avg > 0 ? nb : "-");
+                snprintf(nb, sizeof(nb), "%.0f", rr.mn);    text_at(ldl, g_mono, 11.0f, ImVec2(rx + availW - 185.0f, ry + 1.0f), PAL.scrText, rr.avg > 0 ? nb : "-");
+                snprintf(nb, sizeof(nb), "%.0f", rr.mx);    text_at(ldl, g_mono, 11.0f, ImVec2(rx + availW - 120.0f, ry + 1.0f), PAL.scrText, rr.avg > 0 ? nb : "-");
+                snprintf(nb, sizeof(nb), "%.0f", rr.low1);  text_at(ldl, g_mono, 11.0f, ImVec2(rx + availW - 55.0f, ry + 1.0f), PAL.scrText, rr.avg > 0 ? nb : "-");
+                ry += 18.0f;
+            }
+            ry += 6.0f;
+        }
+    }
+    ImGui::Dummy(ImVec2(availW, ry - lb.y + 8.0f));
+    ImGui::EndChild();
+}
+
+// Benchmark: multi-select rows (checkbox + bar + value) with Select/Clear All, Run
+// Selected, Run All, per-row Run, a live progress indicator, and a History tab.
+// Every run is EMBEDDED (no pop-out window). Fixes 1/2/3/4.
 static void draw_bench_pane(ImVec2 o, float w, float h) {
     ImGui::SetCursorScreenPos(o);
-    ImGui::BeginChild("##benchpane", ImVec2(w, h), false,
-                      ImGuiWindowFlags_NoBackground);
+    ImGui::BeginChild("##benchpane", ImVec2(w, h), false, ImGuiWindowFlags_NoBackground);
     ImDrawList *dl = ImGui::GetWindowDrawList();
     ImVec2 base = ImGui::GetCursorScreenPos();
-    float x0 = base.x + 20.0f, y0 = base.y + 18.0f, availW = w - 40.0f;
-    char hbuf[64];
-    snprintf(hbuf, sizeof(hbuf), "Benchmark - %d s per test - vsync %s", g_bench_secs,
-             g_bench_vsync ? "on" : "off");
-    dp_header(dl, ImVec2(x0, y0), hbuf);
 
-    // Controls row: duration 15/30/45/60, vsync, Run All.
+    if (g_bench_view == 1) { draw_bench_history(base, w, h); ImGui::EndChild(); return; }
+
+    float pad = 20.0f, x0 = base.x + pad, y0 = base.y + 14.0f, availW = w - 2.0f * pad;
+    char hbuf[64];
+    snprintf(hbuf, sizeof(hbuf), "Benchmark - %d s per test - embedded", g_bench_secs);
+    dp_header(dl, ImVec2(x0, y0), hbuf);
+    const char *tabs[2] = {"Tests", "History"};
+    screen_subtabs(ImVec2(x0 + availW, y0 - 4.0f), tabs, 2, &g_bench_view);
+
+    bool busy = bench_any_active();
+
+    // Controls row 1: duration 15/30/45/60 + Vsync note.
     float cy = y0 + 22.0f, bx = x0;
     static const int durs[4] = {15, 30, 45, 60};
     for (int i = 0; i < 4; ++i) {
         char db[8]; snprintf(db, sizeof(db), "%ds", durs[i]);
         char idb[16]; snprintf(idb, sizeof(idb), "##dur%d", i);
-        if (screen_button(idb, ImVec2(bx, cy), ImVec2(40, 26), db, g_bench_secs == durs[i]))
+        if (screen_button(idb, ImVec2(bx, cy), ImVec2(40, 26), db, g_bench_secs == durs[i], !busy) && !busy)
             g_bench_secs = durs[i];
         bx += 44.0f;
     }
     bx += 6.0f;
-    if (screen_button("##bvsync", ImVec2(bx, cy), ImVec2(84, 26),
-                      g_bench_vsync ? "Vsync: On" : "Vsync: Off", g_bench_vsync))
+    if (screen_button("##bvsync", ImVec2(bx, cy), ImVec2(96, 26),
+                      g_bench_vsync ? "Vsync: On" : "Vsync: Off", g_bench_vsync, !busy) && !busy)
         g_bench_vsync = !g_bench_vsync;
-    // Run All (right-aligned)
-    bool busy = bench_any_active();
-    float raW = 96.0f;
-    if (screen_button("##runall", ImVec2(x0 + availW - raW, cy), ImVec2(raW, 26),
+
+    // Controls row 2: Select All / Clear All / Run Selected / Run All.
+    float cy2 = cy + 32.0f;
+    if (screen_button("##selall", ImVec2(x0, cy2), ImVec2(78, 26), "Select All", false, !busy) && !busy)
+        for (int i = 0; i < g_nbrows; ++i) g_bcheck[i] = 1;
+    if (screen_button("##clrall", ImVec2(x0 + 84, cy2), ImVec2(74, 26), "Clear All", false, !busy) && !busy)
+        for (int i = 0; i < g_nbrows; ++i) g_bcheck[i] = 0;
+    int nsel = 0;
+    for (int i = 0; i < g_nbrows; ++i) if (g_bcheck[i]) nsel++;
+    float raW = 96.0f, rsW = 118.0f;
+    if (screen_button("##runall", ImVec2(x0 + availW - raW, cy2), ImVec2(raW, 26),
                       busy ? "Running..." : "Run All", true, !busy) && !busy)
         bench_enqueue(-1);
+    {
+        char rsb[24];
+        snprintf(rsb, sizeof(rsb), "Run Selected (%d)", nsel);
+        bool en = !busy && nsel > 0;
+        if (screen_button("##runsel", ImVec2(x0 + availW - raW - rsW - 8.0f, cy2), ImVec2(rsW, 26),
+                          rsb, true, en) && en)
+            bench_enqueue_selected();
+    }
 
-    // Bench rows.
-    float ry = cy + 40.0f;
+    // Live progress indicator while a run is active (fix 1: shows it's working).
+    float listTop = cy2 + 36.0f;
+    if (busy && g_bench_ip_row >= 0) {
+        float py = cy2 + 34.0f;
+        char pb[96];
+        snprintf(pb, sizeof(pb), "Running  %s   %d/%d in queue   ~%.0f fps",
+                 g_brows[g_bench_ip_row].label, g_bench_qpos, g_bench_qn, g_bench_run_fps);
+        text_at(dl, g_mono_sm, 10.5f, ImVec2(x0, py), PAL.accentInk, pb);
+        float barY = py + 16.0f, barW = availW;
+        dl->AddRectFilled(ImVec2(x0, barY), ImVec2(x0 + barW, barY + 8.0f), IM_COL32(255, 255, 255, 16), 4.0f);
+        float fp = g_bench_progress; if (fp < 0) fp = 0; if (fp > 1) fp = 1;
+        dl->AddRectFilled(ImVec2(x0, barY), ImVec2(x0 + barW * fp, barY + 8.0f), PAL.accent, 4.0f);
+        listTop = barY + 20.0f;
+    }
+
+    // Scrolling row list that FILLS the remaining pane height (fix 3: no dead space).
+    ImGui::SetCursorScreenPos(ImVec2(base.x, listTop));
+    ImGui::BeginChild("##benchrows", ImVec2(w, (base.y + h) - listTop - 8.0f), false, ImGuiWindowFlags_NoBackground);
+    ImDrawList *ldl = ImGui::GetWindowDrawList();
+    ImVec2 lb = ImGui::GetCursorScreenPos();
+    float rx0 = lb.x + pad, ry = lb.y + 4.0f;
     float best = 1.0f;
     for (int i = 0; i < g_nbrows; ++i) if (g_brows[i].avg > best) best = g_brows[i].avg;
-    const float ROWH = 30.0f, nameW = 108.0f, runW = 52.0f, valW = 66.0f;
-    float barX = x0 + nameW, barW = availW - nameW - valW - runW - 20.0f;
+    const float ROWH = 32.0f, nameW = 150.0f, runW = 48.0f, valW = 58.0f;
+    float barX = rx0 + nameW, barW = availW - nameW - valW - runW - 20.0f;
     for (int i = 0; i < g_nbrows; ++i) {
         BRow &r = g_brows[i];
         float chipY = ry + ROWH * 0.5f;
-        chip(dl, ImVec2(x0 + 5.0f, chipY), 4.0f, hue_col(r.hue));
-        text_at(dl, g_mono, 11.5f, ImVec2(x0 + 14.0f, ry + 8.0f), PAL.scrText, r.label);
+        char cid[16]; snprintf(cid, sizeof(cid), "##cb%d", i);
+        screen_checkbox(cid, ImVec2(rx0, chipY - 8.0f), 16.0f, &g_bcheck[i]);
+        chip(ldl, ImVec2(rx0 + 28.0f, chipY), 4.0f, hue_col(r.hue));
+        bool running = (g_bench_ip_row == i);
+        text_at(ldl, g_mono, 11.5f, ImVec2(rx0 + 38.0f, ry + 8.0f), running ? PAL.accentInk : PAL.scrText, r.label);
         // bar
         float by = chipY - 4.5f;
-        dl->AddRectFilled(ImVec2(barX, by), ImVec2(barX + barW, by + 9.0f), IM_COL32(255, 255, 255, 16), 5.0f);
+        ldl->AddRectFilled(ImVec2(barX, by), ImVec2(barX + barW, by + 9.0f), IM_COL32(255, 255, 255, 16), 5.0f);
         if (r.avg > 0.0f) {
             float fw = barW * (r.avg / best);
             if (fw < 6.0f) fw = 6.0f;
             ImU32 c = hue_col(r.hue);
-            dl->AddRectFilled(ImVec2(barX, by), ImVec2(barX + fw, by + 9.0f), c, 5.0f);
-            dl->AddCircleFilled(ImVec2(barX + fw - 2.0f, by + 4.5f), 2.6f, IM_COL32(255, 255, 255, 220), 10);
+            ldl->AddRectFilled(ImVec2(barX, by), ImVec2(barX + fw, by + 9.0f), c, 5.0f);
+            ldl->AddCircleFilled(ImVec2(barX + fw - 2.0f, by + 4.5f), 2.6f, IM_COL32(255, 255, 255, 220), 10);
         }
-        // value + min/max
+        // value + min/max/low1
         char vb[24];
         if (r.state != 0) snprintf(vb, sizeof(vb), "...");
         else if (r.avg > 0.0f) snprintf(vb, sizeof(vb), "%.0f", r.avg);
         else snprintf(vb, sizeof(vb), "-");
         float vw = text_w(g_mono, 12.5f, vb);
-        bold_at(dl, g_mono, 12.5f, ImVec2(barX + barW + valW - vw + 2.0f, ry + 7.0f), PAL.scrText, vb);
+        bold_at(ldl, g_mono, 12.5f, ImVec2(barX + barW + valW - vw + 2.0f, ry + 7.0f), PAL.scrText, vb);
         if (r.avg > 0.0f && r.state == 0) {
-            char mm[40]; snprintf(mm, sizeof(mm), "%.0f / %.0f", r.mn, r.mx);
-            text_at(dl, g_mono_sm, 9.0f, ImVec2(barX, ry + 19.0f), PAL.scrMuted, mm);
+            char mm[48]; snprintf(mm, sizeof(mm), "%.0f/%.0f  1%%%.0f", r.mn, r.mx, g_brow_low1[i]);
+            text_at(ldl, g_mono_sm, 9.0f, ImVec2(barX, ry + 19.0f), PAL.scrMuted, mm);
         }
         // Run button
         char rid[16]; snprintf(rid, sizeof(rid), "##run%d", i);
-        bool rbusy = bench_any_active();
-        if (screen_button(rid, ImVec2(x0 + availW - runW, ry + 2.0f), ImVec2(runW, 24.0f),
-                          r.state != 0 ? "..." : "Run", false, !rbusy) && !rbusy)
+        if (screen_button(rid, ImVec2(rx0 + availW - runW, ry + 2.0f), ImVec2(runW, 24.0f),
+                          r.state != 0 ? "..." : "Run", false, !busy) && !busy)
             bench_enqueue(i);
         ry += ROWH;
     }
-    text_at(dl, g_mono_sm, 9.5f, ImVec2(x0, ry + 6.0f), PAL.scrMuted,
-            "D3D11 rows time the embedded scene's GPU cost in-process; other APIs run --bench in a child process.");
-    ImGui::Dummy(ImVec2(availW, ry - base.y + 30.0f));
+    ry += 4.0f;
+    text_at(ldl, g_mono_sm, 9.5f, ImVec2(rx0, ry), PAL.scrMuted,
+            "All rows run EMBEDDED in the viewport (no pop-out). Each run is saved to History.");
+    ry += 16.0f;
+    ImGui::Dummy(ImVec2(availW, ry - lb.y + 8.0f));
+    ImGui::EndChild();
     ImGui::EndChild();
 }
 
 // Disk Speed: seq/random tiles (MB/s + IOPS), size selector, help, cleanup.
+// Disk-run HISTORY view: past runs (newest first) with size/mode + the 4 figures.
+static void draw_disk_history(ImVec2 base, float w, float h) {
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    float pad = 20.0f, x0 = base.x + pad, y0 = base.y + 14.0f, availW = w - 2.0f * pad;
+    dp_header(dl, ImVec2(x0, y0), "Disk-speed history");
+    const char *tabs[2] = {"Live", "History"};
+    screen_subtabs(ImVec2(x0 + availW, y0 - 4.0f), tabs, 2, &g_disk_view);
+
+    float listTop = y0 + 34.0f;
+    ImGui::SetCursorScreenPos(ImVec2(base.x, listTop));
+    ImGui::BeginChild("##dhist", ImVec2(w, (base.y + h) - listTop - 8.0f), false, ImGuiWindowFlags_NoBackground);
+    ImDrawList *ldl = ImGui::GetWindowDrawList();
+    ImVec2 lb = ImGui::GetCursorScreenPos();
+    float rx = lb.x + pad, ry = lb.y + 4.0f;
+    if (g_dhist_n == 0) {
+        text_at(ldl, g_mono, 12.0f, ImVec2(rx, ry + 4.0f), PAL.scrMuted,
+                "No past disk runs yet. Run a test on the Live tab to record one.");
+        ImGui::Dummy(ImVec2(availW, 40.0f));
+        ImGui::EndChild();
+        return;
+    }
+    // column header
+    text_at(ldl, g_mono_sm, 9.5f, ImVec2(rx + 6.0f, ry), PAL.scrMuted, "WHEN / SIZE / MODE");
+    text_at(ldl, g_mono_sm, 9.5f, ImVec2(rx + availW - 300.0f, ry), PAL.scrMuted, "SEQ R");
+    text_at(ldl, g_mono_sm, 9.5f, ImVec2(rx + availW - 232.0f, ry), PAL.scrMuted, "SEQ W");
+    text_at(ldl, g_mono_sm, 9.5f, ImVec2(rx + availW - 164.0f, ry), PAL.scrMuted, "RND R");
+    text_at(ldl, g_mono_sm, 9.5f, ImVec2(rx + availW - 96.0f, ry), PAL.scrMuted, "RND W");
+    ry += 18.0f;
+    for (int d = 0; d < g_dhist_n; ++d) {
+        int idx = g_dhist_n - 1 - d;  // newest first
+        DHistRun &r = g_dhist[idx];
+        float rowH = 34.0f;
+        if (d & 1) ldl->AddRectFilled(ImVec2(rx + 4.0f, ry - 2.0f), ImVec2(rx + availW - 4.0f, ry + rowH - 6.0f), IM_COL32(255, 255, 255, 4), 5.0f);
+        char l1[80];
+        snprintf(l1, sizeof(l1), "%s", r.ts);
+        text_at(ldl, g_mono, 11.0f, ImVec2(rx + 6.0f, ry), PAL.scrText, l1);
+        char l2[64];
+        snprintf(l2, sizeof(l2), "%d MB  %s  ~%s", r.size_mb, r.defeat ? "Real-Flash" : "Quick", r.cls);
+        text_at(ldl, g_mono_sm, 9.5f, ImVec2(rx + 6.0f, ry + 15.0f), PAL.scrMuted, l2);
+        char nb[16];
+        snprintf(nb, sizeof(nb), "%.0f", r.sr); text_at(ldl, g_mono, 11.5f, ImVec2(rx + availW - 300.0f, ry + 4.0f), PAL.accentInk, nb);
+        snprintf(nb, sizeof(nb), "%.0f", r.sw); text_at(ldl, g_mono, 11.5f, ImVec2(rx + availW - 232.0f, ry + 4.0f), PAL.scrText, nb);
+        snprintf(nb, sizeof(nb), "%.0f", r.rr); text_at(ldl, g_mono, 11.5f, ImVec2(rx + availW - 164.0f, ry + 4.0f), PAL.scrText, nb);
+        snprintf(nb, sizeof(nb), "%.0f", r.rw); text_at(ldl, g_mono, 11.5f, ImVec2(rx + availW - 96.0f, ry + 4.0f), PAL.scrText, nb);
+        text_at(ldl, g_mono_sm, 9.0f, ImVec2(rx + availW - 40.0f, ry + 6.0f), PAL.scrMuted, "MB/s");
+        ry += rowH;
+    }
+    ImGui::Dummy(ImVec2(availW, ry - lb.y + 8.0f));
+    ImGui::EndChild();
+}
+
+static const char *disk_phase_name(long p) {
+    switch (p) {
+        case AIO_DISK_PHASE_SEQ_WRITE: return "Sequential write";
+        case AIO_DISK_PHASE_SEQ_READ:  return "Sequential read";
+        case AIO_DISK_PHASE_RAND_READ: return "Random 4K read";
+        case AIO_DISK_PHASE_RAND_WRITE:return "Random 4K write";
+        case AIO_DISK_PHASE_BUSTER:    return "Flushing page cache";
+        case AIO_DISK_PHASE_DONE:      return "Done";
+        default:                       return "Starting";
+    }
+}
+
 static void draw_disk_pane(ImVec2 o, float w, float h) {
     ImGui::SetCursorScreenPos(o);
     ImGui::BeginChild("##diskpane", ImVec2(w, h), false,
                       ImGuiWindowFlags_NoBackground);
     ImDrawList *dl = ImGui::GetWindowDrawList();
     ImVec2 base = ImGui::GetCursorScreenPos();
-    float x0 = base.x + 20.0f, y0 = base.y + 18.0f, availW = w - 40.0f;
     LONG st = g_disk_state;
+    // (History is recorded from the main loop on the RUNNING->DONE edge, so it is
+    // captured even if the user navigated away from the Disk tool mid-run.)
+    if (g_disk_view == 1) { draw_disk_history(base, w, h); ImGui::EndChild(); return; }
+
+    float x0 = base.x + 20.0f, y0 = base.y + 14.0f, availW = w - 40.0f;
     char hbuf[80];
     snprintf(hbuf, sizeof(hbuf), "Disk speed - %d MB - CPDT method%s", kDiskSizes[g_disk_size_idx],
              (st == TQ_DONE && g_diskres.ok) ? g_diskres.storage_class : "");
@@ -1477,6 +1908,8 @@ static void draw_disk_pane(ImVec2 o, float w, float h) {
     } else {
         dp_header(dl, ImVec2(x0, y0), hbuf);
     }
+    const char *tabs[2] = {"Live", "History"};
+    screen_subtabs(ImVec2(x0 + availW, y0 - 4.0f), tabs, 2, &g_disk_view);
 
     // Controls: size 256/512/1024/2048, Real-Flash toggle, Run, What's this?, Clear Temp.
     float cy = y0 + 22.0f, bx = x0;
@@ -1531,43 +1964,80 @@ static void draw_disk_pane(ImVec2 o, float w, float h) {
         ImGui::EndPopup();
     }
 
-    // Tiles.
-    float ty = cy + 40.0f, gap = 12.0f, tileW = (availW - gap) * 0.5f, tileH = 74.0f;
-    struct Tile { const char *k; double val; const char *unit; const char *sub; double iops; };
+    // Overall progress + phase caption while running (fix 5: live, not frozen).
+    float ty = cy + 40.0f;
+    long ph = g_disk_prog.phase;
+    if (st == TQ_RUNNING) {
+        double overall = (double)g_disk_prog.overall_x1000 / 1000.0;
+        if (overall < 0) overall = 0; if (overall > 1) overall = 1;
+        char cap[96];
+        snprintf(cap, sizeof(cap), "%s   -   %.0f%%", disk_phase_name(ph), overall * 100.0);
+        text_at(dl, g_mono, 11.5f, ImVec2(x0, cy + 34.0f), PAL.accentInk, cap);
+        float barY = cy + 52.0f;
+        dl->AddRectFilled(ImVec2(x0, barY), ImVec2(x0 + availW, barY + 9.0f), IM_COL32(255, 255, 255, 16), 4.0f);
+        dl->AddRectFilled(ImVec2(x0, barY), ImVec2(x0 + availW * (float)overall, barY + 9.0f), PAL.accent, 4.0f);
+        ty = barY + 22.0f;
+    }
+
+    // Tiles (2x2). During a run each fills live: completed phases show their final
+    // MB/s, the in-flight phase shows a partial MB/s + a phase progress bar.
+    float gap = 12.0f, tileW = (availW - gap) * 0.5f, tileH = 78.0f;
     bool have = (st == TQ_DONE && g_diskres.ok);
-    Tile tiles[4] = {
-        {"Sequential read", g_diskres.seq_read_mbps, "MB/s", g_disk_defeat ? "cold - cache-busted" : "cached (quick)", 0},
-        {"Sequential write", g_diskres.seq_write_mbps, "MB/s", "per-op FlushFileBuffers", 0},
-        {"Random read 4K", g_diskres.rand_read_mbps, "MB/s", "", g_diskres.rand_read_iops},
-        {"Random write 4K", g_diskres.rand_write_mbps, "MB/s", "", g_diskres.rand_write_iops},
-    };
+    bool running = (st == TQ_RUNNING);
+    const char *names[4] = {"Sequential read", "Sequential write", "Random read 4K", "Random write 4K"};
+    int tphase[4] = {AIO_DISK_PHASE_SEQ_READ, AIO_DISK_PHASE_SEQ_WRITE, AIO_DISK_PHASE_RAND_READ, AIO_DISK_PHASE_RAND_WRITE};
+    double pres[4] = {g_disk_prog.seq_read_mbps, g_disk_prog.seq_write_mbps, g_disk_prog.rand_read_mbps, g_disk_prog.rand_write_mbps};
+    double dres[4] = {g_diskres.seq_read_mbps, g_diskres.seq_write_mbps, g_diskres.rand_read_mbps, g_diskres.rand_write_mbps};
+    double diops[4] = {0, 0, g_diskres.rand_read_iops, g_diskres.rand_write_iops};
+    double piops[4] = {0, 0, g_disk_prog.rand_read_iops, g_disk_prog.rand_write_iops};
+    const char *subs[4] = {g_disk_defeat ? "cold - cache-busted" : "cached (quick)", "per-op FlushFileBuffers", "", ""};
+    double phase_frac = (double)g_disk_prog.phase_x1000 / 1000.0;
     for (int i = 0; i < 4; ++i) {
         float tx = x0 + (i & 1) * (tileW + gap);
         float tyy = ty + (i / 2) * (tileH + gap);
         dl->AddRectFilled(ImVec2(tx, tyy), ImVec2(tx + tileW, tyy + tileH), IM_COL32(255, 255, 255, 5), 10.0f);
         dl->AddRect(ImVec2(tx, tyy), ImVec2(tx + tileW, tyy + tileH), PAL.scrLine, 10.0f, 0, 1.0f);
-        caps_at(dl, g_mono_sm, 9.5f, ImVec2(tx + 14.0f, tyy + 12.0f), PAL.scrMuted, tiles[i].k, 1.5f);
+        caps_at(dl, g_mono_sm, 9.5f, ImVec2(tx + 14.0f, tyy + 12.0f), PAL.scrMuted, names[i], 1.5f);
+
+        // Resolve this tile's value + fill fraction + state.
+        double value = 0; bool showval = false; bool live = false; float tfrac = 0.0f;
+        double iopsv = 0; bool haveIops = false;
+        if (have) { value = dres[i]; showval = true; tfrac = 1.0f; iopsv = diops[i]; haveIops = (iopsv > 0.0); }
+        else if (running) {
+            bool done_phase = (pres[i] > 0.0);
+            if (done_phase) { value = pres[i]; showval = true; tfrac = 1.0f; iopsv = piops[i]; haveIops = (iopsv > 0.0); }
+            else if (ph == tphase[i]) { value = g_disk_prog.cur_mbps; showval = true; live = true; tfrac = (float)phase_frac; }
+        }
         char vb[32];
-        if (st == TQ_RUNNING) snprintf(vb, sizeof(vb), "...");
-        else if (have) snprintf(vb, sizeof(vb), "%.0f", tiles[i].val);
-        else snprintf(vb, sizeof(vb), "-");
+        if (showval) snprintf(vb, sizeof(vb), "%.0f", value);
+        else snprintf(vb, sizeof(vb), "%s", running ? "..." : "-");
         bold_at(dl, g_mono_bg, 22.0f, ImVec2(tx + 14.0f, tyy + 28.0f), PAL.accentInk, vb);
         float vw = text_w(g_mono_bg, 22.0f, vb);
-        if (have && st != TQ_RUNNING)
-            text_at(dl, g_mono_sm, 10.0f, ImVec2(tx + 14.0f + vw + 5.0f, tyy + 38.0f), PAL.scrMuted, tiles[i].unit);
-        // sub line: IOPS for random, note for sequential
+        if (showval)
+            text_at(dl, g_mono_sm, 10.0f, ImVec2(tx + 14.0f + vw + 5.0f, tyy + 38.0f), PAL.scrMuted, live ? "MB/s (live)" : "MB/s");
+        // sub line
         char sub[48];
-        if (have && tiles[i].iops > 0.0) snprintf(sub, sizeof(sub), "%.0f IOPS", tiles[i].iops);
-        else snprintf(sub, sizeof(sub), "%s", tiles[i].sub);
-        text_at(dl, g_mono_sm, 10.0f, ImVec2(tx + 14.0f, tyy + tileH - 18.0f), PAL.scrMuted,
-                (st == TQ_RUNNING) ? "testing..." : sub);
+        if (haveIops) snprintf(sub, sizeof(sub), "%.0f IOPS", iopsv);
+        else if (live) snprintf(sub, sizeof(sub), "measuring...");
+        else if (showval || have) snprintf(sub, sizeof(sub), "%s", subs[i]);
+        else snprintf(sub, sizeof(sub), "%s", running ? "pending" : subs[i]);
+        text_at(dl, g_mono_sm, 10.0f, ImVec2(tx + 14.0f, tyy + tileH - 26.0f), PAL.scrMuted, sub);
+        // per-tile phase progress bar (bottom)
+        if (running) {
+            float pby = tyy + tileH - 12.0f;
+            dl->AddRectFilled(ImVec2(tx + 14.0f, pby), ImVec2(tx + tileW - 14.0f, pby + 5.0f), IM_COL32(255, 255, 255, 14), 3.0f);
+            if (tfrac > 0.0f) {
+                float pbw = (tileW - 28.0f) * tfrac;
+                dl->AddRectFilled(ImVec2(tx + 14.0f, pby), ImVec2(tx + 14.0f + pbw, pby + 5.0f), live ? PAL.accent : PAL.good, 3.0f);
+            }
+        }
     }
     float noteY = ty + 2 * (tileH + gap) + 6.0f;
-    if (g_disk_cleanup_msg[0])
-        text_at(dl, g_mono_sm, 10.0f, ImVec2(x0, noteY), PAL.scrMuted, g_disk_cleanup_msg);
-    else if (st == TQ_RUNNING)
+    if (running)
         text_at(dl, g_mono_sm, 10.0f, ImVec2(x0, noteY), PAL.scrMuted,
-                "Running - writes a few GB of temp data, then deletes it. This can take 20-60 s.");
+                "Live - each phase updates as it runs; writes a few GB of temp data, then deletes it.");
+    else if (g_disk_cleanup_msg[0])
+        text_at(dl, g_mono_sm, 10.0f, ImVec2(x0, noteY), PAL.scrMuted, g_disk_cleanup_msg);
     else if (!have)
         text_at(dl, g_mono_sm, 10.0f, ImVec2(x0, noteY), PAL.scrMuted,
                 "Pick a size and press Run. Throughput is decimal MB/s (1,000,000 bytes).");
@@ -1589,8 +2059,12 @@ static void draw_viewport(ImDrawList *dl, ImVec2 o, float w, float h, float fps,
     // gradient (a datapane owns the surface).
     if (g_scene_live && g_view_srv && !g_sel->tool) {
         dl->AddImage((ImTextureID)(intptr_t)g_view_srv, o, mx);
-    } else {
+    } else if (g_sel->tool) {
+        // Tools keep the dark instrument surface (the datapane owns it).
         dl->AddRectFilledMultiColor(o, mx, PAL.scr2, PAL.scr2, PAL.scr, PAL.scr);
+    } else {
+        // Empty render viewport follows the theme (fix 6).
+        dl->AddRectFilledMultiColor(o, mx, g_view_bg2, g_view_bg2, g_view_bg, g_view_bg);
     }
     if (!full)
         dl->AddLine(ImVec2(mx.x - 0.5f, o.y), ImVec2(mx.x - 0.5f, mx.y), PAL.line, 1.0f);
@@ -1609,11 +2083,11 @@ static void draw_viewport(ImDrawList *dl, ImVec2 o, float w, float h, float fps,
         snprintf(line1, sizeof(line1), "%s is unavailable in this container", g_sel->api);
         float tw = text_w(g_ui_big, 22.0f, line1);
         text_at(dl, g_ui_big, 22.0f, ImVec2(o.x + (w - tw) * 0.5f, o.y + h * 0.5f - 30.0f),
-                PAL.scrText, line1);
+                PAL.text, line1);  // theme-aware (empty backdrop follows theme)
         const char *sub = "the DXVK / VKD3D / driver for this API isn't present";
         float sw = text_w(g_mono, 12.0f, sub);
         text_at(dl, g_mono, 12.0f, ImVec2(o.x + (w - sw) * 0.5f, o.y + h * 0.5f + 6.0f),
-                PAL.scrMuted, sub);
+                PAL.muted, sub);
         return;
     }
 
@@ -2025,6 +2499,8 @@ extern "C" int aio_run_imgui_shell(HINSTANCE hInstance) {
 
     init_hues();
     apply_theme(true);  // dark default
+    bench_hist_load();  // restore past benchmark runs (fix 4)
+    disk_hist_load();   // restore past disk runs (fix 5)
     ImGui_ImplWin32_Init(hwnd);
     ImGui_ImplDX11_Init(g_dev, g_ctx);
 
@@ -2073,7 +2549,15 @@ extern "C" int aio_run_imgui_shell(HINSTANCE hInstance) {
 
         // Read back last frame's scene GPU timing, then advance any running benchmark.
         poll_timing_queries();
-        bench_tick(t_sec);
+        bench_tick(t_sec, dt_ms);
+        // Record a finished disk run into history on the RUNNING->DONE edge (works
+        // regardless of which tool is on screen).
+        {
+            static LONG s_disk_prev = TQ_IDLE;
+            LONG cur = g_disk_state;
+            if (s_disk_prev == TQ_RUNNING && cur == TQ_DONE) disk_hist_record();
+            s_disk_prev = cur;
+        }
 
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();

@@ -92,14 +92,22 @@ static uint64_t *make_shuffled_offsets(uint64_t slots, uint64_t *out_n) {
 // Write `bytes` of `buf` (DISK_BLOCK each) to `path`, write-through + flushed so
 // it really hits the device. Used for both the (timed) test file and the
 // (untimed) cache-buster. Returns 1 on success, 0 on failure.
-static int write_file_blocks(const char *path, uint64_t bytes, const void *buf) {
+static void disk_prog(AioDiskProgress *prog, int phase, double frac, double cur_mbps,
+                      long base, long span);
+
+static int write_file_blocks(const char *path, uint64_t bytes, const void *buf,
+                             AioDiskProgress *prog, long base, long span) {
     HANDLE h = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
                            FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_WRITE_THROUGH, NULL);
     if (h == INVALID_HANDLE_VALUE) return 0;
     int ok = 1;
+    uint64_t done = 0;
     for (uint64_t off = 0; off < bytes; off += DISK_BLOCK) {
         DWORD wrote = 0;
         if (!WriteFile(h, buf, DISK_BLOCK, &wrote, NULL) || wrote != DISK_BLOCK) { ok = 0; break; }
+        done += DISK_BLOCK;
+        if (prog && bytes > 0 && (off & (DISK_BLOCK * 15)) == 0)
+            disk_prog(prog, AIO_DISK_PHASE_BUSTER, (double)done / (double)bytes, 0.0, base, span);
     }
     FlushFileBuffers(h);
     CloseHandle(h);
@@ -120,9 +128,30 @@ static const char *disk_class_for(double seq_mbps) {
     return "UFS 4.0+ / NVMe SSD";
 }
 
+// Publish a live progress snapshot (no-op if prog is NULL). base/span are the
+// overall-progress window (0..1000) this phase occupies; frac is 0..1 within it.
+static void disk_prog(AioDiskProgress *prog, int phase, double frac, double cur_mbps,
+                      long base, long span) {
+    if (!prog) return;
+    if (frac < 0.0) frac = 0.0; else if (frac > 1.0) frac = 1.0;
+    prog->phase = phase;
+    prog->phase_x1000 = (long)(frac * 1000.0);
+    prog->overall_x1000 = base + (long)(frac * (double)span);
+    prog->cur_mbps = cur_mbps;
+}
+
 char *aio_disk_run_ex(int size_mb, int defeat_cache, aio_disk_progress_fn progress, void *user,
                       AioDiskResult *out) {
+    return aio_disk_run_ex2(size_mb, defeat_cache, progress, user, out, NULL);
+}
+
+char *aio_disk_run_ex2(int size_mb, int defeat_cache, aio_disk_progress_fn progress, void *user,
+                       AioDiskResult *out, AioDiskProgress *prog) {
     if (out) { memset(out, 0, sizeof(*out)); }
+    if (prog) {
+        memset((void *)prog, 0, sizeof(*prog));
+        prog->phase = AIO_DISK_PHASE_SEQ_WRITE;
+    }
     char *report = (char *)malloc(DISK_REPORT_CAP);
     if (!report) return NULL;
     report[0] = '\0';
@@ -204,6 +233,12 @@ char *aio_disk_run_ex(int size_mb, int defeat_cache, aio_disk_progress_fn progre
                 DWORD wrote = 0;
                 if (!WriteFile(h, buf, DISK_BLOCK, &wrote, NULL) || wrote != DISK_BLOCK)
                     err = "Write failed partway (storage full?).";
+                if ((b & 7) == 0) {
+                    double el = now_sec(freq) - t0;
+                    double mbps = el > 0.0 ? (double)((b + 1) * DISK_BLOCK) / 1e6 / el : 0.0;
+                    disk_prog(prog, AIO_DISK_PHASE_SEQ_WRITE, (double)(b + 1) / (double)nblocks,
+                              mbps, 0, 200);
+                }
             }
             FlushFileBuffers(h);  // make sure it actually hit the device
             double t1 = now_sec(freq);
@@ -214,6 +249,7 @@ char *aio_disk_run_ex(int size_mb, int defeat_cache, aio_disk_progress_fn progre
             }
         }
     }
+    if (prog) { prog->seq_write_mbps = write_mbps; disk_prog(prog, AIO_DISK_PHASE_SEQ_WRITE, 1.0, write_mbps, 0, 200); }
 
     // Live update after the write phase.
     if (progress && !err) {
@@ -234,7 +270,8 @@ char *aio_disk_run_ex(int size_mb, int defeat_cache, aio_disk_progress_fn progre
     // Real-flash mode only. Writing a file ~= RAM pushes the just-written test
     // file out of the cache (LRU on clean pages), so the read below hits flash.
     if (!err && defeat_cache && buster_bytes > 0) {
-        if (!write_file_blocks(buster, buster_bytes, buf)) {
+        disk_prog(prog, AIO_DISK_PHASE_BUSTER, 0.0, 0.0, 200, 80);
+        if (!write_file_blocks(buster, buster_bytes, buf, prog, 200, 80)) {
             // Non-fatal: if the buster can't be written, fall back to a (cached)
             // read rather than failing the whole run.
             buster_short = 1;
@@ -257,6 +294,12 @@ char *aio_disk_run_ex(int size_mb, int defeat_cache, aio_disk_progress_fn progre
                 DWORD got = 0;
                 if (!ReadFile(h, buf, DISK_BLOCK, &got, NULL) || got != DISK_BLOCK)
                     err = "Read failed partway.";
+                if ((b & 7) == 0) {
+                    double el = now_sec(freq) - t0;
+                    double mbps = el > 0.0 ? (double)((b + 1) * DISK_BLOCK) / 1e6 / el : 0.0;
+                    disk_prog(prog, AIO_DISK_PHASE_SEQ_READ, (double)(b + 1) / (double)nblocks,
+                              mbps, 280, 170);
+                }
             }
             double t1 = now_sec(freq);
             CloseHandle(h);
@@ -272,8 +315,10 @@ char *aio_disk_run_ex(int size_mb, int defeat_cache, aio_disk_progress_fn progre
     // neighbour pages resident even past what it returned), so without flushing
     // again the random read would be served from RAM. Rewrite the buster file -
     // RAM-worth of fresh write-through pushes the test file back out via LRU.
+    if (prog) { prog->seq_read_mbps = read_mbps; disk_prog(prog, AIO_DISK_PHASE_SEQ_READ, 1.0, read_mbps, 280, 170); }
     if (!err && defeat_cache && buster_bytes > 0) {
-        if (!write_file_blocks(buster, buster_bytes, buf))
+        disk_prog(prog, AIO_DISK_PHASE_BUSTER, 0.0, 0.0, 450, 70);
+        if (!write_file_blocks(buster, buster_bytes, buf, prog, 450, 70))
             buster_short = 1;  // second flush failed: random read may read cached
     }
 
@@ -301,7 +346,12 @@ char *aio_disk_run_ex(int size_mb, int defeat_cache, aio_disk_progress_fn progre
                     }
                     rand_ops++;
                     // CPDT-style fixed window: stop after 7 s (check every 256 ops).
-                    if ((i & 255) == 0 && now_sec(freq) - t0 >= DISK_RAND_SECS) break;
+                    if ((i & 255) == 0) {
+                        double el = now_sec(freq) - t0;
+                        double mbps = el > 0.0 ? (double)rand_ops * DISK_RAND_SZ / 1e6 / el : 0.0;
+                        disk_prog(prog, AIO_DISK_PHASE_RAND_READ, el / DISK_RAND_SECS, mbps, 520, 240);
+                        if (el >= DISK_RAND_SECS) break;
+                    }
                 }
                 double t1 = now_sec(freq);
                 free(plan);
@@ -311,6 +361,11 @@ char *aio_disk_run_ex(int size_mb, int defeat_cache, aio_disk_progress_fn progre
                         rand_iops = (double)rand_ops / t_rand;
                         rand_mbps = (double)rand_ops * DISK_RAND_SZ / 1e6 / t_rand;
                     }
+                }
+                if (prog) {
+                    prog->rand_read_mbps = rand_mbps;
+                    prog->rand_read_iops = rand_iops;
+                    disk_prog(prog, AIO_DISK_PHASE_RAND_READ, 1.0, rand_mbps, 520, 240);
                 }
             }
             CloseHandle(h);
@@ -345,7 +400,12 @@ char *aio_disk_run_ex(int size_mb, int defeat_cache, aio_disk_progress_fn progre
                     }
                     FlushFileBuffers(h);  // commit THIS write before timing the next
                     randw_ops++;
-                    if ((randw_ops & 31) == 0 && now_sec(freq) - t0 >= DISK_RAND_SECS) break;
+                    if ((randw_ops & 31) == 0) {
+                        double el = now_sec(freq) - t0;
+                        double mbps = el > 0.0 ? (double)randw_ops * DISK_RAND_SZ / 1e6 / el : 0.0;
+                        disk_prog(prog, AIO_DISK_PHASE_RAND_WRITE, el / DISK_RAND_SECS, mbps, 760, 240);
+                        if (el >= DISK_RAND_SECS) break;
+                    }
                 }
                 double t1 = now_sec(freq);
                 free(plan);
@@ -355,6 +415,11 @@ char *aio_disk_run_ex(int size_mb, int defeat_cache, aio_disk_progress_fn progre
                         randw_iops = (double)randw_ops / t_randw;
                         randw_mbps = (double)randw_ops * DISK_RAND_SZ / 1e6 / t_randw;
                     }
+                }
+                if (prog) {
+                    prog->rand_write_mbps = randw_mbps;
+                    prog->rand_write_iops = randw_iops;
+                    disk_prog(prog, AIO_DISK_PHASE_RAND_WRITE, 1.0, randw_mbps, 760, 240);
                 }
             }
             CloseHandle(h);
@@ -427,6 +492,7 @@ char *aio_disk_run_ex(int size_mb, int defeat_cache, aio_disk_progress_fn progre
              randw_mbps, randw_iops, (unsigned long long)randw_ops, t_randw,
              cls, defeat_cache ? "" : "; run Real-Flash Read for a read-based class",
              DISK_RAND_SECS, note);
+    if (prog) disk_prog(prog, AIO_DISK_PHASE_DONE, 1.0, 0.0, 1000, 0);
     if (out) {
         out->ok = 1;
         out->seq_read_mbps = read_mbps;

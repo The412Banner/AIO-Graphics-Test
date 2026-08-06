@@ -463,7 +463,10 @@ void aio_dx8_embed_render(double t) {
     build_cube(verts);
 
     IDirect3DDevice8_Clear(g_embed_dev, 0, NULL, D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER,
-                           D3DCOLOR_XRGB(8, 12, 17), 1.0f, 0);
+                           D3DCOLOR_XRGB((int)(aio_embed_clear_rgb[0] * 255.0f + 0.5f),
+                                         (int)(aio_embed_clear_rgb[1] * 255.0f + 0.5f),
+                                         (int)(aio_embed_clear_rgb[2] * 255.0f + 0.5f)),
+                           1.0f, 0);
     if (SUCCEEDED(IDirect3DDevice8_BeginScene(g_embed_dev))) {
         IDirect3DDevice8_SetTransform(g_embed_dev, D3DTS_WORLD, &world);
         IDirect3DDevice8_SetTransform(g_embed_dev, D3DTS_VIEW, &view);

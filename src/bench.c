@@ -106,6 +106,11 @@ static int cmp_double(const void *a, const void *b) {
 }
 
 char *aio_bench_finish(const char *api_label, double total_seconds) {
+    return aio_bench_finish_ex(api_label, total_seconds, NULL);
+}
+
+char *aio_bench_finish_ex(const char *api_label, double total_seconds, AioBenchStats *stats) {
+    if (stats) { memset(stats, 0, sizeof(*stats)); stats->dur_s = total_seconds; }
     if (!api_label) api_label = "";
     if (g_label_override[0]) api_label = g_label_override;  // probe modes override the label
 
@@ -175,6 +180,15 @@ char *aio_bench_finish(const char *api_label, double total_seconds) {
             fprintf(rf, "%.0f|%.0f|%.0f", avg_fps, min_fps, max_fps);
             fclose(rf);
         }
+    }
+
+    if (stats) {
+        stats->frames = (int)g_n;
+        stats->dur_s = total_seconds;
+        stats->avg = avg_fps;
+        stats->min = min_fps;
+        stats->max = max_fps;
+        stats->low1 = low1_fps;
     }
 
     char *summary = (char *)malloc(512);

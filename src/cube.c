@@ -4232,6 +4232,11 @@ static void demo_init(struct demo *demo, int argc, char **argv) {
 // are linked through the CI-generated vulkan-1 import lib exactly like the demo.
 #include "cube_embed.h"
 
+// Theme-aware backdrop clear for the embedded offscreen backends (see
+// cube_embed.h). Default = the dark instrument backdrop (8,12,17); the ImGui
+// shell overwrites it per-theme. Single definition for all embed backends.
+float aio_embed_clear_rgb[3] = {8.0f / 255.0f, 12.0f / 255.0f, 17.0f / 255.0f};
+
 typedef struct {
     float pos[3];
     float col[3];
@@ -4687,9 +4692,9 @@ void aio_vk_embed_render(double t) {
                                    .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
     vkBeginCommandBuffer(g_vke.cmd, &bi);
     VkClearValue clears[2];
-    clears[0].color.float32[0] = 8 / 255.0f;
-    clears[0].color.float32[1] = 12 / 255.0f;
-    clears[0].color.float32[2] = 17 / 255.0f;
+    clears[0].color.float32[0] = aio_embed_clear_rgb[0];
+    clears[0].color.float32[1] = aio_embed_clear_rgb[1];
+    clears[0].color.float32[2] = aio_embed_clear_rgb[2];
     clears[0].color.float32[3] = 1.0f;
     clears[1].depthStencil.depth = 1.0f;
     clears[1].depthStencil.stencil = 0;

@@ -718,7 +718,7 @@ void aio_dx10_embed_render(double t) {
     vp.MaxDepth = 1.0f;
     ID3D10Device_RSSetViewports(g_dev, 1, &vp);
 
-    const float clear[4] = {8 / 255.f, 12 / 255.f, 17 / 255.f, 1.f};
+    const float clear[4] = {aio_embed_clear_rgb[0], aio_embed_clear_rgb[1], aio_embed_clear_rgb[2], 1.f};
     ID3D10Device_ClearRenderTargetView(g_dev, g_rtv, clear);
     ID3D10Device_ClearDepthStencilView(g_dev, g_dsv, D3D10_CLEAR_DEPTH, 1.0f, 0);
 

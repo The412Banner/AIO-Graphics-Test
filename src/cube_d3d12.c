@@ -983,7 +983,7 @@ void aio_dx12_embed_render(double t) {
     D3D12_CPU_DESCRIPTOR_HANDLE rtv = cpu_heap_start(g_e12_rtvHeap);
     D3D12_CPU_DESCRIPTOR_HANDLE dsv = cpu_heap_start(g_e12_dsvHeap);
     ID3D12GraphicsCommandList_OMSetRenderTargets(g_e12_cl, 1, &rtv, FALSE, &dsv);
-    const float clear[4] = {8 / 255.0f, 12 / 255.0f, 17 / 255.0f, 1.0f};
+    const float clear[4] = {aio_embed_clear_rgb[0], aio_embed_clear_rgb[1], aio_embed_clear_rgb[2], 1.0f};
     ID3D12GraphicsCommandList_ClearRenderTargetView(g_e12_cl, rtv, clear, 0, NULL);
     ID3D12GraphicsCommandList_ClearDepthStencilView(g_e12_cl, dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0,
                                                     NULL);

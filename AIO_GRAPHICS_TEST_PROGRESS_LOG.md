@@ -400,3 +400,35 @@ the TRUE per-test API.
   5. Disk Speed shows a static "loading" (looks frozen) — add LIVE progress bars/metrics + run history.
   6. Light theme doesn't reach the render viewport (stays dark) — make viewport/scene bg follow theme.
   → then bump AIO_VERSION to v2.0.1, build, stage for morning device test.
+
+## 2026-08-06 — v2.0.1: fixed the 6 device-observed issues (branch feat/aio-2.0.1)
+All embedded, windowless; version bumped to v2.0.1.
+1. Benchmark now runs EMBEDDED for EVERY API. Removed the `CreateProcess --cube <api>
+   --bench` child-process path (that popped the LunarG cube window). Cross-API rows now
+   drive their `cube_embed.h` backend offscreen via a new `g_bench_active_embed` override
+   in `render_scene_to_offscreen`; DX11 rows keep the in-device scene path. Per-frame
+   timing = the SAME wall-clock delta the HUD FpsCounter uses (present forced uncapped
+   during a bench), fed into `bench.c` (`aio_bench_begin/add/finish_ex`) which reuses its
+   CSV + `_bench_<API>.txt`. Live progress bar + "~fps" in the pane.
+2. Restored multi-select: per-row checkbox (`g_bcheck[]`) + Select All / Clear All +
+   Run Selected (checked rows only) alongside per-row Run + Run All.
+3. Layout fix: the row list is now a bottom-anchored scrolling child that fills the
+   remaining pane height — no more dead space; long lists scroll.
+4. Reports + history: `aio_bench_finish_ex` returns numeric stats; every run/sweep is
+   appended to `AIO-Graphics-Test_history.txt` (+ a timestamped `_bench_report_*.txt`)
+   and shown in a new History sub-tab (avg/min/max/1%low per test, per timestamped run,
+   loaded at launch so it survives restarts).
+5. Disk Speed live progress: `disk.c` gained `aio_disk_run_ex2` + `AioDiskProgress` (phase,
+   within-phase fraction, overall %, partial MB/s, per-phase results) published as it runs.
+   The pane polls it and draws an overall bar + per-phase caption + live-filling tiles
+   (partial MB/s + per-tile progress bar). Disk-run History sub-tab persists past runs
+   (`AIO-Graphics-Test_disk_history.txt`).
+6. Light theme reaches the viewport: `apply_theme` now sets `g_scene_clear` (DX11 offscreen
+   clear) + `g_view_bg/bg2` (empty backdrop) + mirrors the clear into `aio_embed_clear_rgb`,
+   which every cross-API embed backend (VK/GL/DX12/DX10/DX9/DX8/DDraw) now reads at clear
+   time. Light render background in Light mode, dark in Dark. Tool datapanes stay dark
+   (instrument surface) by design.
+- NOTE: DX11 bench numbers now reflect embedded wall-clock throughput (uncapped present +
+  readback overhead), not the old GPU-timestamp-only figure — this is the FpsCounter-timed
+  value the task asked for, consistent across all APIs. VK Phong row reuses the VK embed
+  cube (embed backend has no phong variant).
