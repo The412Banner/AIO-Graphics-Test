@@ -432,3 +432,11 @@ All embedded, windowless; version bumped to v2.0.1.
   readback overhead), not the old GPU-timestamp-only figure — this is the FpsCounter-timed
   value the task asked for, consistent across all APIs. VK Phong row reuses the VK embed
   cube (embed backend has no phong variant).
+
+### STAGED for morning device test (2026-08-06)
+- CI run 31071241329 (workflow_dispatch on feat/aio-2.0.1, headSha 1721c19) — GREEN both arches
+  (build-x86_64 success, build-i686 success).
+- 64-bit exe sha256 8f4f587bcd64fcf7606b53dd960f6fa43bed346869c576c602bc888858ebbb53.
+- Copied to /sdcard/Download/AIO/AIO-Graphics-Test-64bit.exe AND overwrote the live shortcut
+  target /storage/emulated/0/Winlator/Games/aio graphics test/AIO-Graphics-Test-imgui-scaffold-64bit.exe
+  (owner 10156:1023, perms 0660) — so re-tapping "AIO ImGui Test" launches 2.0.1. NOT merged.
