@@ -635,3 +635,23 @@ broken-DXVK containers). The default D3D11 path is 100% unchanged; GL is a fallb
   reads GetCommandLineA, skips D3D11, and runs the GL host so the fallback can be verified without a
   Mali device. Expect diag "host: OpenGL (--force-gl)", the viewport opening on the OpenGL cube, Vulkan/
   OpenGL/DX-via-DXVK embed tests rendering, and DX11 scenes showing the "Needs Direct3D 11" notice.
+- DEVICE-PROVEN 2026-08-06: --force-gl on Adreno rendered the full ImGui UI + OpenGL cube via the GL
+  host (screenshot). Auto-fallback is automatic for real Mali/broken-DXVK users (no flag).
+
+## 2026-08-06 — v2.0.1 SHIPPED + baked into Bannerlator
+- ALL of v2.0.1 merged to AIO main `9cce7b8` and RELEASED: https://github.com/The412Banner/AIO-Graphics-Test/releases/tag/2.0.1 (Latest, run 31099475907, 64+32-bit exes). Contents since 2.0.0:
+  1. Benchmark runs show the LIVE RENDER in the viewport (progress overlay), flip back to the panel when the sweep finishes; runs EMBEDDED (no pop-out).
+  2. Benchmark checkbox multi-select restored (Select All / Clear All / Run Selected) + per-row Run + Run All.
+  3. Benchmark + Disk Speed reports + History tabs (persist across restarts).
+  4. Disk Speed live progress bars/metrics (was a static "loading").
+  5. Result files organized into `AIO Results\Benchmark\` and `AIO Results\Disk Speed\`.
+  6. Light theme now reaches the render viewport (scene clear-color follows theme).
+  7. Automatic OpenGL fallback host renderer (imgui_impl_opengl3): try D3D11 → on failure or --force-gl,
+     run the UI on OpenGL. Cross-API readback tests → GL texture; DX11-only scenes show "Needs Direct3D 11".
+  8. Build reverted -O0 → -O2 (the earlier "black screen" was a game-cloned SHORTCUT config with
+     box64=EXTREME/FEX-TSO, NOT the code — proven by running the exe manually / from the start menu).
+  9. Startup breadcrumb diagnostic (aio_diag_* + SetUnhandledExceptionFilter) retained.
+- BAKED INTO Bannerlator main `f1f36279` (branch feat/aio-2.0.1-bakein, FF over 2919f1a3): v2 exes in
+  container_pattern_common.tzst updated to 2.0.1 (v1/Classic untouched); THREE start-menu entries
+  ("AIO Graphics Test"=v2.0.1, "AIO Graphics Test (OpenGL)"=--force-gl, "(Classic)"=v1);
+  PATTERN_CONTENT_VERSION "4"→"5" (existing containers auto-update). Ships with the next Bannerlator stable.
