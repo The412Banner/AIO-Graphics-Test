@@ -98,11 +98,21 @@ static void aio_diag_ts(char *out, size_t cap) {
 }
 
 extern "C" void aio_diag_log(const char *msg) {
-    if (!g_diag || !msg) return;
+    if (!msg) return;
     char ts[32];
     aio_diag_ts(ts, sizeof(ts));
-    fprintf(g_diag, "[%s] %s\n", ts, msg);
-    fflush(g_diag);
+    // Emit to Wine's debug output + stderr ALWAYS (even when the log file could not
+    // be opened) so the milestone trail lands in wine_debug.log, which is readable in
+    // ANY container regardless of drive/path writability. The file is best-effort.
+    char line[512];
+    snprintf(line, sizeof(line), "AIODIAG [%s] %s", ts, msg);
+    OutputDebugStringA(line);
+    fprintf(stderr, "%s\n", line);
+    fflush(stderr);
+    if (g_diag) {
+        fprintf(g_diag, "[%s] %s\n", ts, msg);
+        fflush(g_diag);
+    }
 }
 
 // Best-effort module name containing addr (for the crash report). Guarded.
