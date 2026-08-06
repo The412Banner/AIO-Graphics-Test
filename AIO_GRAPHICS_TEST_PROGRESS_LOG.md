@@ -384,3 +384,19 @@ the TRUE per-test API.
 - This build also carries the V2 app icon (`src/app.ico`, id 1 in app.rc) — embedded in
   both exes via windres.
 - Branch feat/imgui-shell (NOT merged).
+
+## 2026-08-05 EOD — v2.0.0 SHIPPED; v2.0.1 checkpoint (branch feat/aio-2.0.1 off main fa7439d)
+- v2.0.0 RELEASED (single-window Dear ImGui rebuild, all APIs embedded/swappable, HUD matches
+  the emulator's Fusion HUD via app-declared-API, new icon) — tag 2.0.0 @ fa7439d, Latest.
+  Baked into Bannerlator container pattern alongside v1-"Classic" (PATTERN_CONTENT_VERSION "4",
+  Bannerlator main 76548421). Device-proven. Fixed 2 device-caught bugs: default launch was the
+  OLD shell (flipped default to ImGui, --classic for legacy); pattern re-extract needed a version
+  bump to actually replace the exe.
+- v2.0.1 PUNCH LIST (device-observed on 2.0.0, to fix on this branch):
+  1. Benchmark runs pop a NEW window (LunarG cube) instead of running EMBEDDED in the viewport.
+  2. Benchmark tests not selectable — restore v1.6.1 checkbox multi-select + Select/Clear All + Run Selected.
+  3. Massive empty vertical space under the benchmark panel — layout fix.
+  4. No benchmark reports/history — restore per-run report + past-run picker (reuse bench.c output).
+  5. Disk Speed shows a static "loading" (looks frozen) — add LIVE progress bars/metrics + run history.
+  6. Light theme doesn't reach the render viewport (stays dark) — make viewport/scene bg follow theme.
+  → then bump AIO_VERSION to v2.0.1, build, stage for morning device test.
