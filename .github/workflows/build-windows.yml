@@ -82,8 +82,12 @@ jobs:
           # a stable tag. Cloned raw + compiled with g++ (no CMake) to match the
           # Vulkan-Headers pattern. -fcf-protection=none is FEX-arm64ec insurance.
           git clone --depth 1 --branch v1.91.5 https://github.com/ocornut/imgui imgui
+          # imgui_impl_opengl3 backs the OpenGL fallback host (Mali / broken-DXVK).
+          # It uses ImGui's built-in GL loader header (no GLAD/GLEW) and links against
+          # the already-present -lopengl32, so no extra deps are needed.
           for f in imgui imgui_draw imgui_tables imgui_widgets \
-                   backends/imgui_impl_dx11 backends/imgui_impl_win32; do
+                   backends/imgui_impl_dx11 backends/imgui_impl_opengl3 \
+                   backends/imgui_impl_win32; do
             ${{ matrix.prefix }}-g++ -c imgui/$f.cpp \
               -I imgui -I imgui/backends -I src \
               -DWIN32_LEAN_AND_MEAN -D_WIN32_WINNT=0x0A00 -fcf-protection=none \
@@ -139,7 +143,7 @@ jobs:
             cube.o gpuinfo.o menu.o bench.o hud.o disk.o cube_gl.o cube_d3d11.o cube_d3d12.o \
             cube_d3d10.o cube_d3d9.o cube_d3d8.o cube_ddraw.o watchdog.o app_res.o \
             imgui.o imgui_draw.o imgui_tables.o imgui_widgets.o \
-            imgui_impl_dx11.o imgui_impl_win32.o shell_imgui.o \
+            imgui_impl_dx11.o imgui_impl_opengl3.o imgui_impl_win32.o shell_imgui.o \
             -mwindows \
             -L vk/lib \
             -o ${{ matrix.out }} \

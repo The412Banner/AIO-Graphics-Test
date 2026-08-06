@@ -589,3 +589,49 @@ Context: the earlier "black screen" was a bad SHORTCUT config, NOT codegen — t
 - BUILD FLAG — reverted -O0 -> -O2 for the ${prefix}-gcc C line and both ${prefix}-g++ C++ lines in
   .github/workflows/build-windows.yml (the crash was the shortcut config, not codegen; -O2 gives
   accurate benchmark numbers). Kept -fcf-protection=none -mno-avx -mno-avx2 and the startup diagnostic.
+
+## 2026-08-06 — Automatic OpenGL fallback host renderer (branch feat/opengl-fallback, NOT merged)
+Goal: keep the single-window ImGui shell usable when D3D11/DXVK can't initialize (Mali devices,
+broken-DXVK containers). The default D3D11 path is 100% unchanged; GL is a fallback ONLY.
+
+- HOST SELECTION (aio_run_imgui_shell). New `enum HostMode { HOST_D3D11, HOST_GL }` + `g_host`.
+  Try `create_device` (D3D11) FIRST as before; on failure (or when `--force-gl` is on the command
+  line) call new `create_gl_host(hwnd)` — ChoosePixelFormat/SetPixelFormat, wglCreateContext, then
+  upgrade to a 3.2 COMPAT context via wglCreateContextAttribsARB when available (Zink/Mesa), make
+  current, cache wglSwapIntervalEXT. If BOTH hosts fail -> MessageBox + clean exit (no crash).
+  aio_diag_log emits "host: D3D11" / "host: OpenGL (fallback)" / "host: OpenGL (--force-gl)".
+
+- IMGUI BACKEND per host. Same ImGui_ImplWin32_Init for both. GL: ImGui_ImplOpenGL3_Init("#version
+  130") / _NewFrame / _RenderDrawData / _Shutdown. D3D11: unchanged ImGui_ImplDX11_*.
+
+- MAIN LOOP per host. GL present = glViewport(client rect) + glClearColor/glClear (same shell backdrop
+  0.027,0.039,0.055) + ImGui_ImplOpenGL3_RenderDrawData + SwapBuffers(hdc); vsync honored live via
+  wglSwapIntervalEXT from the Present toggle. D3D11 present path unchanged. WM_SIZE now records the
+  pending size for either host; only D3D11 runs ResizeBuffers (GL re-derives glViewport each frame).
+
+- VIEWPORT IMAGE per host. New host-agnostic `ImTextureID g_view_tex` set wherever g_view_srv was
+  (DX11 offscreen SRV + cross-API D3D11 readback texture) PLUS a GL path. New GL upload:
+  ensure_embed_tex_gl (glGenTextures/glTexImage2D) + upload_embed_frame_gl (CPU staging buffer doing
+  the same BGRA->RGBA swizzle + pitch + bottom-up flip as the D3D11 path, then glTexSubImage2D as
+  GL_RGBA — no GL_BGRA dependency). draw_viewport now composites g_view_tex. CRITICAL: the OpenGL
+  embed backend renders through its OWN hidden WGL context and leaves it current, so drive_embed_backend
+  restores the shell context (wglMakeCurrent) immediately after bk->render() under the GL host — else
+  the upload texture + ImGui's later GL render would land in the embed's hidden window.
+
+- DX11-ONLY CONTENT in GL mode. render_scene_to_offscreen NEVER touches the (null) D3D11 device under
+  the GL host: any selection that resolves to a DX11-device scene sets new `g_needs_d3d11`, and
+  draw_viewport shows an inline "Needs Direct3D 11 (unavailable on this device) — try the OpenGL /
+  Vulkan tests" notice instead of rendering. Benchmark tool: DX11 in-device rows (r.scene>=0) are
+  greyed with a "needs D3D11" tag, Run disabled, and excluded from Run All / Run Selected via new
+  bench_row_available(); VK/GL/DX-family-via-DXVK/DDraw bench rows still run. GPU Info / Disk Speed
+  panels are pure ImGui and work unchanged. First-run selection under GL host opens on OpenGL (not the
+  preselected D3D11) so the user isn't greeted by the notice.
+
+- BUILD (build-windows.yml). Added backends/imgui_impl_opengl3 to the g++ ImGui compile list + the
+  link line (imgui_impl_opengl3.o). It uses ImGui's built-in GL loader header and links the already-
+  present -lopengl32. All existing flags kept (-O2 -fcf-protection=none -mno-avx -mno-avx2). No new deps.
+
+- --force-gl TEST (Adreno): launch the exe with `--force-gl` (works alone or with `--imgui`). The shell
+  reads GetCommandLineA, skips D3D11, and runs the GL host so the fallback can be verified without a
+  Mali device. Expect diag "host: OpenGL (--force-gl)", the viewport opening on the OpenGL cube, Vulkan/
+  OpenGL/DX-via-DXVK embed tests rendering, and DX11 scenes showing the "Needs Direct3D 11" notice.

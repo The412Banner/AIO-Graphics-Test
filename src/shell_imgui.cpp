@@ -25,6 +25,7 @@
 #include <d3d11.h>
 #include <dxgi.h>
 #include <d3dcompiler.h>
+#include <GL/gl.h>  // OpenGL fallback host (WGL context + GL upload texture)
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -33,6 +34,22 @@
 #include "imgui.h"
 #include "backends/imgui_impl_win32.h"
 #include "backends/imgui_impl_dx11.h"
+#include "backends/imgui_impl_opengl3.h"  // OpenGL fallback host renderer backend
+
+// GL enums that the (GL 1.1) mingw <GL/gl.h> may not define but we rely on.
+#ifndef GL_CLAMP_TO_EDGE
+#define GL_CLAMP_TO_EDGE 0x812F
+#endif
+
+// ---------------------------------------------------------------------------
+// Host backend selection. HOST_D3D11 is the default and 100% unchanged path;
+// HOST_GL is an automatic fallback used ONLY when the D3D11 device fails to
+// create (Mali devices / broken-DXVK containers) or when --force-gl is passed.
+// In GL mode the whole ImGui chrome renders through imgui_impl_opengl3 and the
+// window is presented with SwapBuffers; the DX11 device is never created.
+// ---------------------------------------------------------------------------
+enum HostMode { HOST_D3D11 = 0, HOST_GL = 1 };
+static HostMode g_host = HOST_D3D11;
 
 #include "shell_imgui.h"
 #include "menu.h"  // AIO_VERSION
@@ -199,6 +216,106 @@ static ID3D11DeviceContext *g_ctx = nullptr;
 static IDXGISwapChain *g_swap = nullptr;
 static ID3D11RenderTargetView *g_rtv = nullptr;
 
+// ---------------------------------------------------------------------------
+// OpenGL fallback host state (only populated when g_host == HOST_GL).
+// ---------------------------------------------------------------------------
+typedef HGLRC(WINAPI *PFN_wglCreateContextAttribsARB)(HDC, HGLRC, const int *);
+typedef BOOL(WINAPI *PFN_wglSwapIntervalEXT)(int);
+static HWND g_gl_hwnd = nullptr;
+static HDC g_gl_hdc = nullptr;
+static HGLRC g_gl_rc = nullptr;
+static PFN_wglSwapIntervalEXT g_gl_swapinterval = nullptr;
+// GL upload texture the cross-API readback pixels go into under the GL host
+// (the mirror of the D3D11 g_embed_tex). Plus a CPU staging buffer used to do
+// the BGRA->RGBA / row-flip conversion before glTexSubImage2D.
+static GLuint g_gl_embed_tex = 0;
+static int g_gl_embed_tw = 0, g_gl_embed_th = 0;
+static unsigned char *g_gl_stage = nullptr;
+static size_t g_gl_stage_cap = 0;
+
+// Create a GL 3.x context on the shell window (fallback host). Tries a modern
+// 3.2 compatibility context via WGL_ARB_create_context; falls back to the base
+// context wglCreateContext returns. Returns false if no WGL context is possible
+// (no GL driver / pixel format) so the caller can report both hosts failed.
+static bool create_gl_host(HWND hwnd) {
+    g_gl_hwnd = hwnd;
+    g_gl_hdc = GetDC(hwnd);
+    if (!g_gl_hdc) return false;
+
+    PIXELFORMATDESCRIPTOR pfd;
+    ZeroMemory(&pfd, sizeof(pfd));
+    pfd.nSize = sizeof(pfd);
+    pfd.nVersion = 1;
+    pfd.dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER;
+    pfd.iPixelType = PFD_TYPE_RGBA;
+    pfd.cColorBits = 32;
+    pfd.cDepthBits = 24;
+    pfd.iLayerType = PFD_MAIN_PLANE;
+
+    int pf = ChoosePixelFormat(g_gl_hdc, &pfd);
+    if (pf == 0 || !SetPixelFormat(g_gl_hdc, pf, &pfd)) {
+        ReleaseDC(hwnd, g_gl_hdc);
+        g_gl_hdc = nullptr;
+        return false;
+    }
+
+    HGLRC legacy = wglCreateContext(g_gl_hdc);
+    if (!legacy || !wglMakeCurrent(g_gl_hdc, legacy)) {
+        if (legacy) wglDeleteContext(legacy);
+        ReleaseDC(hwnd, g_gl_hdc);
+        g_gl_hdc = nullptr;
+        return false;
+    }
+
+    // Upgrade to a 3.2 compatibility context if the driver exposes the ARB
+    // extension (Zink/Mesa under the container do). Keep the base context if not.
+    PFN_wglCreateContextAttribsARB createAttribs =
+        (PFN_wglCreateContextAttribsARB)wglGetProcAddress("wglCreateContextAttribsARB");
+    if (createAttribs) {
+        const int WGL_CONTEXT_MAJOR = 0x2091, WGL_CONTEXT_MINOR = 0x2092;
+        const int WGL_CONTEXT_PROFILE = 0x9126, WGL_COMPAT_BIT = 0x00000002;
+        const int attribs[] = {WGL_CONTEXT_MAJOR, 3, WGL_CONTEXT_MINOR, 2,
+                               WGL_CONTEXT_PROFILE, WGL_COMPAT_BIT, 0};
+        HGLRC modern = createAttribs(g_gl_hdc, nullptr, attribs);
+        if (modern) {
+            wglMakeCurrent(nullptr, nullptr);
+            wglDeleteContext(legacy);
+            if (!wglMakeCurrent(g_gl_hdc, modern)) {
+                wglDeleteContext(modern);
+                ReleaseDC(hwnd, g_gl_hdc);
+                g_gl_hdc = nullptr;
+                return false;
+            }
+            g_gl_rc = modern;
+        } else {
+            g_gl_rc = legacy;  // keep the base context; the imgui loader checks the version
+        }
+    } else {
+        g_gl_rc = legacy;
+    }
+
+    g_gl_swapinterval = (PFN_wglSwapIntervalEXT)wglGetProcAddress("wglSwapIntervalEXT");
+    if (g_gl_swapinterval) g_gl_swapinterval(1);  // vsync on by default (honored live below)
+    return true;
+}
+
+static void destroy_gl_host() {
+    if (g_gl_embed_tex) { glDeleteTextures(1, &g_gl_embed_tex); g_gl_embed_tex = 0; }
+    g_gl_embed_tw = g_gl_embed_th = 0;
+    free(g_gl_stage);
+    g_gl_stage = nullptr;
+    g_gl_stage_cap = 0;
+    if (g_gl_rc) {
+        wglMakeCurrent(nullptr, nullptr);
+        wglDeleteContext(g_gl_rc);
+        g_gl_rc = nullptr;
+    }
+    if (g_gl_hdc && g_gl_hwnd) {
+        ReleaseDC(g_gl_hwnd, g_gl_hdc);
+        g_gl_hdc = nullptr;
+    }
+}
+
 // GPU-timing query lifecycle (defined with the Phase 3 timing state below; forward-
 // declared here because create_device / destroy_device drive them).
 static void create_timing_queries();
@@ -274,7 +391,9 @@ static LRESULT WINAPI wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
         case WM_SIZE:
             // Defer to the main loop (coalesce multiple messages / modal-drag steps).
-            if (g_dev && wp != SIZE_MINIMIZED) {
+            // Recorded for either host; the loop applies a D3D11 ResizeBuffers or a
+            // GL glViewport as appropriate.
+            if ((g_dev || g_gl_rc) && wp != SIZE_MINIMIZED) {
                 g_resize_w = (UINT)LOWORD(lp);
                 g_resize_h = (UINT)HIWORD(lp);
             }
@@ -673,8 +792,15 @@ static double g_embed_ms = 0.0;                          // backend's own render
 // Unified viewport source, set each frame by render_scene_to_offscreen: the DX11
 // offscreen SRV, or the cross-API readback SRV. draw_viewport composites whichever.
 static ID3D11ShaderResourceView *g_view_srv = nullptr;
+// Host-agnostic ImTextureID for the viewport image: a D3D11 SRV under the D3D11
+// host, or a GL texture id under the GL host. draw_viewport composites whichever.
+static ImTextureID g_view_tex = (ImTextureID)0;
 static int g_view_w = 0, g_view_h = 0;
 static double g_view_gpu_ms = 0.0;  // backend/scene GPU cost (secondary HUD stat, 0 = n/a)
+// Set true when the current selection resolves to a DX11-device scene while the
+// GL fallback host is active (no D3D11 device) -> draw_viewport shows an inline
+// "Needs Direct3D 11" notice instead of rendering. Reset every frame.
+static bool g_needs_d3d11 = false;
 
 static void create_timing_queries() {
     if (!g_dev) return;
@@ -871,6 +997,55 @@ static void upload_embed_frame(const AioEmbedFrame *fr) {
     g_ctx->Unmap(g_embed_tex, 0);
 }
 
+// --- GL host variants of ensure_embed_tex / upload_embed_frame ---------------
+// Under the GL fallback host the cross-API readback pixels are uploaded into a
+// GL texture (sampled by imgui_impl_opengl3) instead of the D3D11 dynamic
+// texture. Same BGRA->RGBA swizzle + row-pitch + GL bottom-up flip handling as
+// the D3D11 path; the conversion is done into a CPU staging buffer, then pushed
+// with glTexSubImage2D as GL_RGBA so we don't depend on the GL_BGRA extension.
+static bool ensure_embed_tex_gl(int w, int h) {
+    if (w < 8) w = 8;
+    if (h < 8) h = 8;
+    if (g_gl_embed_tex && w == g_gl_embed_tw && h == g_gl_embed_th) return true;
+    if (!g_gl_embed_tex) glGenTextures(1, &g_gl_embed_tex);
+    glBindTexture(GL_TEXTURE_2D, g_gl_embed_tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    g_gl_embed_tw = w;
+    g_gl_embed_th = h;
+    return true;
+}
+
+static void upload_embed_frame_gl(const AioEmbedFrame *fr) {
+    int w = fr->width, h = fr->height;
+    size_t need = (size_t)w * (size_t)h * 4;
+    if (need > g_gl_stage_cap) {
+        free(g_gl_stage);
+        g_gl_stage = (unsigned char *)malloc(need);
+        g_gl_stage_cap = g_gl_stage ? need : 0;
+    }
+    if (!g_gl_stage) return;
+    const unsigned char *base = (const unsigned char *)fr->pixels;
+    for (int y = 0; y < h; ++y) {
+        int srcRow = fr->flip_y ? (h - 1 - y) : y;
+        const unsigned char *s = base + (size_t)srcRow * fr->pitch;
+        unsigned char *d = g_gl_stage + (size_t)y * (size_t)w * 4;
+        if (fr->fmt == AIO_EMBED_FMT_BGRA8) {
+            for (int x = 0; x < w; ++x) {
+                d[0] = s[2]; d[1] = s[1]; d[2] = s[0]; d[3] = s[3];
+                d += 4; s += 4;
+            }
+        } else {
+            memcpy(d, s, (size_t)w * 4);
+        }
+    }
+    glBindTexture(GL_TEXTURE_2D, g_gl_embed_tex);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, g_gl_stage);
+}
+
 static void destroy_embed() {
     if (g_embed_active) { g_embed_active->cleanup(); g_embed_active = nullptr; }
     if (g_embed_srv) { g_embed_srv->Release(); g_embed_srv = nullptr; }
@@ -894,12 +1069,26 @@ static void drive_embed_backend(const AioEmbedBackend *bk, int w, int h, double 
     }
     if (!g_embed_ok) { g_scene_live = false; return; }
     bk->render(t);
+    // GL fallback host: the OpenGL embed backend renders through its OWN hidden WGL
+    // context and leaves it current. Restore the shell's context now - before ANY
+    // further GL work this frame - so the upload texture lives in the shell context
+    // and ImGui's later GL render draws into the shell window, not the embed's hidden
+    // one. (No-op for the VK/DX embeds, which never touch WGL.)
+    if (g_host == HOST_GL) wglMakeCurrent(g_gl_hdc, g_gl_rc);
     AioEmbedFrame fr;
     if (bk->get_frame(&fr) != 0 || !fr.pixels) { g_scene_live = false; return; }
     g_embed_ms = bk->gpu_ms();
-    if (!ensure_embed_tex(fr.width, fr.height)) { g_scene_live = false; return; }
-    upload_embed_frame(&fr);
-    g_view_srv = g_embed_srv;
+    if (g_host == HOST_GL) {
+        // Upload the readback pixels into a GL texture (shell context, restored above).
+        if (!ensure_embed_tex_gl(fr.width, fr.height)) { g_scene_live = false; return; }
+        upload_embed_frame_gl(&fr);
+        g_view_tex = (ImTextureID)(intptr_t)g_gl_embed_tex;
+    } else {
+        if (!ensure_embed_tex(fr.width, fr.height)) { g_scene_live = false; return; }
+        upload_embed_frame(&fr);
+        g_view_srv = g_embed_srv;
+        g_view_tex = (ImTextureID)(intptr_t)g_embed_srv;
+    }
     g_view_w = fr.width;
     g_view_h = fr.height;
     g_view_gpu_ms = g_embed_ms;
@@ -909,8 +1098,10 @@ static void drive_embed_backend(const AioEmbedBackend *bk, int w, int h, double 
 // Render the selected embeddable scene into the offscreen target at (w,h) pixels.
 // Switches scenes (cleanup old / init new) with no flicker. Sets g_scene_live.
 static void render_scene_to_offscreen(int w, int h, double t) {
+    g_needs_d3d11 = false;  // recomputed below; only set under the GL host for DX11 scenes
     // A running CROSS-API benchmark drives ITS embedded backend offscreen (fix 1:
-    // windowless), regardless of the current selection (the Benchmark tool).
+    // windowless), regardless of the current selection (the Benchmark tool). These
+    // backends own their own device/context, so they work under EITHER host.
     if (g_bench_active_embed) {
         if (g_cur_scene >= 0) { aio_d3d11_scene_cleanup(g_cur_scene); g_cur_scene = -1; }
         drive_embed_backend(g_bench_active_embed, w, h, t);
@@ -951,6 +1142,16 @@ static void render_scene_to_offscreen(int w, int h, double t) {
         g_scene_live = false;
         return;
     }
+
+    // DX11-device scene selected, but the GL fallback host has NO D3D11 device.
+    // Never touch g_dev here (it is null): flag the "Needs Direct3D 11" notice and
+    // render nothing. (g_cur_scene stays -1 under the GL host, so no cleanup needed.)
+    if (g_host == HOST_GL) {
+        g_needs_d3d11 = true;
+        g_scene_live = false;
+        return;
+    }
+
     if (!ensure_offscreen(w, h)) { g_scene_live = false; return; }
 
     if (sc != g_cur_scene || draws != g_cur_draws) {
@@ -990,6 +1191,7 @@ static void render_scene_to_offscreen(int w, int h, double t) {
     ID3D11RenderTargetView *nullrtv = nullptr;
     g_ctx->OMSetRenderTargets(1, &nullrtv, nullptr);
     g_view_srv = g_off_srv;
+    g_view_tex = (ImTextureID)(intptr_t)g_off_srv;
     g_view_w = g_off_w;
     g_view_h = g_off_h;
     g_view_gpu_ms = g_scene_timed ? g_scene_ms : 0.0;
@@ -1387,6 +1589,17 @@ static BHistRun g_bench_sweep;  // accumulates the in-progress Run/Run All/Run S
 
 static bool bench_any_active() { return g_bench_ip_row >= 0; }
 
+// A bench row is unavailable under the GL fallback host iff it is an in-device
+// DX11 scene (r.scene >= 0) - those need the D3D11 device the GL host lacks. The
+// cross-API rows (VK / GL / DX-family-via-DXVK / DDraw) own their own device and
+// still run under either host (they show as unavailable only if their own ICD /
+// DLL set is missing). Greyed in the table + skipped by Run All / Run Selected.
+static bool bench_row_available(int i) {
+    if (i < 0 || i >= g_nbrows) return false;
+    if (g_host == HOST_GL && g_brows[i].scene >= 0) return false;
+    return true;
+}
+
 // Map a cross-API bench row to its embedded backend driver (fix 1: no CreateProcess).
 static const AioEmbedBackend *bench_embed_for(const BRow &r) {
     if (r.scene >= 0) return nullptr;  // D3D11 rows use the in-device scene path
@@ -1563,13 +1776,14 @@ static void bench_enqueue_list(const int *rows, int n) {
 }
 static void bench_enqueue(int single) {  // single >= 0 = one row; -1 = all rows
     int tmp[64]; int n = 0;
-    if (single >= 0) tmp[n++] = single;
-    else for (int i = 0; i < g_nbrows && n < 64; ++i) tmp[n++] = i;
+    if (single >= 0) { if (bench_row_available(single)) tmp[n++] = single; }
+    else for (int i = 0; i < g_nbrows && n < 64; ++i) if (bench_row_available(i)) tmp[n++] = i;
     bench_enqueue_list(tmp, n);
 }
 static void bench_enqueue_selected() {  // Run Selected: only the checked rows (fix 2)
     int tmp[64]; int n = 0;
-    for (int i = 0; i < g_nbrows && n < 64; ++i) if (g_bcheck[i]) tmp[n++] = i;
+    for (int i = 0; i < g_nbrows && n < 64; ++i)
+        if (g_bcheck[i] && bench_row_available(i)) tmp[n++] = i;
     bench_enqueue_list(tmp, n);
 }
 
@@ -1899,12 +2113,20 @@ static void draw_bench_pane(ImVec2 o, float w, float h) {
     float barX = rx0 + nameW, barW = availW - nameW - valW - runW - 20.0f;
     for (int i = 0; i < g_nbrows; ++i) {
         BRow &r = g_brows[i];
+        bool avail = bench_row_available(i);  // DX11 rows are greyed under the GL host
         float chipY = ry + ROWH * 0.5f;
         char cid[16]; snprintf(cid, sizeof(cid), "##cb%d", i);
-        screen_checkbox(cid, ImVec2(rx0, chipY - 8.0f), 16.0f, &g_bcheck[i]);
-        chip(ldl, ImVec2(rx0 + 28.0f, chipY), 4.0f, hue_col(r.hue));
+        if (avail) screen_checkbox(cid, ImVec2(rx0, chipY - 8.0f), 16.0f, &g_bcheck[i]);
+        chip(ldl, ImVec2(rx0 + 28.0f, chipY), 4.0f, avail ? hue_col(r.hue) : PAL.scrMuted);
         bool running = (g_bench_ip_row == i);
-        text_at(ldl, g_mono, 11.5f, ImVec2(rx0 + 38.0f, ry + 8.0f), running ? PAL.accentInk : PAL.scrText, r.label);
+        ImU32 nameCol = !avail ? PAL.scrMuted : (running ? PAL.accentInk : PAL.scrText);
+        text_at(ldl, g_mono, 11.5f, ImVec2(rx0 + 38.0f, ry + 8.0f), nameCol, r.label);
+        if (!avail) {
+            const char *na = "needs D3D11";
+            float naw = text_w(g_mono_sm, 9.0f, na);
+            text_at(ldl, g_mono_sm, 9.0f, ImVec2(rx0 + availW - runW - naw - 8.0f, ry + 9.0f),
+                    PAL.scrMuted, na);
+        }
         // bar
         float by = chipY - 4.5f;
         ldl->AddRectFilled(ImVec2(barX, by), ImVec2(barX + barW, by + 9.0f), IM_COL32(255, 255, 255, 16), 5.0f);
@@ -1929,7 +2151,7 @@ static void draw_bench_pane(ImVec2 o, float w, float h) {
         // Run button
         char rid[16]; snprintf(rid, sizeof(rid), "##run%d", i);
         if (screen_button(rid, ImVec2(rx0 + availW - runW, ry + 2.0f), ImVec2(runW, 24.0f),
-                          r.state != 0 ? "..." : "Run", false, !busy) && !busy)
+                          r.state != 0 ? "..." : "Run", false, !busy && avail) && !busy && avail)
             bench_enqueue(i);
         ry += ROWH;
     }
@@ -2225,14 +2447,14 @@ static void draw_viewport(ImDrawList *dl, ImVec2 o, float w, float h, float fps,
     // datapane. When the run/sweep finishes (bench_any_active() false) we fall back
     // to the datapane below.
     bool bench_view = (strcmp(g_sel->name, "Benchmark") == 0) && bench_any_active();
-    bool bench_live_img = bench_view && g_scene_live && g_view_srv;
+    bool bench_live_img = bench_view && g_scene_live && g_view_tex;
 
     // Background: the LIVE embedded image (DX11 scene OR cross-API readback via the
-    // unified g_view_srv), else the themed screen gradient. Tools always get the dark
+    // unified g_view_tex), else the themed screen gradient. Tools always get the dark
     // gradient (a datapane owns the surface) - except a running bench, which shows the
     // live render.
-    if ((g_scene_live && g_view_srv && !g_sel->tool) || bench_live_img) {
-        dl->AddImage((ImTextureID)(intptr_t)g_view_srv, o, mx);
+    if ((g_scene_live && g_view_tex && !g_sel->tool) || bench_live_img) {
+        dl->AddImage(g_view_tex, o, mx);
     } else if (g_sel->tool) {
         // Tools keep the dark instrument surface (the datapane owns it).
         dl->AddRectFilledMultiColor(o, mx, PAL.scr2, PAL.scr2, PAL.scr, PAL.scr);
@@ -2253,6 +2475,21 @@ static void draw_viewport(ImDrawList *dl, ImVec2 o, float w, float h, float fps,
         // The datapane IS the content for tools: no HUD, no telemetry. Rendered over
         // the dark screen surface (already drawn above), scrolling in its own child.
         draw_tool_pane(o, w, h);
+        return;
+    }
+
+    // GL fallback host + a DX11-device scene/demo/scaling row selected: the D3D11
+    // scenes and the offscreen DX11 path require the D3D11 device, which isn't
+    // available in GL mode. Show an inline notice instead of rendering (never crash).
+    if (g_needs_d3d11) {
+        const char *line1 = "Needs Direct3D 11 (unavailable on this device)";
+        float tw = text_w(g_ui_big, 22.0f, line1);
+        text_at(dl, g_ui_big, 22.0f, ImVec2(o.x + (w - tw) * 0.5f, o.y + h * 0.5f - 30.0f),
+                PAL.text, line1);
+        const char *sub = "try the OpenGL / Vulkan tests";
+        float sw = text_w(g_mono, 12.0f, sub);
+        text_at(dl, g_mono, 12.0f, ImVec2(o.x + (w - sw) * 0.5f, o.y + h * 0.5f + 6.0f),
+                PAL.muted, sub);
         return;
     }
 
@@ -2648,22 +2885,52 @@ extern "C" int aio_run_imgui_shell(HINSTANCE hInstance) {
         UnregisterClassA(wc.lpszClassName, hInstance);
         return 1;
     }
-    aio_diag_log("window created; creating D3D11 device+swapchain...");
-
-    if (!create_device(hwnd)) {
-        aio_diag_log("create_device FAILED (no d3d11.dll / DXVK?) - aborting");
-        destroy_device();
-        DestroyWindow(hwnd);
-        UnregisterClassA(wc.lpszClassName, hInstance);
-        MessageBoxA(nullptr,
-                    "Direct3D 11 is not available in this container.\n\n"
-                    "Could not create a D3D11 device + swapchain (no d3d11.dll / DXVK?).\n"
-                    "The ImGui shell requires the container's DXVK DLL set.",
-                    "AIO Graphics Test", MB_OK | MB_ICONERROR);
-        return 1;
+    // Host-backend selection. Default: try D3D11 (the unchanged path) FIRST. If it
+    // fails (Mali / broken-DXVK containers) - or if --force-gl was passed (so the GL
+    // host can be exercised on an Adreno device) - fall back to an OpenGL 3.x WGL
+    // context on the shell window. If BOTH fail, report and exit cleanly.
+    const char *cl = GetCommandLineA();
+    bool force_gl = (cl && strstr(cl, "--force-gl") != nullptr);
+    bool d3d_ok = false;
+    if (!force_gl) {
+        aio_diag_log("window created; creating D3D11 device+swapchain...");
+        d3d_ok = create_device(hwnd);
+    } else {
+        aio_diag_log("window created; --force-gl set, skipping D3D11 and using the GL host");
     }
 
-    aio_diag_log("D3D11 device+swapchain created");
+    if (d3d_ok) {
+        g_host = HOST_D3D11;
+        aio_diag_log("host: D3D11");
+    } else {
+        if (!force_gl) aio_diag_log("create_device FAILED (no d3d11.dll / DXVK?) - trying OpenGL host");
+        destroy_device();  // release any partial D3D11 objects before the GL context
+        if (create_gl_host(hwnd)) {
+            g_host = HOST_GL;
+            aio_diag_log(force_gl ? "host: OpenGL (--force-gl)" : "host: OpenGL (fallback)");
+        } else {
+            aio_diag_log("both D3D11 and OpenGL host init FAILED - aborting");
+            destroy_gl_host();
+            DestroyWindow(hwnd);
+            UnregisterClassA(wc.lpszClassName, hInstance);
+            MessageBoxA(nullptr,
+                        "No graphics host could be created.\n\n"
+                        "Direct3D 11 (DXVK) and OpenGL (WGL) both failed to initialize.\n"
+                        "The ImGui shell needs either the container's DXVK DLL set or a\n"
+                        "working OpenGL driver.",
+                        "AIO Graphics Test", MB_OK | MB_ICONERROR);
+            return 1;
+        }
+    }
+
+    // Under the GL fallback host the preselected Direct3D 11 backend can't render
+    // (no D3D11 device), so open on the OpenGL backend instead - a working test that
+    // embeds via its own WGL context - rather than greeting the user with the notice.
+    if (g_host == HOST_GL) {
+        g_sel = &kBackends[1];  // OpenGL
+        g_sel_group = "Graphics Backends";
+    }
+
     ShowWindow(hwnd, SW_SHOWDEFAULT);
     UpdateWindow(hwnd);
 
@@ -2692,8 +2959,13 @@ extern "C" int aio_run_imgui_shell(HINSTANCE hInstance) {
     disk_hist_load();   // restore past disk runs (fix 5)
     { char m[64]; snprintf(m, sizeof(m), "disk history load: end (%d runs)", g_dhist_n); aio_diag_log(m); }
     ImGui_ImplWin32_Init(hwnd);
-    ImGui_ImplDX11_Init(g_dev, g_ctx);
-    aio_diag_log("ImGui Win32 + DX11 backends init; entering main loop");
+    if (g_host == HOST_GL) {
+        ImGui_ImplOpenGL3_Init("#version 130");
+        aio_diag_log("ImGui Win32 + OpenGL3 backends init; entering main loop");
+    } else {
+        ImGui_ImplDX11_Init(g_dev, g_ctx);
+        aio_diag_log("ImGui Win32 + DX11 backends init; entering main loop");
+    }
 
     // Real frametime ring buffer + absolute clock (scene animation time).
     static float frametimes[120];
@@ -2719,11 +2991,13 @@ extern "C" int aio_run_imgui_shell(HINSTANCE hInstance) {
         static bool s_first_frame = true;
         if (s_first_frame) { aio_diag_log("first frame: begin"); }
 
-        // Apply one coalesced swapchain resize per frame (click-drag safe).
-        if (g_resize_w != 0 && g_dev) {
+        // Apply one coalesced swapchain resize per frame (click-drag safe). Only the
+        // D3D11 host resizes a swapchain here; the GL host re-derives its glViewport
+        // from the live client rect at present time each frame.
+        if (g_resize_w != 0) {
             UINT nw = g_resize_w, nh = g_resize_h;
             g_resize_w = g_resize_h = 0;
-            if (nw > 0 && nh > 0) {
+            if (nw > 0 && nh > 0 && g_host == HOST_D3D11 && g_dev) {
                 release_rtv();
                 g_swap->ResizeBuffers(0, nw, nh, DXGI_FORMAT_UNKNOWN, 0);
                 create_rtv();
@@ -2753,7 +3027,8 @@ extern "C" int aio_run_imgui_shell(HINSTANCE hInstance) {
             s_disk_prev = cur;
         }
 
-        ImGui_ImplDX11_NewFrame();
+        if (g_host == HOST_GL) ImGui_ImplOpenGL3_NewFrame();
+        else ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
 
@@ -2873,14 +3148,28 @@ extern "C" int aio_run_imgui_shell(HINSTANCE hInstance) {
         ImGui::PopStyleVar();
 
         ImGui::Render();
-        const float clear[4] = {0.027f, 0.039f, 0.055f, 1.0f};
-        g_ctx->OMSetRenderTargets(1, &g_rtv, nullptr);
-        g_ctx->ClearRenderTargetView(g_rtv, clear);
-        ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+        const float clear[4] = {0.027f, 0.039f, 0.055f, 1.0f};  // shell backdrop (both hosts)
         // Honor the present-mode toggle; a running in-process bench forces Uncapped so
         // it samples the scene as fast as the GPU allows.
-        UINT sync = (g_present_vsync && g_bench_ip_row < 0) ? 1 : 0;
-        g_swap->Present(sync, 0);
+        bool want_vsync = (g_present_vsync && g_bench_ip_row < 0);
+        if (g_host == HOST_GL) {
+            RECT crc;
+            GetClientRect(hwnd, &crc);
+            int cw = crc.right - crc.left, ch = crc.bottom - crc.top;
+            if (cw < 1) cw = 1;
+            if (ch < 1) ch = 1;
+            glViewport(0, 0, cw, ch);
+            glClearColor(clear[0], clear[1], clear[2], clear[3]);
+            glClear(GL_COLOR_BUFFER_BIT);
+            ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+            if (g_gl_swapinterval) g_gl_swapinterval(want_vsync ? 1 : 0);
+            SwapBuffers(g_gl_hdc);
+        } else {
+            g_ctx->OMSetRenderTargets(1, &g_rtv, nullptr);
+            g_ctx->ClearRenderTargetView(g_rtv, clear);
+            ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+            g_swap->Present(want_vsync ? 1 : 0, 0);
+        }
         // Count the frame that just reached glass (drives the whole HUD).
         g_fps.tick(now_ms);
         if (s_first_frame) { aio_diag_log("first frame: presented OK"); s_first_frame = false; }
@@ -2888,14 +3177,16 @@ extern "C" int aio_run_imgui_shell(HINSTANCE hInstance) {
 
     aio_diag_log("main loop exited; shutting down");
     if (g_cur_scene >= 0) aio_d3d11_scene_cleanup(g_cur_scene);
-    destroy_embed();  // cleanup any live cross-API backend + upload texture
-    destroy_offscreen();
+    destroy_embed();  // cleanup any live cross-API backend + (D3D11) upload texture
+    destroy_offscreen();  // null-safe: nothing was created under the GL host
     if (g_off_dss) { g_off_dss->Release(); g_off_dss = nullptr; }
     if (g_off_rs) { g_off_rs->Release(); g_off_rs = nullptr; }
-    ImGui_ImplDX11_Shutdown();
+    if (g_host == HOST_GL) ImGui_ImplOpenGL3_Shutdown();
+    else ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext();
-    destroy_device();
+    if (g_host == HOST_GL) destroy_gl_host();
+    else destroy_device();
     DestroyWindow(hwnd);
     UnregisterClassA(wc.lpszClassName, hInstance);
     aio_diag_log("exit OK");
