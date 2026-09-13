@@ -1059,9 +1059,23 @@ static void destroy_embed() {
 // render one frame, read it back, upload into g_embed_tex. Sets g_view_* / g_scene_live.
 static void drive_embed_backend(const AioEmbedBackend *bk, int w, int h, double t) {
     if (bk != g_embed_active) {
-        if (g_embed_active) g_embed_active->cleanup();
+        // Switching backend tears the previous device down and builds the next one inline on
+        // this thread. On the Wayland container the process wedges somewhere in here from the
+        // second switch onwards, so log each side separately to say which call never returns.
+        char dbg[128];
+        if (g_embed_active) {
+            aio_diag_log("switch: cleanup begin");
+            g_embed_active->cleanup();
+            aio_diag_log("switch: cleanup end");
+        } else {
+            aio_diag_log("switch: no previous backend to clean up");
+        }
         g_embed_active = bk;
+        snprintf(dbg, sizeof(dbg), "switch: init begin (%dx%d)", w, h);
+        aio_diag_log(dbg);
         g_embed_ok = (bk->init(w, h) == 0);
+        snprintf(dbg, sizeof(dbg), "switch: init end, ok=%d", (int)g_embed_ok);
+        aio_diag_log(dbg);
         g_embed_bw = w; g_embed_bh = h;
     } else if (g_embed_ok && (w != g_embed_bw || h != g_embed_bh)) {
         g_embed_ok = (bk->resize(w, h) == 0);
