@@ -35,6 +35,7 @@
 #include <string.h>
 
 #include "cube_d3d12.h"
+extern void aio_diag_log(const char *msg);
 #include "cube_embed.h"
 #include "hud.h"
 #include "bench.h"
@@ -671,7 +672,11 @@ static void e12_wait_idle(void) {
 }
 
 void aio_dx12_embed_cleanup(void) {
+    // The Wayland container hangs somewhere in this teardown from the second backend switch
+    // onwards. Mark the fence wait and the device release so the log says which one it is.
+    aio_diag_log("dx12 cleanup: wait_idle begin");
     if (g_e12_dev) e12_wait_idle();
+    aio_diag_log("dx12 cleanup: wait_idle end");
     if (g_e12_cbptr && g_e12_cbo) { ID3D12Resource_Unmap(g_e12_cbo, 0, NULL); g_e12_cbptr = NULL; }
     if (g_e12_fenceEvent) { CloseHandle(g_e12_fenceEvent); g_e12_fenceEvent = NULL; }
     if (g_e12_fence) { ID3D12Fence_Release(g_e12_fence); g_e12_fence = NULL; }
@@ -687,7 +692,9 @@ void aio_dx12_embed_cleanup(void) {
     if (g_e12_cl) { ID3D12GraphicsCommandList_Release(g_e12_cl); g_e12_cl = NULL; }
     if (g_e12_alloc) { ID3D12CommandAllocator_Release(g_e12_alloc); g_e12_alloc = NULL; }
     if (g_e12_queue) { ID3D12CommandQueue_Release(g_e12_queue); g_e12_queue = NULL; }
+    aio_diag_log("dx12 cleanup: device release begin");
     if (g_e12_dev) { ID3D12Device_Release(g_e12_dev); g_e12_dev = NULL; }
+    aio_diag_log("dx12 cleanup: device release end");
     if (g_e12_px) { free(g_e12_px); g_e12_px = NULL; }
     g_e12_w = g_e12_h = 0;
     g_e12_rowpitch = 0;
