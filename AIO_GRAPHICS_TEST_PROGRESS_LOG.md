@@ -732,3 +732,23 @@ broken-DXVK containers). The default D3D11 path is 100% unchanged; GL is a fallb
   from a device. Tags stay lightweight and unprefixed (2.1.0).
 - `--hdr` (exact flag): any launch without --classic/--cube/--gpuinfo opens the single-window shell; with
   --hdr it starts on Display Tests -> HDR (D3D11 host only; ignored under the OpenGL fallback host).
+
+## 2026-09-15 — True fullscreen for every test + unattended `--sweep` (branch feat/fullscreen-all, off 2.1.0)
+- Why: the Wayland perf work wants AIO-only perf runs on the Pocket FIT, and in 2.x only the HDR card
+  could meet Bannerlator's zero-copy rule (one draw at 0,0 covering the whole desktop); the in-window
+  fullscreen kept the framed Wine window.
+- The corner button / F11 / Esc now drive the true fullscreen (borderless WS_POPUP at rcMonitor,
+  HWND_TOPMOST, swapchain resized in the same frame, style/placement restored on leave) for EVERY
+  selection: all eight Graphics Backends, the DX11 scenes / demos / scaling tests, tools, and a running
+  benchmark's live render (the corner button now also shows during a run). No backend needed skipping:
+  every one renders offscreen and composites into the shell's single swapchain; none has a window of its
+  own. (Under the OpenGL fallback host the window goes fullscreen too; zero-copy there is unverified.)
+- Fullscreen HUD gains "fullscreen: yes (W x H at 0,0)" (shell_fs_state: client rect vs rcMonitor vs
+  swapchain size); the bench overlay shows it too. The benchmark report gains the AIO version, "Present:
+  uncapped", and per test the render size + fullscreen state; tests that never rendered print n/a.
+  Reports are also written as AIO-Graphics-Test_bench_report_latest.txt and to Z:\usr\tmp\.
+- `--sweep <sec>` (or `--sweep=<sec>`, default 15, max 600): selects Benchmark, goes fullscreen, queues the
+  eight backend rows (Vulkan, OpenGL, D3D12, D3D11 Spin, D3D10, D3D9, D3D8, DirectDraw/D3D7; rows the
+  host can't run are skipped), runs them uncapped, writes the usual reports, then posts WM_CLOSE. A
+  watchdog thread ends the process after 60 s without a frame (partial report marked INCOMPLETE, exit
+  code 3; exit 0 if only the shutdown stalled after a complete report).

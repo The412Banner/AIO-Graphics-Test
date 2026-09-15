@@ -331,12 +331,15 @@ static UINT g_resize_w = 0, g_resize_h = 0;  // 0 => nothing pending
 // on-viewport control and by edge-triggered F11 / ESC in wnd_proc.
 static bool g_fullscreen = false;
 
-// True (window-level) fullscreen, used for the HDR test only: the emulator's Wayland
-// compositor puts a program's frames straight on the display layer (zero-copy) only
-// when its frame sits at 0,0 at exactly the scene size, on top. A maximised window
-// stays inside the work area (the taskbar keeps its strip), so the window becomes a
+// True (window-level) fullscreen, for every test: the emulator's Wayland compositor
+// puts a program's frames straight on the display layer (zero-copy) only when its
+// frame sits at 0,0 at exactly the scene size, on top. A maximised window stays
+// inside the work area (the taskbar keeps its strip), so the window becomes a
 // borderless topmost popup at the monitor rect (rcMonitor, not rcWork); WM_SIZE then
 // resizes the swapchain to exactly that size. Leaving restores style and placement.
+// Every backend renders into the shell's one swapchain (offscreen + composite), so
+// all of them qualify; none opens a window of its own.
+static HWND g_hwnd = nullptr;  // the shell window (set once it is created)
 static bool g_win_fs = false;
 static WINDOWPLACEMENT g_win_fs_place;
 static LONG g_win_fs_style = 0, g_win_fs_exstyle = 0;
@@ -377,6 +380,47 @@ static void set_window_fullscreen(HWND hwnd, bool on) {
         g_win_fs = false;
         aio_diag_log("window fullscreen off: style and placement restored");
     }
+}
+
+// Whether the window meets that compositor rule right now: client area at the
+// monitor origin, exactly the monitor size, and the swapchain buffers the same size
+// (under the GL host the default framebuffer is the client area). Writes
+// "yes (W x H at X,Y)" or "no (...)" into out; shown in the fullscreen HUD and the
+// benchmark report.
+static bool shell_fs_state(char *out, size_t cap) {
+    RECT cr;
+    POINT p = {0, 0};
+    if (!g_hwnd || !GetClientRect(g_hwnd, &cr)) {
+        snprintf(out, cap, "unknown");
+        return false;
+    }
+    ClientToScreen(g_hwnd, &p);
+    const int cw = cr.right - cr.left, ch = cr.bottom - cr.top;
+    int mx = 0, my = 0, mw = 0, mh = 0;
+    MONITORINFO mi;
+    ZeroMemory(&mi, sizeof(mi));
+    mi.cbSize = sizeof(mi);
+    if (GetMonitorInfoA(MonitorFromWindow(g_hwnd, MONITOR_DEFAULTTONEAREST), &mi)) {
+        mx = mi.rcMonitor.left;
+        my = mi.rcMonitor.top;
+        mw = mi.rcMonitor.right - mi.rcMonitor.left;
+        mh = mi.rcMonitor.bottom - mi.rcMonitor.top;
+    }
+    int sw = cw, sh = ch;
+    DXGI_SWAP_CHAIN_DESC sd;
+    if (g_host == HOST_D3D11 && g_swap && SUCCEEDED(g_swap->GetDesc(&sd))) {
+        sw = (int)sd.BufferDesc.Width;
+        sh = (int)sd.BufferDesc.Height;
+    }
+    const bool ok = mw > 0 && p.x == mx && p.y == my && cw == mw && ch == mh && sw == cw && sh == ch;
+    if (ok)
+        snprintf(out, cap, "yes (%d x %d at %ld,%ld)", cw, ch, (long)p.x, (long)p.y);
+    else if (sw != cw || sh != ch)
+        snprintf(out, cap, "no (%d x %d at %ld,%ld, swapchain %d x %d; screen %d x %d)", cw, ch, (long)p.x,
+                 (long)p.y, sw, sh, mw, mh);
+    else
+        snprintf(out, cap, "no (%d x %d at %ld,%ld; screen %d x %d)", cw, ch, (long)p.x, (long)p.y, mw, mh);
+    return ok;
 }
 
 static void create_rtv() {
@@ -1659,8 +1703,22 @@ static int g_bhist_sel = 0;  // selected run in the History view (0 = newest)
 static bool g_bench_sweep_active = false;
 static BHistRun g_bench_sweep;  // accumulates the in-progress Run/Run All/Run Selected
 #define AIO_BENCH_HIST_FILE "AIO-Graphics-Test_history.txt"
+// Per-row conditions of the running sweep, reported beside the numbers: the render
+// size and whether the window met the compositor's one-fullscreen-window rule.
+static char g_sweep_fs[40][96];
+static int g_sweep_rw[40], g_sweep_rh[40];
+// --sweep <sec>: the sweep was started from the command line; the app closes itself
+// when it finishes (see aio_run_imgui_shell).
+static bool g_sweep_cli = false;
 
 static bool bench_any_active() { return g_bench_ip_row >= 0; }
+
+// A bench row by its "--cube <arg>" tokens (-1 if absent).
+static int bench_row_by_arg(const char *arg) {
+    for (int i = 0; i < g_nbrows; ++i)
+        if (strcmp(g_brows[i].arg, arg) == 0) return i;
+    return -1;
+}
 
 // A bench row is unavailable under the GL fallback host iff it is an in-device
 // DX11 scene (r.scene >= 0) - those need the D3D11 device the GL host lacks. The
@@ -1732,6 +1790,49 @@ static void bench_sweep_add(const char *label, float a, float mn, float mx, floa
     snprintf(r->label, sizeof(r->label), "%s", label);
     r->avg = a; r->mn = mn; r->mx = mx; r->low1 = lo;
 }
+// The human-readable sweep report. note = an extra header line (the --sweep watchdog
+// uses it to mark a partial report), or nullptr.
+static void bench_write_report_file(const char *path, const char *note) {
+    FILE *rf = fopen(path, "w");
+    if (!rf) return;
+    fprintf(rf, "AIO Graphics Test %s - benchmark report\r\n%s   %d s per test%s\r\n", AIO_VERSION,
+            g_bench_sweep.ts, g_bench_sweep.secs, g_sweep_cli ? "   (unattended --sweep)" : "");
+    fprintf(rf, "Present: uncapped (vsync off) during every test\r\n");
+    if (note) fprintf(rf, "%s\r\n", note);
+    fprintf(rf, "\r\n%-30s %8s %8s %8s %8s   %-11s %s\r\n", "Test", "Avg", "Min", "Max", "1%low", "Render",
+            "Fullscreen");
+    for (int i = 0; i < g_bench_sweep.nrows; ++i) {
+        BHistRow *r = &g_bench_sweep.rows[i];
+        if (r->avg <= 0.0f) {
+            fprintf(rf, "%-30s %8s %8s %8s %8s   %-11s %s\r\n", r->label, "n/a", "", "", "", "-",
+                    "did not render (backend unavailable)");
+            continue;
+        }
+        char res[24];
+        snprintf(res, sizeof(res), "%dx%d", g_sweep_rw[i], g_sweep_rh[i]);
+        fprintf(rf, "%-30s %8.0f %8.0f %8.0f %8.0f   %-11s %s\r\n", r->label, r->avg, r->mn, r->mx, r->low1, res,
+                g_sweep_fs[i]);
+    }
+    fclose(rf);
+}
+
+// The report under its timestamped name, under a fixed "latest" name (what an
+// automated run reads), and a copy in the container's shared tmp (Z:\usr\tmp) when
+// that exists.
+static void bench_write_reports(const char *note) {
+    char safe[24];
+    snprintf(safe, sizeof(safe), "%s", g_bench_sweep.ts);
+    for (char *p = safe; *p; ++p) if (*p == ':' || *p == ' ') *p = '-';
+    char fn[96];
+    snprintf(fn, sizeof(fn), "AIO-Graphics-Test_bench_report_%s.txt", safe);
+    char rpath[400];
+    aio_results_path("Benchmark", fn, rpath, sizeof(rpath));
+    bench_write_report_file(rpath, note);
+    aio_results_path("Benchmark", "AIO-Graphics-Test_bench_report_latest.txt", rpath, sizeof(rpath));
+    bench_write_report_file(rpath, note);
+    bench_write_report_file("Z:\\usr\\tmp\\AIO-Graphics-Test_bench_report_latest.txt", note);
+}
+
 static void bench_sweep_finish() {
     if (!g_bench_sweep_active) return;
     g_bench_sweep_active = false;
@@ -1748,25 +1849,8 @@ static void bench_sweep_finish() {
         }
         fclose(f);
     }
-    // Timestamped human-readable report file.
-    char safe[24];
-    snprintf(safe, sizeof(safe), "%s", g_bench_sweep.ts);
-    for (char *p = safe; *p; ++p) if (*p == ':' || *p == ' ') *p = '-';
-    char fn[96];
-    snprintf(fn, sizeof(fn), "AIO-Graphics-Test_bench_report_%s.txt", safe);
-    char rpath[400];
-    aio_results_path("Benchmark", fn, rpath, sizeof(rpath));
-    FILE *rf = fopen(rpath, "w");
-    if (rf) {
-        fprintf(rf, "AIO Graphics Test - benchmark report\r\n%s   %d s per test\r\n\r\n",
-                g_bench_sweep.ts, g_bench_sweep.secs);
-        fprintf(rf, "%-30s %8s %8s %8s %8s\r\n", "Test", "Avg", "Min", "Max", "1%low");
-        for (int i = 0; i < g_bench_sweep.nrows; ++i) {
-            BHistRow *r = &g_bench_sweep.rows[i];
-            fprintf(rf, "%-30s %8.0f %8.0f %8.0f %8.0f\r\n", r->label, r->avg, r->mn, r->mx, r->low1);
-        }
-        fclose(rf);
-    }
+    // Human-readable report (timestamped + latest + shared-tmp copy).
+    bench_write_reports(nullptr);
     // Push into the in-memory list (newest kept) + select it in the History view.
     if (g_bhist_n >= 40) { memmove(&g_bhist[0], &g_bhist[1], 39 * sizeof(BHistRun)); g_bhist_n = 39; }
     g_bhist[g_bhist_n++] = g_bench_sweep;
@@ -1805,6 +1889,13 @@ static void bench_finish_row(double elapsed) {
     if (sum) free(sum);
     r.avg = (float)st.avg; r.mn = (float)st.min; r.mx = (float)st.max;
     g_brow_low1[i] = (float)st.low1;
+    if (g_bench_sweep_active && g_bench_sweep.nrows < 40) {
+        // The conditions this row ran under (bench_sweep_add takes this slot next).
+        const int k = g_bench_sweep.nrows;
+        shell_fs_state(g_sweep_fs[k], sizeof(g_sweep_fs[k]));
+        g_sweep_rw[k] = st.frames > 0 ? g_view_w : 0;
+        g_sweep_rh[k] = st.frames > 0 ? g_view_h : 0;
+    }
     if (g_bench_sweep_active) bench_sweep_add(r.apilabel, r.avg, r.mn, r.mx, g_brow_low1[i]);
     r.state = 0;
     g_bench_ip_row = -1;
@@ -1858,6 +1949,46 @@ static void bench_enqueue_selected() {  // Run Selected: only the checked rows (
     for (int i = 0; i < g_nbrows && n < 64; ++i)
         if (g_bcheck[i] && bench_row_available(i)) tmp[n++] = i;
     bench_enqueue_list(tmp, n);
+}
+
+// --sweep: the eight Graphics Backends, in menu order, by their bench rows.
+static const char *const kSweepArgs[8] = {"vk", "gl", "dx12", "dx11 --scene spin", "dx10", "dx9", "dx8", "dx7"};
+
+// --sweep safety net. An unattended run must end even if a backend switch never
+// returns (a known Wayland-driver hazard): a background thread watches a counter the
+// render loop bumps every frame, and after 60 s without a frame it writes the rows
+// that finished (marked incomplete) and ends the process. The main thread is stuck at
+// that point, so the sweep data it reads is not changing underneath it.
+static volatile LONG g_loop_beat = 0;
+static volatile bool g_sweep_exit_posted = false;  // the sweep finished and was reported
+
+static DWORD WINAPI sweep_watchdog(LPVOID) {
+    LONG last = -1;
+    int still = 0;
+    for (;;) {
+        Sleep(1000);
+        LONG beat = g_loop_beat;
+        if (beat != last) {
+            last = beat;
+            still = 0;
+            continue;
+        }
+        if (++still < 60) continue;
+        if (g_sweep_exit_posted) {  // the report is complete; only the shutdown is stuck
+            aio_diag_log("--sweep: shutdown stalled for 60 s after the report; ending the process");
+            TerminateProcess(GetCurrentProcess(), 0);
+            return 0;
+        }
+        int row = g_bench_ip_row;
+        char note[160];
+        snprintf(note, sizeof(note),
+                 "INCOMPLETE: the app stopped rendering for 60 s during \"%s\"; the rows below finished",
+                 (row >= 0 && row < g_nbrows) ? g_brows[row].apilabel : "(between tests)");
+        bench_write_reports(note);
+        aio_diag_log("--sweep: render loop stalled for 60 s; partial report written, ending the process");
+        TerminateProcess(GetCurrentProcess(), 3);
+        return 0;
+    }
 }
 
 // A compact button drawn on the dark screen surface (datapane controls).
@@ -2510,6 +2641,13 @@ static void draw_bench_overlay(ImDrawList *dl, ImVec2 o, float w, float h) {
     if (fp < 0) fp = 0;
     if (fp > 1) fp = 1;
     dl->AddRectFilled(ImVec2(barX, barY), ImVec2(barX + barW * fp, barY + 7.0f), PAL.accent, 4.0f);
+    if (g_fullscreen) {  // the compositor-rule line, under the panel
+        char fsb[128], fl[150];
+        bool fs_ok = shell_fs_state(fsb, sizeof(fsb));
+        snprintf(fl, sizeof(fl), "fullscreen: %s", fsb);
+        float lw = text_w(g_mono_sm, 11.0f, fl);
+        text_at(dl, g_mono_sm, 11.0f, ImVec2(o.x + (w - lw) * 0.5f, pmx.y + 6.0f), fs_ok ? PAL.good : PAL.warn, fl);
+    }
 }
 
 static void draw_viewport(ImDrawList *dl, ImVec2 o, float w, float h, float fps, bool full) {
@@ -2640,7 +2778,15 @@ static void draw_viewport(ImDrawList *dl, ImVec2 o, float w, float h, float fps,
     }
 
     // ---- telemetry strip (bottom) ---- (hidden in fullscreen; HUD stays)
-    if (full) return;
+    if (full) {
+        // In fullscreen the strip gives way to one line: whether the window meets the
+        // compositor's one-fullscreen-window rule (zero-copy).
+        char fsb[128], fl[150];
+        bool fs_ok = shell_fs_state(fsb, sizeof(fsb));
+        snprintf(fl, sizeof(fl), "fullscreen: %s", fsb);
+        text_at(dl, g_mono_sm, 11.0f, ImVec2(spk.x + 2.0f, spk.y + 70.0f), fs_ok ? PAL.good : PAL.warn, fl);
+        return;
+    }
     float stripH = 58.0f, sy = mx.y - stripH;
     dl->AddRectFilledMultiColor(ImVec2(o.x, sy), mx, IM_COL32(4, 7, 10, 0), IM_COL32(4, 7, 10, 0),
                                 IM_COL32(4, 7, 10, 210), IM_COL32(4, 7, 10, 210));
@@ -2977,6 +3123,7 @@ extern "C" int aio_run_imgui_shell(HINSTANCE hInstance) {
         UnregisterClassA(wc.lpszClassName, hInstance);
         return 1;
     }
+    g_hwnd = hwnd;
     // Host-backend selection. Default: try D3D11 (the unchanged path) FIRST. If it
     // fails (Mali / broken-DXVK containers) - or if --force-gl was passed (so the GL
     // host can be exercised on an Adreno device) - fall back to an OpenGL 3.x WGL
@@ -3027,6 +3174,38 @@ extern "C" int aio_run_imgui_shell(HINSTANCE hInstance) {
     if (g_host == HOST_D3D11 && cl && strstr(cl, "--hdr") != nullptr) {
         g_sel = &kDisplay[0];
         g_sel_group = "Display Tests";
+    }
+    // --sweep <sec> (or --sweep=<sec>): an unattended benchmark of the eight Graphics
+    // Backends, <sec> seconds each (default 15), in true fullscreen and uncapped. It is
+    // reported to AIO Results\Benchmark\ like any sweep (plus a fixed "latest" copy),
+    // then the app closes itself. A watchdog ends a run that stops rendering.
+    if (cl && strstr(cl, "--sweep") != nullptr) {
+        const char *sa = strstr(cl, "--sweep") + 7;
+        while (*sa == ' ' || *sa == '=') ++sa;
+        int secs = atoi(sa);
+        if (secs <= 0) secs = 15;
+        if (secs > 600) secs = 600;
+        g_bench_secs = secs;
+        g_sel = &kTools[1];  // Benchmark: the live render with the progress overlay
+        g_sel_group = "Tools";
+        g_fullscreen = true;
+        g_sweep_cli = true;
+        int rows[8], n = 0;
+        for (int k = 0; k < 8; ++k) {
+            int i = bench_row_by_arg(kSweepArgs[k]);
+            if (i >= 0 && bench_row_available(i)) rows[n++] = i;
+        }
+        bench_enqueue_list(rows, n);
+        if (n == 0) {  // nothing to run: still leave a report saying so (the app closes next frame)
+            bench_sweep_begin();
+            bench_write_reports("INCOMPLETE: none of the eight graphics backends can run in this container");
+            g_bench_sweep_active = false;
+        }
+        HANDLE wd = CreateThread(nullptr, 0, sweep_watchdog, nullptr, 0, nullptr);
+        if (wd) CloseHandle(wd);
+        char m[112];
+        snprintf(m, sizeof(m), "--sweep: %d backends, %d s each, fullscreen, uncapped", n, secs);
+        aio_diag_log(m);
     }
 
     ShowWindow(hwnd, SW_SHOWDEFAULT);
@@ -3095,15 +3274,11 @@ extern "C" int aio_run_imgui_shell(HINSTANCE hInstance) {
         static bool s_first_frame = true;
         if (s_first_frame) { aio_diag_log("first frame: begin"); }
 
-        // HDR test: the fullscreen control / F11 / ESC toggle a real borderless topmost
-        // window at the monitor rect (see set_window_fullscreen); every other test keeps
-        // the in-window fullscreen. Done before the resize below, so the WM_SIZE it
-        // raises resizes the swapchain in this same frame.
-        {
-            bool want_win_fs = g_fullscreen && is_hdr_test(g_sel) && g_host == HOST_D3D11 && g_dev &&
-                               !bench_any_active();
-            if (want_win_fs != g_win_fs) set_window_fullscreen(hwnd, want_win_fs);
-        }
+        // The fullscreen control / F11 / ESC toggle a real borderless topmost window at
+        // the monitor rect for whatever is on screen (see set_window_fullscreen). Done
+        // before the resize below, so the WM_SIZE it raises resizes the swapchain in this
+        // same frame.
+        if (g_fullscreen != g_win_fs) set_window_fullscreen(hwnd, g_fullscreen);
 
         // Apply one coalesced swapchain resize per frame (click-drag safe). Only the
         // D3D11 host resizes a swapchain here; the GL host re-derives its glViewport
@@ -3144,6 +3319,14 @@ extern "C" int aio_run_imgui_shell(HINSTANCE hInstance) {
         // Read back last frame's scene GPU timing, then advance any running benchmark.
         poll_timing_queries();
         bench_tick(t_sec, dt_ms);
+        InterlockedIncrement(&g_loop_beat);  // --sweep watchdog: the loop is alive
+        // --sweep: close the app once the unattended sweep has run and been reported.
+        if (g_sweep_cli && !g_sweep_exit_posted && !bench_any_active() && g_bench_qpos >= g_bench_qn &&
+            !g_bench_sweep_active) {
+            g_sweep_exit_posted = true;
+            aio_diag_log("--sweep: finished and reported; closing");
+            PostMessage(hwnd, WM_CLOSE, 0, 0);
+        }
         // Record a finished disk run into history on the RUNNING->DONE edge (works
         // regardless of which tool is on screen).
         {
@@ -3266,7 +3449,7 @@ extern "C" int aio_run_imgui_shell(HINSTANCE hInstance) {
 
         // Fullscreen toggle control, pinned to the active viewport's top-right. Every
         // backend embeds now, so it's shown for any non-tool selection.
-        bool can_fs = !g_sel->tool;
+        bool can_fs = !g_sel->tool || bench_any_active();  // also a running benchmark's live render
         if (can_fs || g_fullscreen) {
             float fsRight = g_fullscreen ? (o.x + W) : (o.x + vpW);
             float fsTop = g_fullscreen ? o.y : bodyTop;

@@ -53,10 +53,13 @@ dark:
   Tests** (the [HDR test card](#hdr-test-card)), **DX11 Scenes**, **Showcase Demos**, **Scaling
   Tests**, and **Tools**. Each row carries a per-API colour chip and an fps hint; the selected row is
   highlighted. Toggle between a compact **List** and a visual **Grid** from the toolbar.
-- **Fullscreen** — a one-tap button expands the running test to fill the whole window (menu,
-  toolbar, and strips slide away, the HUD stays). Exit with the on-screen **Exit Fullscreen** pill or
-  **F11 / Esc** — it always drops back to the exact view you left, test still running. On the HDR
-  test card the same button makes a true fullscreen window over the whole screen (see below).
+- **Fullscreen** — a one-tap button (or **F11**) makes the running test a true fullscreen window:
+  one borderless window over the whole screen, taskbar included, rendering at the screen's own size
+  (menu, toolbar, and strips slide away, the HUD stays). That is what a compositor needs to put the
+  frames straight on the display (zero-copy); the HUD's `fullscreen: yes (W x H at 0,0)` line says
+  whether it is met. Exit with the on-screen **Exit Fullscreen** pill or **F11 / Esc** — it always
+  drops back to the exact view you left, test still running. It works for every backend, scene and
+  running benchmark, and for the [HDR test card](#hdr-test-card).
 - **Aspect-correct resize** — drag any edge or corner and the render re-fits the window's aspect
   cleanly (square faces stay square, native resolution, no stretching), coalesced so a drag stays
   smooth.
@@ -169,6 +172,11 @@ dark:
   - **Selectable length** — 15 / 30 / 45 / 60 s — and a **Vsync toggle**.
   - **Results** — the full Avg/Min/Max for every test, with a **run picker**: each sweep is saved to
     disk with a **timestamp**, so previous runs survive app restarts.
+  - **Report** — `AIO Results\Benchmark\AIO-Graphics-Test_bench_report_<time>.txt` (and the same
+    report as `..._latest.txt`) lists each test with its render size and whether it ran in true
+    fullscreen. Tap the corner button during a run to benchmark in fullscreen.
+  - **Unattended sweep** — launch with `--sweep 15` to run the eight graphics backends for 15 s each
+    in true fullscreen, uncapped, write the report and close (see [CLI shortcuts](#cli-shortcuts)).
 - **Semaphore Probe** — benchmarks the instanced D3D11 cube with **timeline vs binary** semaphores
   to measure the Turnip-kgsl timeline-semaphore regression, and prints a plain verdict (e.g. *"binary
   is 1.7× faster"*). (The binary path only differs on a DXVK build that honors
@@ -248,6 +256,7 @@ power users and automation:
 |------|--------------|
 | *(default)* | Opens the single-window app |
 | `--hdr` | Opens the single-window app straight on the [HDR test card](#hdr-test-card) (Display Tests → HDR) |
+| `--sweep <sec>` | Unattended benchmark: the eight graphics backends (Vulkan, OpenGL, D3D12, D3D11, D3D10, D3D9, D3D8, DirectDraw), `<sec>` seconds each (default 15), in true fullscreen with vsync off; writes `AIO Results\Benchmark\AIO-Graphics-Test_bench_report_latest.txt` (plus the timestamped copy), then closes. If the app stops rendering for 60 s it writes what finished, marked incomplete, and exits |
 | `--gpuinfo` / `--report` | Dump GL + VK adapter info to console + `AIO-Graphics-Test_report.txt`, then exit |
 | `--cube vk\|gl\|dx7\|dx8\|dx9\|dx10\|dx11\|dx12` | Run a single backend headless (its own window) — used by scripting and the benchmark sweeps |
 | `--cube ddraw2d` | The pure-2D DirectDraw blit test (`dx7` = the DirectDraw 3D cube) |
