@@ -21,7 +21,7 @@ dark themes**.
 > professional instrument feel, with a live HUD, a frametime graph, and a telemetry read-out
 > composited over the render.
 >
-> **This is v2.0.0** — the ground-up single-window rebuild, and the current release. Grab it from the [Releases](https://github.com/The412Banner/AIO-Graphics-Test/releases) page.
+> **This is v2.1.0** — the single-window app, now with an **[HDR test card](#hdr-test-card)**. Grab it from the [Releases](https://github.com/The412Banner/AIO-Graphics-Test/releases) page.
 
 Forked from Khronos [Vulkan-Tools `vkcube`](https://github.com/KhronosGroup/Vulkan-Tools)
 (`cube.c`, tag `sdk-1.3.239.0`, Apache-2.0). The self-contained pre-codegen base links `vulkan-1`
@@ -49,13 +49,14 @@ dark:
   shows the active **API + live FPS + a scrolling frametime graph**; a telemetry strip along the
   bottom reports **resolution, present mode, the exact translation path** (e.g. `d3d11 → DXVK →
   Turnip`), and the **GPU**. The viewport stays a dark instrument surface in both themes.
-- **Docked menu** (right) — every test grouped and one tap away: **Graphics Backends**, **DX11
-  Scenes**, **Showcase Demos**, **Scaling Tests**, and **Tools**. Each row carries a per-API colour
-  chip and an fps hint; the selected row is highlighted. Toggle between a compact **List** and a
-  visual **Grid** from the toolbar.
+- **Docked menu** (right) — every test grouped and one tap away: **Graphics Backends**, **Display
+  Tests** (the [HDR test card](#hdr-test-card)), **DX11 Scenes**, **Showcase Demos**, **Scaling
+  Tests**, and **Tools**. Each row carries a per-API colour chip and an fps hint; the selected row is
+  highlighted. Toggle between a compact **List** and a visual **Grid** from the toolbar.
 - **Fullscreen** — a one-tap button expands the running test to fill the whole window (menu,
   toolbar, and strips slide away, the HUD stays). Exit with the on-screen **Exit Fullscreen** pill or
-  **F11 / Esc** — it always drops back to the exact view you left, test still running.
+  **F11 / Esc** — it always drops back to the exact view you left, test still running. On the HDR
+  test card the same button makes a true fullscreen window over the whole screen (see below).
 - **Aspect-correct resize** — drag any edge or corner and the render re-fits the window's aspect
   cleanly (square faces stay square, native resolution, no stretching), coalesced so a drag stays
   smooth.
@@ -198,6 +199,46 @@ dark:
   launches and shows a graceful notice even on a container that lacks them. All output is written to
   disk too, so results survive a PRoot/Termux OOM-kill mid-test.
 
+## HDR test card
+
+**Display Tests → HDR** checks whether HDR10 really reaches the screen, and shows exactly what the
+game side (DXGI / DXVK) is told about that screen — on a light, mostly black test card instead of a
+heavy game. It is a Direct3D 11 test, so it takes the same path an HDR game takes through DXVK.
+
+While it is selected, the window switches to a real **HDR10 swapchain** (flip model, 10-bit
+`R10G10B10A2`, PQ / BT.2020) and switches back when you pick another test. If anything along the way
+isn't available, the card shows SDR and says why on screen — it never just fails.
+
+- **What DXGI reports about your screen** — `IDXGIOutput6::GetDesc1`: colour space, bit depth, peak /
+  full-frame / minimum brightness and colour primaries, with a plain verdict: *"DXGI reports your
+  screen (~1345 nits)"* when the screen's own description reached DXVK, or *"DXGI reports DXVK's
+  stand-in (1499/799/0.01)"* when it didn't. The primaries are labelled the same way: your screen's
+  colours (and the gamut they are close to), or DXVK's P3 / Rec.709 stand-in.
+- **Patterns you can judge by eye** — brightness patches at 80, 203 (SDR white), 400, 600, 1000
+  nits, your screen's peak and 10000 nits; a PQ ramp from 0 to 10000 nits that stops getting brighter
+  where your screen clips; 10-bit vs 8-bit banding strips (steps in both mean something in the chain
+  is 8-bit); a slowly moving sun at your screen's peak; and BT.709 vs BT.2020 colour rows.
+- **Three modes** — **HDR10**, **scRGB** (16-bit float, converted by DXVK for the screen) and
+  **SDR** (8-bit sRGB) for a straight A/B. Tap to switch.
+- **Vulkan surface probe** — asks the window system directly, with no DXVK involved, which formats
+  and colour spaces it offers (and whether HDR10 comes with a 10-bit format).
+- **Values panel** — every number, the colour-space support results, the `SetColorSpace1` /
+  `SetHDRMetaData` results and a short "what to look for" guide. Drag to scroll; **Re-check** asks
+  again after you change an emulator setting.
+- **True fullscreen / zero-copy** — the corner button turns the card into one borderless window over
+  the whole screen, taskbar included, with the swapchain at exactly the screen size. That is what a
+  compositor needs to put the frames straight on the display (zero-copy). The header's
+  `fullscreen:` line says whether that is met, next to the local time (so photos line up with logs).
+  **Exit Fullscreen** or **Esc** goes back.
+- **Report** — `AIO Results\HDR\AIO-Graphics-Test_hdr.txt`, plus a copy in `Z:\usr\tmp\` when that
+  folder exists. It is rewritten after every change and every 5 s, so it is current even when the
+  app is closed from outside.
+- **Light load** — vsync with a 60 fps cap by default (30 fps or no cap in the Values panel).
+
+HDR needs DXVK with HDR enabled (`DXVK_HDR=1`; Bannerlator sets it when its HDR output setting is
+on) and a screen that offers HDR10. To open the app straight on the card (e.g. from a Start-menu
+shortcut), launch it with **`--hdr`**.
+
 ## CLI shortcuts
 
 The single-window app is the primary interface, but the individual backends are still scriptable for
@@ -206,6 +247,7 @@ power users and automation:
 | Flag | What it does |
 |------|--------------|
 | *(default)* | Opens the single-window app |
+| `--hdr` | Opens the single-window app straight on the [HDR test card](#hdr-test-card) (Display Tests → HDR) |
 | `--gpuinfo` / `--report` | Dump GL + VK adapter info to console + `AIO-Graphics-Test_report.txt`, then exit |
 | `--cube vk\|gl\|dx7\|dx8\|dx9\|dx10\|dx11\|dx12` | Run a single backend headless (its own window) — used by scripting and the benchmark sweeps |
 | `--cube ddraw2d` | The pure-2D DirectDraw blit test (`dx7` = the DirectDraw 3D cube) |
@@ -225,7 +267,9 @@ cross-built Vulkan-Loader import lib + glslang + `windres` (icon), plus **Dear I
 compiled with the Win32 + D3D11 backends) and the two **embedded UI fonts** — producing
 `AIO-Graphics-Test-64bit.exe` (**x86_64**) and `AIO-Graphics-Test-32bit.exe` (**i686**). The UI
 layer is C++ (`-fcf-protection=none` for FEX/arm64ec compatibility, static libstdc++/libgcc so
-there's no runtime DLL dependency); the backends stay C. Releases are the exact CI-built artifacts.
+there's no runtime DLL dependency); the backends stay C. Releases are the exact CI-built artifacts,
+published server-side by `.github/workflows/release.yml` (it takes the successful build of the
+tagged commit and attaches its two exes).
 Only `vulkan-1` is statically imported (always present in a container); `ddraw` / d3d8/9/10/11/12,
 `dxgi`, and `d3dcompiler` are loaded at runtime.
 
@@ -238,6 +282,8 @@ src/shell_imgui.cpp     the v2 single-window app: Dear ImGui shell, docked menu 
 src/shell_imgui.h       shell entry point
 src/cube_d3d11.c        Direct3D 11 scene framework + scenes (pipeline tests, procedural showcases, interactive flyers)
 src/cube_d3d11_scene.h  C accessors that let the shell drive the DX11 scenes on its own device
+src/hdr_scene.cpp       HDR test card (Display Tests → HDR): HDR10 swapchain, DXGI + Vulkan probes, patterns, report
+src/hdr_scene.h         HDR test card entry points (driven by the shell)
 src/cube_gl.c           OpenGL backend (WGL)
 src/cube_ddraw.c        DirectDraw / legacy Direct3D backend (DX7 cube + 2D blit)
 src/cube_d3d8.c         Direct3D 8 backend (DXVK d3d8 wrapper)
@@ -257,6 +303,7 @@ src/app.rc, app.ico     app icon (PE resource; also the Winlator shortcut art)
 tools/gen_dolphin_assets.py   one-time .x/.bmp/.tga → dolphin_assets.h
 tools/gen_icon.sh             regenerate app.ico (ImageMagick)
 cmake/                  mingw-w64 cross toolchain file
+docs/releases/          release notes (the body of each GitHub release)
 ```
 
 ## Credits

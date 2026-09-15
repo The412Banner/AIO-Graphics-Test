@@ -717,3 +717,18 @@ broken-DXVK containers). The default D3D11 path is 100% unchanged; GL is a fallb
   stand-in without it); otherwise "your screen's colours (from the layer's description)", with a
   "close to Display P3 / BT.709 / BT.2020" hint within 0.01. Luminance stand-in match tightened the same
   way (1499/799 +-0.01, 0.01 +-0.00005), so a real EDID peak coded as 1499.3 cannot read as the stand-in.
+
+## 2026-09-15 — v2.1.0: the HDR test card joins main and ships as a proper release
+- Proven on device before release (shipped attached to Bannerlator pre-release 8): Galaxy Fold HDR10 ON,
+  1345 nits from the layer's EDID, the primaries verdict, fullscreen zero-copy, 120 fps with frame
+  generation in HDR10, report saved; also run on an Adreno 735 (892 nits) and a ROG Phone 9 Pro (1207 nits).
+- main fast-forwarded to feat/hdr-test-scene (5174cc11, 4 commits, no merge commit), then one commit:
+  AIO_VERSION v2.0.1 -> v2.1.0 (src/menu.h: title bar, footer, report header), README "HDR test card"
+  section + `--hdr` CLI row + Display Tests in the menu list, release notes in docs/releases/2.1.0.md.
+- New .github/workflows/release.yml (workflow_dispatch: tag, title, notes_path, optional run_id): takes
+  the successful build-windows.yml run of the tag commit (or checks a given run's headSha), downloads both
+  artifacts, publishes AIO-Graphics-Test-32bit.exe / -64bit.exe with the notes as the Latest release, then
+  downloads the published assets back and checks their sha256 against the build. Nothing is uploaded
+  from a device. Tags stay lightweight and unprefixed (2.1.0).
+- `--hdr` (exact flag): any launch without --classic/--cube/--gpuinfo opens the single-window shell; with
+  --hdr it starts on Display Tests -> HDR (D3D11 host only; ignored under the OpenGL fallback host).

@@ -1,0 +1,116 @@
+name: Release (publish the CI-built exes)
+
+# Publishes a GitHub release from the EXACT exes build-windows.yml built for the
+# tagged commit, entirely on GitHub's side: nothing is uploaded from a device. Push
+# the tag first (v2.x tags have no "v", e.g. 2.1.0), then dispatch this with the tag,
+# the title and the notes file. The assets keep the names every v2 release used:
+# AIO-Graphics-Test-32bit.exe and AIO-Graphics-Test-64bit.exe.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to release (e.g. 2.1.0)'
+        required: true
+      title:
+        description: 'Release title'
+        required: true
+      notes_path:
+        description: 'Release notes file in the repo at that tag (e.g. docs/releases/2.1.0.md)'
+        required: true
+      run_id:
+        description: 'Optional build-windows.yml run id to publish (must have built the tag commit). Empty = the latest successful run for the tag commit.'
+        required: false
+        default: ''
+
+permissions:
+  contents: write  # create the release, upload assets
+  actions: read    # read build runs, download their artifacts
+
+jobs:
+  release:
+    runs-on: ubuntu-22.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      TAG: ${{ inputs.tag }}
+      TITLE: ${{ inputs.title }}
+      NOTES: ${{ inputs.notes_path }}
+      RUN_ID_IN: ${{ inputs.run_id }}
+    steps:
+      - name: Check out the tag
+        uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+
+      - name: Find the build of the tag commit
+        id: build
+        run: |
+          set -euo pipefail
+          sha=$(git rev-parse HEAD)  # the checkout above is the tag, so HEAD is the tag commit
+          [ "$sha" = "$(git rev-parse "refs/tags/$TAG^{commit}")" ] || { echo "::error::HEAD is not tag $TAG"; exit 1; }
+          if [ -n "$RUN_ID_IN" ]; then
+            run="$RUN_ID_IN"
+            head=$(gh api "repos/$REPO/actions/runs/$run" --jq .head_sha)
+            concl=$(gh api "repos/$REPO/actions/runs/$run" --jq .conclusion)
+            path=$(gh api "repos/$REPO/actions/runs/$run" --jq .path)
+            [ "$head" = "$sha" ] || { echo "::error::run $run built $head, not the tag commit $sha"; exit 1; }
+            [ "$concl" = "success" ] || { echo "::error::run $run concluded '$concl', not success"; exit 1; }
+            case "$path" in
+              *build-windows.yml*) ;;
+              *) echo "::error::run $run is $path, not build-windows.yml"; exit 1 ;;
+            esac
+          else
+            run=$(gh api "repos/$REPO/actions/workflows/build-windows.yml/runs?head_sha=$sha&status=success&per_page=1" \
+                  --jq '.workflow_runs[0].id // empty')
+            [ -n "$run" ] || { echo "::error::no successful build-windows.yml run for $sha"; exit 1; }
+          fi
+          [ -f "$NOTES" ] || { echo "::error::notes file $NOTES is not in the repo at $TAG"; exit 1; }
+          echo "tag $TAG = $sha, build run $run"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+
+      - name: Download both exes from that run
+        env:
+          RUN: ${{ steps.build.outputs.run }}
+        run: |
+          set -euo pipefail
+          gh run download "$RUN" -R "$REPO" -n AIO-Graphics-Test-windows-64bit -D dl64
+          gh run download "$RUN" -R "$REPO" -n AIO-Graphics-Test-windows-32bit -D dl32
+          mkdir -p out
+          cp dl64/AIO-Graphics-Test-64bit.exe out/AIO-Graphics-Test-64bit.exe
+          cp dl32/AIO-Graphics-Test-32bit.exe out/AIO-Graphics-Test-32bit.exe
+          ls -l out
+          (cd out && sha256sum AIO-Graphics-Test-32bit.exe AIO-Graphics-Test-64bit.exe) | tee sha256.txt
+
+      - name: Publish the release (marked Latest)
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then
+            # A re-run: replace the assets and refresh title, notes and the Latest flag.
+            gh release upload "$TAG" -R "$REPO" out/AIO-Graphics-Test-32bit.exe out/AIO-Graphics-Test-64bit.exe --clobber
+            gh release edit "$TAG" -R "$REPO" --title "$TITLE" --notes-file "$NOTES" --latest
+          else
+            gh release create "$TAG" -R "$REPO" out/AIO-Graphics-Test-32bit.exe out/AIO-Graphics-Test-64bit.exe \
+              --verify-tag --title "$TITLE" --notes-file "$NOTES" --latest
+          fi
+
+      - name: Verify the published assets
+        env:
+          SHA: ${{ steps.build.outputs.sha }}
+          RUN: ${{ steps.build.outputs.run }}
+        run: |
+          set -euo pipefail
+          gh release download "$TAG" -R "$REPO" -D check -p 'AIO-Graphics-Test-*bit.exe'
+          (cd check && sha256sum AIO-Graphics-Test-32bit.exe AIO-Graphics-Test-64bit.exe) > published.txt
+          diff sha256.txt published.txt || { echo "::error::published assets differ from build run $RUN"; exit 1; }
+          latest=$(gh api "repos/$REPO/releases/latest" --jq .tag_name)
+          [ "$latest" = "$TAG" ] || { echo "::error::Latest release is $latest, not $TAG"; exit 1; }
+          {
+            echo "### $TAG published (Latest)"
+            echo "Commit \`$SHA\`, build run $RUN"
+            echo '```'
+            cat published.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          cat published.txt
