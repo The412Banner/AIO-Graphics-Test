@@ -331,6 +331,54 @@ static UINT g_resize_w = 0, g_resize_h = 0;  // 0 => nothing pending
 // on-viewport control and by edge-triggered F11 / ESC in wnd_proc.
 static bool g_fullscreen = false;
 
+// True (window-level) fullscreen, used for the HDR test only: the emulator's Wayland
+// compositor puts a program's frames straight on the display layer (zero-copy) only
+// when its frame sits at 0,0 at exactly the scene size, on top. A maximised window
+// stays inside the work area (the taskbar keeps its strip), so the window becomes a
+// borderless topmost popup at the monitor rect (rcMonitor, not rcWork); WM_SIZE then
+// resizes the swapchain to exactly that size. Leaving restores style and placement.
+static bool g_win_fs = false;
+static WINDOWPLACEMENT g_win_fs_place;
+static LONG g_win_fs_style = 0, g_win_fs_exstyle = 0;
+
+static void set_window_fullscreen(HWND hwnd, bool on) {
+    if (on == g_win_fs) return;
+    if (on) {
+        MONITORINFO mi;
+        ZeroMemory(&mi, sizeof(mi));
+        mi.cbSize = sizeof(mi);
+        if (!GetMonitorInfoA(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi)) return;
+        ZeroMemory(&g_win_fs_place, sizeof(g_win_fs_place));
+        g_win_fs_place.length = sizeof(g_win_fs_place);
+        GetWindowPlacement(hwnd, &g_win_fs_place);
+        g_win_fs_style = GetWindowLongA(hwnd, GWL_STYLE);
+        g_win_fs_exstyle = GetWindowLongA(hwnd, GWL_EXSTYLE);
+        // Leave the maximised state first, or the window manager keeps sizing it to
+        // the work area.
+        if (IsZoomed(hwnd)) ShowWindow(hwnd, SW_RESTORE);
+        SetWindowLongA(hwnd, GWL_STYLE,
+                       (g_win_fs_style & ~(WS_OVERLAPPEDWINDOW | WS_MAXIMIZE | WS_MINIMIZE)) | WS_POPUP | WS_VISIBLE);
+        SetWindowLongA(hwnd, GWL_EXSTYLE,
+                       g_win_fs_exstyle & ~(WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE | WS_EX_DLGMODALFRAME | WS_EX_STATICEDGE));
+        const RECT &r = mi.rcMonitor;
+        SetWindowPos(hwnd, HWND_TOPMOST, r.left, r.top, r.right - r.left, r.bottom - r.top,
+                     SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+        g_win_fs = true;
+        char m[96];
+        snprintf(m, sizeof(m), "window fullscreen on: popup %ldx%ld at %ld,%ld", (long)(r.right - r.left),
+                 (long)(r.bottom - r.top), (long)r.left, (long)r.top);
+        aio_diag_log(m);
+    } else {
+        // Style back without WS_MAXIMIZE: SetWindowPlacement re-maximises if it was.
+        SetWindowLongA(hwnd, GWL_STYLE, g_win_fs_style & ~(WS_MAXIMIZE | WS_MINIMIZE));
+        SetWindowLongA(hwnd, GWL_EXSTYLE, g_win_fs_exstyle);
+        SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED);
+        SetWindowPlacement(hwnd, &g_win_fs_place);
+        g_win_fs = false;
+        aio_diag_log("window fullscreen off: style and placement restored");
+    }
+}
+
 static void create_rtv() {
     ID3D11Texture2D *back = nullptr;
     g_swap->GetBuffer(0, IID_ID3D11Texture2D, (void **)&back);
@@ -3047,6 +3095,16 @@ extern "C" int aio_run_imgui_shell(HINSTANCE hInstance) {
         static bool s_first_frame = true;
         if (s_first_frame) { aio_diag_log("first frame: begin"); }
 
+        // HDR test: the fullscreen control / F11 / ESC toggle a real borderless topmost
+        // window at the monitor rect (see set_window_fullscreen); every other test keeps
+        // the in-window fullscreen. Done before the resize below, so the WM_SIZE it
+        // raises resizes the swapchain in this same frame.
+        {
+            bool want_win_fs = g_fullscreen && is_hdr_test(g_sel) && g_host == HOST_D3D11 && g_dev &&
+                               !bench_any_active();
+            if (want_win_fs != g_win_fs) set_window_fullscreen(hwnd, want_win_fs);
+        }
+
         // Apply one coalesced swapchain resize per frame (click-drag safe). Only the
         // D3D11 host resizes a swapchain here; the GL host re-derives its glViewport
         // from the live client rect at present time each frame.
@@ -3251,9 +3309,9 @@ extern "C" int aio_run_imgui_shell(HINSTANCE hInstance) {
     }
 
     aio_diag_log("main loop exited; shutting down");
-    if (aio_hdr_is_active()) {  // final report + put the shell's swapchain back before teardown
+    if (aio_hdr_is_active()) {  // final report + release; no new swapchain on the closed window
         AioHdrHost hh = {g_dev, g_ctx, hwnd, &g_swap, &g_rtv};
-        aio_hdr_leave(&hh);
+        aio_hdr_shutdown(&hh);
     }
     if (g_cur_scene >= 0) aio_d3d11_scene_cleanup(g_cur_scene);
     destroy_embed();  // cleanup any live cross-API backend + (D3D11) upload texture

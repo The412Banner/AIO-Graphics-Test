@@ -264,8 +264,20 @@ struct State {
 
     char report_path[MAX_PATH];
     bool report_ok, mirror_ok;
-    char ev[40][224];
+    bool report_dirty;             // an event since the last write
+    double report_last;            // scene_time() of the last write
+    char ev[64][224];
     int nev;
+
+    // Window state, read every frame. The emulator's compositor only puts a program's
+    // frames straight on the display layer (zero-copy) when its frame sits at 0,0, is
+    // exactly the scene (desktop) size and is shown whole: that is "fullscreen" here.
+    int cl_x, cl_y, cl_w, cl_h;      // client area, screen coordinates
+    int mon_x, mon_y, mon_w, mon_h;  // the monitor rect (rcMonitor, not rcWork)
+    UINT sc_w, sc_h;                 // swapchain buffer size
+    bool popup, topmost, fullscreen;
+    char win_state[128];             // "yes (1280 x 960 at 0,0)" / "no (...)"
+    float fps;                       // presented frames per second, from the shell
 };
 State S;
 
@@ -278,6 +290,7 @@ struct VkProbe {
     bool dev_hdr_meta;    // device offers VK_EXT_hdr_metadata
     bool surface;         // surface created and formats read
     bool hdr10;           // a format in VK_COLOR_SPACE_HDR10_ST2084_EXT
+    bool hdr10_deep;      // ...and one of them is 10-bit or FP16
     bool scrgb;           // a format in VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT
     int nformats;
     char device[128];
@@ -294,7 +307,7 @@ AioHdrFonts F;  // the shell's fonts, copied each frame
 // ---------------------------------------------------------------------------
 // Small helpers
 // ---------------------------------------------------------------------------
-// Event log: kept for the report (last 40) and mirrored to the startup diag log.
+// Event log: kept for the report (last 64) and mirrored to the startup diag log.
 void ev(const char *fmt, ...) {
     char msg[200];
     va_list ap;
@@ -310,6 +323,7 @@ void ev(const char *fmt, ...) {
     GetLocalTime(&st);
     snprintf(S.ev[S.nev++], sizeof(S.ev[0]), "%02d:%02d:%02d.%03d  %s", st.wHour, st.wMinute,
              st.wSecond, st.wMilliseconds, msg);
+    S.report_dirty = true;  // written at the end of this frame's aio_hdr_begin_frame
     char line[224];
     snprintf(line, sizeof(line), "hdr: %s", msg);
     aio_diag_log(line);
@@ -657,8 +671,18 @@ void vk_probe_run(VkProbe &r) {
                             const char *fn = vk_format_name(fm[j].format);
                             if (fn) appendf(r.formats, sizeof(r.formats), " %s", fn);
                             else appendf(r.formats, sizeof(r.formats), " fmt%d", (int)fm[j].format);
-                            if (cs == VK_COLOR_SPACE_HDR10_ST2084_EXT && !r.hdr10_fmt[0])
-                                snprintf(r.hdr10_fmt, sizeof(r.hdr10_fmt), "%s", fn ? fn : "other format");
+                            if (cs == VK_COLOR_SPACE_HDR10_ST2084_EXT) {
+                                // Name a 10-bit / FP16 format when there is one: an 8-bit
+                                // format in PQ is allowed but is not what an HDR10 game picks.
+                                const VkFormat f = fm[j].format;
+                                const bool deep = f == VK_FORMAT_A2B10G10R10_UNORM_PACK32 ||
+                                                  f == VK_FORMAT_A2R10G10B10_UNORM_PACK32 ||
+                                                  f == VK_FORMAT_R16G16B16A16_SFLOAT;
+                                if (!r.hdr10_fmt[0] || (deep && !r.hdr10_deep)) {
+                                    snprintf(r.hdr10_fmt, sizeof(r.hdr10_fmt), "%s", fn ? fn : "other format");
+                                    r.hdr10_deep = deep;
+                                }
+                            }
                         }
                         if (cs == VK_COLOR_SPACE_HDR10_ST2084_EXT) r.hdr10 = true;
                         if (cs == VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT) r.scrgb = true;
@@ -1042,7 +1066,7 @@ enum { R_HEAD = 0, R_KV = 1, R_TEXT = 2 };
 struct Row {
     int kind;
     const char *k;
-    char v[288];
+    char v[704];  // room for the full Vulkan format list
     ImU32 c;
 };
 Row g_rows[80];
@@ -1150,6 +1174,16 @@ void build_rows() {
     else
         row_kv("Present", C_TEXT, "vsync (sync interval 1), no cap");
 
+    row_head("Window  (zero-copy needs one fullscreen window)");
+    row_kv("Fullscreen", S.fullscreen ? C_GOOD : C_WARN, "%s", S.win_state[0] ? S.win_state : "(not read yet)");
+    row_kv("Client area", C_TEXT, "%d x %d at %d,%d", S.cl_w, S.cl_h, S.cl_x, S.cl_y);
+    row_kv("Monitor", C_TEXT, "%d x %d at %d,%d", S.mon_w, S.mon_h, S.mon_x, S.mon_y);
+    row_kv("Swapchain now", ((int)S.sc_w == S.cl_w && (int)S.sc_h == S.cl_h) ? C_TEXT : C_WARN, "%u x %u",
+           S.sc_w, S.sc_h);
+    row_kv("Window style", C_TEXT, "%s%s", S.popup ? "borderless popup" : "framed window",
+           S.topmost ? ", topmost" : "");
+    row_kv("Frame rate", C_TEXT, "%.0f fps presented", S.fps);
+
     row_head("Vulkan surface  (no DXVK involved)");
     LONG vs = g_vk_state;
     if (vs != 2) {
@@ -1166,7 +1200,8 @@ void build_rows() {
                    v.dev_hdr_meta ? "offered (metadata can reach the compositor)" : "not offered");
         }
         if (v.surface) {
-            if (v.hdr10) row_kv("HDR10 (ST2084)", C_GOOD, "offered: %s", v.hdr10_fmt);
+            if (v.hdr10 && v.hdr10_deep) row_kv("HDR10 (ST2084)", C_GOOD, "offered: %s", v.hdr10_fmt);
+            else if (v.hdr10) row_kv("HDR10 (ST2084)", C_WARN, "offered, 8-bit formats only (%s)", v.hdr10_fmt);
             else row_kv("HDR10 (ST2084)", C_WARN, "not offered");
             row_kv("scRGB (ext. sRGB linear)", v.scrgb ? C_GOOD : C_MUTED, "%s", v.scrgb ? "offered" : "not offered");
             row_text(C_MUTED, "Formats: %s", v.formats);
@@ -1194,18 +1229,28 @@ void build_rows() {
     row_text(C_TEXT,
              "SDR (A/B): everything from 203 up is the same white, the ramp stops brightening at 203, and the two "
              "colour rows match.");
+    row_text(C_TEXT,
+             "Fullscreen: the corner button (top right) turns the card into one borderless window over the whole "
+             "screen, taskbar included. The fullscreen line should then read yes at 0,0; only then can the "
+             "emulator put the frames straight on the display (zero-copy). Tap Exit Fullscreen to go back.");
     row_head("Keys");
-    row_text(C_MUTED, "H next mode   V values / card   R re-check   F11 fullscreen");
+    row_text(C_MUTED, "H next mode   V values / card   R re-check   F11 or the corner button fullscreen   Esc leave fullscreen");
 }
 
+// Written to <path>.tmp and then renamed over <path>, so a process killed mid-write
+// (the emulator's drawer exit) leaves the previous complete report, never a torn one.
 bool write_report_to(const char *path) {
-    FILE *fp = fopen(path, "w");
+    char tmp[MAX_PATH + 8];
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    FILE *fp = fopen(tmp, "w");
     if (!fp) return false;
     SYSTEMTIME st;
     GetLocalTime(&st);
     fprintf(fp, "AIO Graphics Test %s - HDR test report\n", AIO_VERSION);
-    fprintf(fp, "Written %04d-%02d-%02d %02d:%02d:%02d (rewritten on every mode switch, re-check and exit)\n",
+    fprintf(fp, "Written %04d-%02d-%02d %02d:%02d:%02d (after every event and every 5 s while the card is open)\n",
             st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+    fprintf(fp, "Card open %.0f s, %.0f fps presented, fullscreen %s\n", scene_time(), S.fps,
+            S.win_state[0] ? S.win_state : "(not read yet)");
     for (int i = 0; i < g_nrows; ++i) {
         const Row &r = g_rows[i];
         if (r.kind == R_HEAD) fprintf(fp, "\n[%s]\n", r.k);
@@ -1214,7 +1259,12 @@ bool write_report_to(const char *path) {
     }
     fprintf(fp, "\n[Events]\n");
     for (int i = 0; i < S.nev; ++i) fprintf(fp, "%s\n", S.ev[i]);
-    fclose(fp);
+    bool ok = ferror(fp) == 0;
+    if (fclose(fp) != 0) ok = false;
+    if (!ok || !MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING)) {
+        DeleteFileA(tmp);
+        return false;
+    }
     return true;
 }
 
@@ -1231,6 +1281,8 @@ void write_report() {
     build_rows();
     S.report_ok = write_report_to(path);
     S.mirror_ok = write_report_to("Z:\\usr\\tmp\\AIO-Graphics-Test_hdr.txt");
+    S.report_dirty = false;
+    S.report_last = scene_time();
 }
 
 // ---------------------------------------------------------------------------
@@ -1344,11 +1396,20 @@ float draw_status_band(ImDrawList *dl, ImVec2 o, float w, float s, float fps, bo
     if (bh < 34.0f) bh = 34.0f;
     const float segw = 82.0f * s, valw = 96.0f * s, gap = 8.0f * s;
     const float btns_w = 3.0f * segw + gap * 1.5f + valw;
-    const float title_w = text_w(false, t_px, title);
+    // Local time beside the title, so photos of the screen line up with the Wayland log.
+    SYSTEMTIME lt;
+    GetLocalTime(&lt);
+    char clock[16];
+    snprintf(clock, sizeof(clock), "%02d:%02d:%02d", lt.wHour, lt.wMinute, lt.wSecond);
+    const float c_px = t_px * 0.72f;
+    const float name_w = text_w(false, t_px, title);
+    const float title_w = name_w + 14.0f * s + text_w(true, c_px, clock);
     const bool wrap = x0 + title_w + 2.0f * gap + btns_w > right;
     float row_h = t_px * 1.2f;
     if (!wrap && bh > row_h) row_h = bh;
-    text(dl, false, t_px, x0, y + (row_h - t_px * 1.2f) * 0.5f, tcol, title);
+    const float ty = y + (row_h - t_px * 1.2f) * 0.5f;
+    text(dl, false, t_px, x0, ty, tcol, title);
+    text(dl, true, c_px, x0 + name_w + 14.0f * s, ty + (t_px - c_px) * 0.6f, C_MUTED, clock);
     float by = y + (row_h - bh) * 0.5f;
     y += row_h + 2.0f * s;
 
@@ -1372,7 +1433,13 @@ float draw_status_band(ImDrawList *dl, ImVec2 o, float w, float s, float fps, bo
         snprintf(info, sizeof(info), "DXGI output description unavailable \xC2\xB7 DXVK_HDR=%s \xC2\xB7 %.0f fps",
                  S.dxvk_hdr, fps);
     text(dl, true, i_px, x0, y, C_TEXT, info, ww);
-    y += text_h(true, i_px, info, ww) + 4.0f * s;
+    y += text_h(true, i_px, info, ww) + 3.0f * s;
+
+    // Whether the compositor can see one fullscreen window (its zero-copy rule).
+    char fsl[160];
+    snprintf(fsl, sizeof(fsl), "fullscreen: %s", S.win_state[0] ? S.win_state : "(not read yet)");
+    text(dl, true, i_px, x0, y, S.fullscreen ? C_GOOD : C_WARN, fsl, ww);
+    y += text_h(true, i_px, fsl, ww) + 4.0f * s;
 
     if (wrap) {
         by = y;
@@ -1633,6 +1700,50 @@ void pace() {
     last = now;
 }
 
+// The window as the compositor sees it, and whether it meets the fullscreen rule:
+// client area at the monitor origin, exactly the monitor size, and swapchain buffers
+// exactly that size (so the whole buffer is shown, unscaled and uncropped). Logs an
+// event whenever the state changes.
+void read_window_state(const AioHdrHost *h) {
+    RECT cr;
+    POINT p = {0, 0};
+    if (!GetClientRect(h->hwnd, &cr)) ZeroMemory(&cr, sizeof(cr));
+    ClientToScreen(h->hwnd, &p);
+    S.cl_x = p.x;
+    S.cl_y = p.y;
+    S.cl_w = cr.right - cr.left;
+    S.cl_h = cr.bottom - cr.top;
+    MONITORINFO mi;
+    ZeroMemory(&mi, sizeof(mi));
+    mi.cbSize = sizeof(mi);
+    if (GetMonitorInfoA(MonitorFromWindow(h->hwnd, MONITOR_DEFAULTTONEAREST), &mi)) {
+        S.mon_x = mi.rcMonitor.left;
+        S.mon_y = mi.rcMonitor.top;
+        S.mon_w = mi.rcMonitor.right - mi.rcMonitor.left;
+        S.mon_h = mi.rcMonitor.bottom - mi.rcMonitor.top;
+    }
+    S.popup = (GetWindowLongA(h->hwnd, GWL_STYLE) & WS_POPUP) != 0;
+    S.topmost = (GetWindowLongA(h->hwnd, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0;
+    bb_size(*h->swap, &S.sc_w, &S.sc_h);
+    const bool sc_match = (int)S.sc_w == S.cl_w && (int)S.sc_h == S.cl_h;
+    const bool fs = S.mon_w > 0 && S.cl_x == S.mon_x && S.cl_y == S.mon_y && S.cl_w == S.mon_w &&
+                    S.cl_h == S.mon_h && sc_match;
+    char t[128];
+    if (fs)
+        snprintf(t, sizeof(t), "yes (%d x %d at %d,%d)", S.cl_w, S.cl_h, S.cl_x, S.cl_y);
+    else if (!sc_match)
+        snprintf(t, sizeof(t), "no (%d x %d at %d,%d, swapchain %u x %u; screen %d x %d)", S.cl_w, S.cl_h, S.cl_x,
+                 S.cl_y, S.sc_w, S.sc_h, S.mon_w, S.mon_h);
+    else
+        snprintf(t, sizeof(t), "no (%d x %d at %d,%d; screen %d x %d)", S.cl_w, S.cl_h, S.cl_x, S.cl_y, S.mon_w,
+                 S.mon_h);
+    S.fullscreen = fs;
+    if (strcmp(t, S.win_state) != 0) {
+        snprintf(S.win_state, sizeof(S.win_state), "%s", t);
+        ev("fullscreen: %s [%s%s]", t, S.popup ? "popup" : "framed", S.topmost ? ", topmost" : "");
+    }
+}
+
 }  // namespace
 
 // ===========================================================================
@@ -1772,6 +1883,30 @@ void aio_hdr_leave(const AioHdrHost *h) {
     g_nquad = 0;
 }
 
+void aio_hdr_shutdown(const AioHdrHost *h) {
+    if (!S.active || !h) return;
+    ev("exit");
+    write_report();
+    release_pipeline();
+    release_ui_layer();
+    safe_release(S.sc4);
+    safe_release(S.sc3);
+    safe_release(S.out6);
+    // The window is already destroyed here, so a new shell swapchain could only fail
+    // (DXVK logs CreateSwapChainForHwnd E_FAIL / VK_ERROR_SURFACE_LOST_KHR). Release
+    // whatever is in the slot and leave it empty for the shell's own teardown.
+    bb_release(h);
+    h->ctx->ClearState();
+    h->ctx->Flush();
+    if (*h->swap) {
+        (*h->swap)->Release();
+        *h->swap = nullptr;
+    }
+    S.flip = false;
+    S.active = false;
+    g_nquad = 0;
+}
+
 void aio_hdr_begin_frame(const AioHdrHost *h) {
     if (!S.active || !h) return;
     pace();
@@ -1785,24 +1920,25 @@ void aio_hdr_begin_frame(const AioHdrHost *h) {
                                                      : (mode_available(S.mode) ? S.mode : best_mode());
         apply_mode(h, m);
         vk_probe_kick();
-        write_report();
     } else if (S.pending_mode >= 0) {
         int m = S.pending_mode;
         S.pending_mode = -1;
-        if (m != S.mode && mode_available(m)) {
-            apply_mode(h, m);
-            write_report();
-        }
+        if (m != S.mode && mode_available(m)) apply_mode(h, m);
     }
     if (g_vk_state == 2 && !g_vk_logged) {
         g_vk_logged = true;
         const VkProbe &v = g_vk;
         if (v.error[0]) ev("vulkan probe: %s", v.error);
         else
-            ev("vulkan probe: colorspace ext %s, hdr_metadata %s, HDR10 %s, scRGB %s", v.ext_colorspace ? "yes" : "no",
-               v.dev_hdr_meta ? "yes" : "no", v.hdr10 ? "offered" : "not offered", v.scrgb ? "offered" : "not offered");
-        write_report();
+            ev("vulkan probe: colorspace ext %s, hdr_metadata %s, HDR10 %s%s, scRGB %s", v.ext_colorspace ? "yes" : "no",
+               v.dev_hdr_meta ? "yes" : "no", v.hdr10 ? "offered " : "not offered", v.hdr10 ? v.hdr10_fmt : "",
+               v.scrgb ? "offered" : "not offered");
     }
+    read_window_state(h);
+    // The report follows every event (events only mark it dirty) and is refreshed every
+    // ~5 s regardless: the emulator's drawer exit kills the process, so the file on
+    // disk must always be current.
+    if (S.report_dirty || scene_time() - S.report_last >= 5.0) write_report();
 }
 
 void aio_hdr_draw_ui(ImDrawList *dl, ImVec2 o, float w, float h, float fps, bool fullscreen,
@@ -1810,6 +1946,7 @@ void aio_hdr_draw_ui(ImDrawList *dl, ImVec2 o, float w, float h, float fps, bool
     g_nquad = 0;
     if (!S.active || !dl || !fonts || !fonts->ui || !fonts->mono) return;
     F = *fonts;
+    S.fps = fps;
 
     // Keyboard (optional; everything is also a button): H next mode, V values, R re-check.
     if (ImGui::IsKeyPressed(ImGuiKey_H, false)) request_mode(next_mode());

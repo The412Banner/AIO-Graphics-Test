@@ -60,8 +60,15 @@ void aio_hdr_enter(const AioHdrHost *h);
 // Restore the shell's own bitblt R8G8B8A8 swapchain and release everything.
 void aio_hdr_leave(const AioHdrHost *h);
 
-// Once per frame BEFORE ImGui::NewFrame: frame pacing, then any mode switch or
-// re-check requested from the UI on the previous frame.
+// App exit: final report and release, WITHOUT recreating the shell swapchain (the
+// window is already destroyed, so a new swapchain would only fail). Leaves the
+// host's swapchain slot empty.
+void aio_hdr_shutdown(const AioHdrHost *h);
+
+// Once per frame BEFORE ImGui::NewFrame: frame pacing, any mode switch or re-check
+// requested from the UI on the previous frame, the window / fullscreen state, and
+// the report (rewritten after every event and every ~5 s, since the emulator's
+// drawer exit kills the process without a clean shutdown).
 void aio_hdr_begin_frame(const AioHdrHost *h);
 
 // Inside the shell's ImGui frame: lays out the card in the viewport rect (o, w, h),

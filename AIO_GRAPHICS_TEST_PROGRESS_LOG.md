@@ -685,3 +685,23 @@ broken-DXVK containers). The default D3D11 path is 100% unchanged; GL is a fallb
 - First CI run 34921695851 green (both arches, headSha e848bc9b). Follow-up: a DXGI that reports 0 nits
   (not DXVK's; DXVK always substitutes) gets its own verdict instead of "your screen (~0 nits)", and the
   1000-nit fallback peak is labelled "assumed" rather than "DXGI max".
+
+## 2026-09-15 — HDR test card round 2 (after the first Fold run), branch feat/hdr-test-scene
+- Fold result of round 1: HDR10 ON, shaders compiled, every mode switch S_OK, headroom 3.61; but every
+  HDR frame went through the compositor's composed picture, never zero-copy: the window was a maximised
+  1280x934 window at -4,-4 under a 1280x960 scene with the explorer taskbar (1280x30 at 0,930) still
+  shown. The compositor's layer_candidate() needs the program's frame at 0,0, exactly the scene size,
+  whole buffer shown, and at most one draw above it.
+- True fullscreen (HDR test only): the corner button / F11 now make the shell window a borderless
+  WS_POPUP at the monitor rect (rcMonitor), HWND_TOPMOST above the taskbar; WM_SIZE resizes the swapchain
+  to exactly that size in the same frame. Leaving (button / Esc / F11) restores style, ex-style and
+  placement (re-maximises if it was). Other tests keep the in-window fullscreen.
+- Header now shows the local time (to line photos up with the Wayland log) and "fullscreen: yes/no
+  (w x h at x,y)"; the report gains a Window section (client rect, monitor, swapchain, popup/topmost).
+- Report robustness: the drawer exit kills the process, so the report is now rewritten after every event
+  and every 5 s while the card is open (and after the Vulkan probe), via <file>.tmp + rename so a kill
+  mid-write never leaves a torn file. Event history 40 -> 64.
+- Exit: the app-close path no longer recreates the shell swapchain on the destroyed window (that logged
+  CreateSwapChainForHwnd E_FAIL + VK_ERROR_SURFACE_LOST_KHR); aio_hdr_shutdown() just releases.
+- Vulkan probe names a 10-bit HDR10 format when one is offered (the Fold offers R8G8B8A8 and
+  A2B10G10R10 in HDR10_ST2084; round 1 printed the first, 8-bit one).
