@@ -383,7 +383,9 @@ float pq_code(float nits) {
     return (float)pow((0.8359375 + 18.8515625 * ym) / (1.0 + 18.6875 * ym), 78.84375);
 }
 
-float max_nits() { return (S.have_desc && S.desc.MaxLuminance > 1.0f) ? S.desc.MaxLuminance : 1000.0f; }
+// The output's peak, or 1000 nits when DXGI gave none (then labelled "assumed").
+bool have_max() { return S.have_desc && S.desc.MaxLuminance > 1.0f; }
+float max_nits() { return have_max() ? S.desc.MaxLuminance : 1000.0f; }
 
 double scene_time() {
     LARGE_INTEGER f, n;
@@ -395,13 +397,15 @@ double scene_time() {
 // ---------------------------------------------------------------------------
 // Screen description verdict (the layer's EDID vs DXVK's stand-in)
 // ---------------------------------------------------------------------------
-enum { V_NONE = 0, V_SCREEN, V_STANDIN_HDR, V_STANDIN_SDR };
+enum { V_NONE = 0, V_SCREEN, V_STANDIN_HDR, V_STANDIN_SDR, V_EMPTY };
 
 bool near_f(float a, float b, float tol) { return fabsf(a - b) <= tol; }
 
 int verdict() {
     if (!S.have_desc) return V_NONE;
     const DXGI_OUTPUT_DESC1 &d = S.desc;
+    // A DXGI that fills no luminance at all (DXVK never does: it substitutes).
+    if (d.MaxLuminance <= 1.0f && d.MaxFullFrameLuminance <= 1.0f) return V_EMPTY;
     // DXVK's NormalizeDisplayMetadata values for a missing EDID (wsi_edid.h).
     if (near_f(d.MaxLuminance, 1499.0f, 0.5f) && near_f(d.MaxFullFrameLuminance, 799.0f, 0.5f) &&
         near_f(d.MinLuminance, 0.01f, 0.0005f))
@@ -437,6 +441,10 @@ const char *verdict_text(char *buf, size_t cap, ImU32 *col) {
         case V_STANDIN_SDR:
             snprintf(buf, cap,
                      "DXGI reports DXVK's SDR stand-in (270/270/0.5): DXVK HDR is off and no screen description arrived");
+            if (col) *col = C_WARN;
+            break;
+        case V_EMPTY:
+            snprintf(buf, cap, "DXGI reports no luminance at all: this DXGI does not describe the screen (not DXVK's?)");
             if (col) *col = C_WARN;
             break;
         default:
@@ -1412,10 +1420,10 @@ void draw_patterns(ImDrawList *dl, float X0, float Y0, float X1, float Y1, float
             snprintf(num, sizeof(num), "%.0f", nits);
             float nw = text_w(true, cap * 1.1f, num);
             text(dl, true, cap * 1.1f, px + (ps - nw) * 0.5f, Y0 + ps + 3.0f * s, C_TEXT, num);
-            if (kSub[i][0]) {
-                float sw = text_w(false, cap * 0.9f, kSub[i]);
-                text(dl, false, cap * 0.9f, px + (ps - sw) * 0.5f, Y0 + ps + 3.0f * s + cap * 1.3f, C_MUTED,
-                     kSub[i]);
+            const char *sub = (i == 5 && !have_max()) ? "assumed" : kSub[i];
+            if (sub[0]) {
+                float sw = text_w(false, cap * 0.9f, sub);
+                text(dl, false, cap * 0.9f, px + (ps - sw) * 0.5f, Y0 + ps + 3.0f * s + cap * 1.3f, C_MUTED, sub);
             }
         }
     }
@@ -1445,7 +1453,7 @@ void draw_patterns(ImDrawList *dl, float X0, float Y0, float X1, float Y1, float
         dl->AddTriangleFilled(ImVec2(mxp - 5.0f * s, rt - 7.0f * s), ImVec2(mxp + 5.0f * s, rt - 7.0f * s),
                               ImVec2(mxp, rt - 1.0f * s), C_WARN);
         char ml[40];
-        snprintf(ml, sizeof(ml), "DXGI max %.0f", maxn);
+        snprintf(ml, sizeof(ml), have_max() ? "DXGI max %.0f" : "assumed max %.0f", maxn);
         float mw = text_w(true, cap * 0.95f, ml);
         float mlx = mxp + 8.0f * s;
         if (mlx + mw > X1) mlx = mxp - 8.0f * s - mw;
@@ -1481,7 +1489,8 @@ void draw_patterns(ImDrawList *dl, float X0, float Y0, float X1, float Y1, float
         add_quad(X0, dy, X0 + sw, dy + hD, K_SUN, sx, sy, 0.11f, sw / hD, maxn, 0.0f);
         dl->AddRect(ImVec2(X0, dy), ImVec2(X0 + sw, dy + hD), C_LINE, 0.0f, 0, 1.0f);
         char sl[48];
-        snprintf(sl, sizeof(sl), "sun core = DXGI max (%.0f nits)", maxn);
+        snprintf(sl, sizeof(sl), have_max() ? "sun core = DXGI max (%.0f nits)" : "sun core = %.0f nits (assumed)",
+                 maxn);
         text(dl, false, cap * 0.95f, X0 + 6.0f * s, dy + 4.0f * s, C_MUTED, sl, sw - 12.0f * s);
 
         const float gx0 = X0 + sw + gap * 1.5f, gw = X1 - gx0;

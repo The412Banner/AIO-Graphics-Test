@@ -682,3 +682,6 @@ broken-DXVK containers). The default D3D11 path is 100% unchanged; GL is a fallb
 - Low load: vsync always (Present 1) + frame cap (default 60, Values panel: 60/30/off); mostly black card.
 - Shaders are runtime-compiled (d3dcompiler); linted locally with glslangValidator -D + spirv-val only.
 - Build: hdr_scene.cpp added to build-windows.yml (g++, -I vk/include) + link line. Device-unverified.
+- First CI run 34921695851 green (both arches, headSha e848bc9b). Follow-up: a DXGI that reports 0 nits
+  (not DXVK's; DXVK always substitutes) gets its own verdict instead of "your screen (~0 nits)", and the
+  1000-nit fallback peak is labelled "assumed" rather than "DXGI max".
