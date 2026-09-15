@@ -655,3 +655,30 @@ broken-DXVK containers). The default D3D11 path is 100% unchanged; GL is a fallb
   container_pattern_common.tzst updated to 2.0.1 (v1/Classic untouched); THREE start-menu entries
   ("AIO Graphics Test"=v2.0.1, "AIO Graphics Test (OpenGL)"=--force-gl, "(Classic)"=v1);
   PATTERN_CONTENT_VERSION "4"→"5" (existing containers auto-update). Ships with the next Bannerlator stable.
+
+## 2026-09-14 — HDR test card (D3D11 / DXGI HDR10), branch feat/hdr-test-scene (NOT merged, no release)
+- Purpose: a light HDR test to replace God of War on the Galaxy Fold (GoW heats it within a minute) for
+  Bannerlator's Wayland HDR10 path. New menu group "Display Tests" > "HDR" (or launch with --hdr).
+- New src/hdr_scene.cpp/.h. The scene owns the window's swapchain while selected: it releases the shell's
+  bitblt R8G8B8A8 swapchain, creates a flip-discard R10G10B10A2 x2 swapchain on the same window
+  (IDXGIFactory2::CreateSwapChainForHwnd), and recreates the identical shell swapchain on leave/exit.
+  Falls back to SDR on the shell's own swapchain, with the reason on screen, if any step is unavailable.
+- Probes (all shown on screen + written to AIO Results\HDR\AIO-Graphics-Test_hdr.txt, copy in
+  Z:\usr\tmp\): IDXGIOutput6::GetDesc1 (colour space, bpc, min/max/full-frame nits, primaries);
+  CheckColorSpaceSupport for HDR10 (asked with R10G10B10A2 buffers), scRGB (asked with FP16 buffers) and
+  sRGB; SetColorSpace1 + IDXGISwapChain4::SetHDRMetaData from the output's own values; DXVK_HDR value;
+  EDID verdict (DXVK's missing-EDID stand-in is exactly 1499/799/0.01 nits + P3 primaries, per DXVK
+  wsi_edid.h NormalizeDisplayMetadata; the Fold's 1351-nit EDID codes to ~1345); a Vulkan surface probe
+  with no DXVK (hidden window, vkGetInstanceProcAddr only): VK_EXT_swapchain_colorspace, VK_EXT_hdr_metadata,
+  and every surface format / colour space offered.
+- Note: DXVK (v3.1 source, dxgi_swapchain.cpp ValidateColorSpaceSupport) reports scRGB as supported on ANY
+  FP16 swapchain and converts it itself (scRGB <-> PQ are presenter fallbacks), so the DXGI scRGB answer
+  cannot show "not offered"; the Vulkan probe is what shows the compositor's own list.
+- Modes (tap buttons or H key): HDR10 (PQ BT.2020, 10-bit), scRGB (FP16 linear, DXVK converts), SDR
+  (R8G8B8A8 sRGB, 203 nits = white) for A/B. Patterns: grey patches 80/203/400/600/1000/DXGI max/10000
+  nits, PQ ramp 0-10000 with nits ticks + DXGI max marker, black->203-nit strip in full precision vs
+  quantised to 8-bit steps, slow Lissajous sun (core = DXGI max) on a dark sky, BT.709 vs BT.2020
+  primaries/secondaries. ImGui is rendered to an RGBA8 layer and composited at 203 nits in HDR modes.
+- Low load: vsync always (Present 1) + frame cap (default 60, Values panel: 60/30/off); mostly black card.
+- Shaders are runtime-compiled (d3dcompiler); linted locally with glslangValidator -D + spirv-val only.
+- Build: hdr_scene.cpp added to build-windows.yml (g++, -I vk/include) + link line. Device-unverified.

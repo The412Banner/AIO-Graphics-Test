@@ -103,6 +103,14 @@ jobs:
             -DWIN32_LEAN_AND_MEAN -D_WIN32_WINNT=0x0A00 -fcf-protection=none \
             -mno-avx -mno-avx2 \
             -O2 -o shell_imgui.o
+          # HDR test card. Needs the Vulkan headers for its surface-format probe; that
+          # probe goes through vkGetInstanceProcAddr only (VK_NO_PROTOTYPES), so this
+          # object adds no vk* symbol to the vulkan-1 import lib built below.
+          ${{ matrix.prefix }}-g++ -c src/hdr_scene.cpp \
+            -I imgui -I imgui/backends -I src -I vk/include \
+            -DWIN32_LEAN_AND_MEAN -D_WIN32_WINNT=0x0A00 -fcf-protection=none \
+            -mno-avx -mno-avx2 \
+            -O2 -o hdr_scene.o
 
       - name: Build vulkan-1 import lib from the symbols actually referenced
         run: |
@@ -143,7 +151,7 @@ jobs:
             cube.o gpuinfo.o menu.o bench.o hud.o disk.o cube_gl.o cube_d3d11.o cube_d3d12.o \
             cube_d3d10.o cube_d3d9.o cube_d3d8.o cube_ddraw.o watchdog.o app_res.o \
             imgui.o imgui_draw.o imgui_tables.o imgui_widgets.o \
-            imgui_impl_dx11.o imgui_impl_opengl3.o imgui_impl_win32.o shell_imgui.o \
+            imgui_impl_dx11.o imgui_impl_opengl3.o imgui_impl_win32.o shell_imgui.o hdr_scene.o \
             -mwindows \
             -L vk/lib \
             -o ${{ matrix.out }} \

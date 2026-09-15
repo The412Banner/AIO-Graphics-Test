@@ -55,6 +55,7 @@ static HostMode g_host = HOST_D3D11;
 #include "menu.h"  // AIO_VERSION
 #include "cube_d3d11_scene.h"  // Phase 2: embed the DX11 scene registry in the viewport
 #include "cube_embed.h"        // Phase 4: embed the cross-API backends via offscreen readback
+#include "hdr_scene.h"         // HDR test card (owns the swapchain while selected)
 #include <algorithm>           // std::sort for the percentile lows
 
 // C tool backends (no extern "C" guards of their own -> wrap for C++ linkage).
@@ -461,6 +462,8 @@ static ImFont *g_ui_big = nullptr;   // Inter 19 - title
 static ImFont *g_mono = nullptr;     // Cascadia 12 - data / values / fps hints
 static ImFont *g_mono_sm = nullptr;  // Cascadia 10 - group headers / telemetry keys
 static ImFont *g_mono_bg = nullptr;  // Cascadia 20 - HUD FPS
+static ImFont *g_big_ui = nullptr;    // Inter 30 - HDR test card readout (phone scale)
+static ImFont *g_big_mono = nullptr;  // Cascadia 24 - HDR test card values
 
 static void apply_theme(bool dark) {
     g_dark = dark;
@@ -585,8 +588,14 @@ static const Test kTools[] = {
     {"Benchmark", "Benchmark", nullptr, nullptr, H_TOOL, 0, true},
     {"Disk Speed", "Disk Speed", nullptr, nullptr, H_TOOL, 0, true},
 };
+// Display tests. "HDR" is the D3D11 HDR10 test card (hdr_scene.cpp): not a
+// kScenes[] entry, because it swaps its own flip-model swapchain in while selected.
+static const Test kDisplay[] = {
+    {"HDR", "Direct3D 11", "d3d11 -> DXGI HDR10 -> DXVK", "Flip discard (vsync)", H_DX11, 0, false},
+};
 static const Group kGroups[] = {
     {"Graphics Backends", kBackends, (int)(sizeof(kBackends) / sizeof(kBackends[0]))},
+    {"Display Tests", kDisplay, (int)(sizeof(kDisplay) / sizeof(kDisplay[0]))},
     {"DX11 Scenes", kScenes, (int)(sizeof(kScenes) / sizeof(kScenes[0]))},
     {"Showcase Demos", kDemos, (int)(sizeof(kDemos) / sizeof(kDemos[0]))},
     {"Scaling Tests", kScaling, (int)(sizeof(kScaling) / sizeof(kScaling[0]))},
@@ -602,6 +611,8 @@ static int total_tests() {
 // Current selection.
 static const Test *g_sel = &kBackends[3];  // Direct3D 11 preselected (matches mockup)
 static const char *g_sel_group = "Graphics Backends";
+
+static bool is_hdr_test(const Test *t) { return t == &kDisplay[0]; }
 
 // ===========================================================================
 // Phase 2: embed the DX11 scene family (cube_d3d11.c kScenes[]) in the viewport.
@@ -2456,6 +2467,25 @@ static void draw_bench_overlay(ImDrawList *dl, ImVec2 o, float w, float h) {
 static void draw_viewport(ImDrawList *dl, ImVec2 o, float w, float h, float fps, bool full) {
     ImVec2 mx(o.x + w, o.y + h);
 
+    // HDR test: while active it owns the swapchain (hdr_scene.h) and draws its card
+    // into the back buffer itself, so nothing is painted here under its labels and
+    // readout. Not active = GL host (no D3D11) or a benchmark is running.
+    if (is_hdr_test(g_sel)) {
+        if (aio_hdr_is_active()) {
+            AioHdrFonts f = {g_ui, g_mono, g_big_ui, g_big_mono};
+            aio_hdr_draw_ui(dl, o, w, h, fps, full, &f);
+        } else {
+            dl->AddRectFilledMultiColor(o, mx, PAL.scr2, PAL.scr2, PAL.scr, PAL.scr);
+            const char *line1 = (g_host == HOST_GL) ? "Needs Direct3D 11 (unavailable on this device)"
+                                                    : "HDR test waits for the benchmark to finish";
+            float tw = text_w(g_ui_big, 22.0f, line1);
+            text_at(dl, g_ui_big, 22.0f, ImVec2(o.x + (w - tw) * 0.5f, o.y + h * 0.5f - 30.0f), PAL.scrText,
+                    line1);
+        }
+        if (!full) dl->AddLine(ImVec2(mx.x - 0.5f, o.y), ImVec2(mx.x - 0.5f, mx.y), PAL.line, 1.0f);
+        return;
+    }
+
     // While a benchmark is running with the Benchmark tool selected, show the LIVE
     // render in the viewport + a compact progress overlay (fix 1), instead of the
     // datapane. When the run/sweep finishes (bench_any_active() false) we fall back
@@ -2944,6 +2974,12 @@ extern "C" int aio_run_imgui_shell(HINSTANCE hInstance) {
         g_sel = &kBackends[1];  // OpenGL
         g_sel_group = "Graphics Backends";
     }
+    // --hdr opens straight on the HDR test card (for a start-menu shortcut; the card
+    // itself needs no arguments).
+    if (g_host == HOST_D3D11 && cl && strstr(cl, "--hdr") != nullptr) {
+        g_sel = &kDisplay[0];
+        g_sel_group = "Display Tests";
+    }
 
     ShowWindow(hwnd, SW_SHOWDEFAULT);
     UpdateWindow(hwnd);
@@ -2961,6 +2997,12 @@ extern "C" int aio_run_imgui_shell(HINSTANCE hInstance) {
     g_mono = io.Fonts->AddFontFromMemoryCompressedBase85TTF(CascadiaMono_compressed_data_base85, 12.0f, &cfg);
     g_mono_sm = io.Fonts->AddFontFromMemoryCompressedBase85TTF(CascadiaMono_compressed_data_base85, 10.0f, &cfg);
     g_mono_bg = io.Fonts->AddFontFromMemoryCompressedBase85TTF(CascadiaMono_compressed_data_base85, 20.0f, &cfg);
+    // Large faces for the HDR test card, which scales its text with the viewport so
+    // it stays readable on a phone. Lighter oversampling keeps the atlas small.
+    ImFontConfig bigcfg;
+    bigcfg.OversampleH = 2; bigcfg.OversampleV = 1; bigcfg.PixelSnapH = false;
+    g_big_ui = io.Fonts->AddFontFromMemoryCompressedBase85TTF(InterUI_compressed_data_base85, 30.0f, &bigcfg);
+    g_big_mono = io.Fonts->AddFontFromMemoryCompressedBase85TTF(CascadiaMono_compressed_data_base85, 24.0f, &bigcfg);
     io.FontDefault = g_ui;
     aio_diag_log("ImGui context + fonts loaded");
 
@@ -3011,12 +3053,24 @@ extern "C" int aio_run_imgui_shell(HINSTANCE hInstance) {
         if (g_resize_w != 0) {
             UINT nw = g_resize_w, nh = g_resize_h;
             g_resize_w = g_resize_h = 0;
-            if (nw > 0 && nh > 0 && g_host == HOST_D3D11 && g_dev) {
+            if (nw > 0 && nh > 0 && g_host == HOST_D3D11 && g_dev && g_swap) {
                 release_rtv();
                 g_swap->ResizeBuffers(0, nw, nh, DXGI_FORMAT_UNKNOWN, 0);
                 create_rtv();
             }
         }
+
+        // HDR test (hdr_scene.h): swap its flip-model swapchain in when it becomes the
+        // selection and the shell's back when it stops being it. Not while a benchmark
+        // runs (the bench samples uncapped; the HDR test forces vsync).
+        AioHdrHost hdr_host = {g_dev, g_ctx, hwnd, &g_swap, &g_rtv};
+        {
+            bool want_hdr = is_hdr_test(g_sel) && g_host == HOST_D3D11 && g_dev && !bench_any_active();
+            if (want_hdr && !aio_hdr_is_active()) aio_hdr_enter(&hdr_host);
+            else if (!want_hdr && aio_hdr_is_active()) aio_hdr_leave(&hdr_host);
+            if (aio_hdr_is_active()) aio_hdr_begin_frame(&hdr_host);
+        }
+        const bool hdr_on = aio_hdr_is_active();
 
         LARGE_INTEGER now;
         QueryPerformanceCounter(&now);
@@ -3059,6 +3113,9 @@ extern "C" int aio_run_imgui_shell(HINSTANCE hInstance) {
                                   ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoCollapse |
                                   ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus |
                                   ImGuiWindowFlags_NoNavFocus;
+        // The HDR card is drawn into the back buffer underneath the ImGui frame, so the
+        // root window must not paint over it (every other region paints itself).
+        if (hdr_on) rflags |= ImGuiWindowFlags_NoBackground;
         ImGui::Begin("##root", nullptr, rflags);
         ImDrawList *dl = ImGui::GetWindowDrawList();
 
@@ -3093,7 +3150,7 @@ extern "C" int aio_run_imgui_shell(HINSTANCE hInstance) {
         {
             static const Test *pub_test = nullptr;
             static double pub_last_ms = -1.0e9;
-            bool authoritative = !g_sel->tool && g_scene_live;
+            bool authoritative = (!g_sel->tool && g_scene_live) || hdr_on;
             if (authoritative) {
                 if (g_sel != pub_test || (now_ms - pub_last_ms) >= 500.0) {
                     aio_hud_write_status(g_sel);
@@ -3141,7 +3198,7 @@ extern "C" int aio_run_imgui_shell(HINSTANCE hInstance) {
         if (g_fullscreen) {
             draw_viewport(dl, o, W, Hh, hud_fps, true);
         } else {
-            dl->AddRectFilled(o, ImVec2(o.x + W, o.y + Hh), PAL.bg, 0);
+            if (!hdr_on) dl->AddRectFilled(o, ImVec2(o.x + W, o.y + Hh), PAL.bg, 0);
             draw_titlebar(dl, o, W, TITLE_H);
             draw_toolbar(dl, ImVec2(o.x, o.y + TITLE_H), W, TOOL_H);
             draw_viewport(dl, ImVec2(o.x, bodyTop), vpW, bodyH, hud_fps, false);
@@ -3178,11 +3235,15 @@ extern "C" int aio_run_imgui_shell(HINSTANCE hInstance) {
             ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
             if (g_gl_swapinterval) g_gl_swapinterval(want_vsync ? 1 : 0);
             SwapBuffers(g_gl_hdc);
+        } else if (hdr_on) {
+            // HDR test: card + ImGui into its own swapchain; always vsync.
+            aio_hdr_render(&hdr_host, ImGui::GetDrawData());
+            if (g_swap) g_swap->Present(1, 0);
         } else {
             g_ctx->OMSetRenderTargets(1, &g_rtv, nullptr);
-            g_ctx->ClearRenderTargetView(g_rtv, clear);
+            if (g_rtv) g_ctx->ClearRenderTargetView(g_rtv, clear);
             ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-            g_swap->Present(want_vsync ? 1 : 0, 0);
+            if (g_swap) g_swap->Present(want_vsync ? 1 : 0, 0);
         }
         // Count the frame that just reached glass (drives the whole HUD).
         g_fps.tick(now_ms);
@@ -3190,6 +3251,10 @@ extern "C" int aio_run_imgui_shell(HINSTANCE hInstance) {
     }
 
     aio_diag_log("main loop exited; shutting down");
+    if (aio_hdr_is_active()) {  // final report + put the shell's swapchain back before teardown
+        AioHdrHost hh = {g_dev, g_ctx, hwnd, &g_swap, &g_rtv};
+        aio_hdr_leave(&hh);
+    }
     if (g_cur_scene >= 0) aio_d3d11_scene_cleanup(g_cur_scene);
     destroy_embed();  // cleanup any live cross-API backend + (D3D11) upload texture
     destroy_offscreen();  // null-safe: nothing was created under the GL host
