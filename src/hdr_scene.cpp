@@ -415,29 +415,84 @@ enum { V_NONE = 0, V_SCREEN, V_STANDIN_HDR, V_STANDIN_SDR, V_EMPTY };
 
 bool near_f(float a, float b, float tol) { return fabsf(a - b) <= tol; }
 
+// DXVK's stand-in values (NormalizeDisplayMetadata, wsi_edid.h) are exact float
+// constants, so they are matched exactly. A real EDID's values are quantised (its
+// 10-bit chromaticities read e.g. 0.6797 / 0.3203, its coded peaks 1345.4 or 1499.3
+// nits) and can sit within a few ten-thousandths of the stand-in without being it.
+const float kExact = 0.00005f;
+
 int verdict() {
     if (!S.have_desc) return V_NONE;
     const DXGI_OUTPUT_DESC1 &d = S.desc;
     // A DXGI that fills no luminance at all (DXVK never does: it substitutes).
     if (d.MaxLuminance <= 1.0f && d.MaxFullFrameLuminance <= 1.0f) return V_EMPTY;
-    // DXVK's NormalizeDisplayMetadata values for a missing EDID (wsi_edid.h).
-    if (near_f(d.MaxLuminance, 1499.0f, 0.5f) && near_f(d.MaxFullFrameLuminance, 799.0f, 0.5f) &&
-        near_f(d.MinLuminance, 0.01f, 0.0005f))
+    if (near_f(d.MaxLuminance, 1499.0f, 0.01f) && near_f(d.MaxFullFrameLuminance, 799.0f, 0.01f) &&
+        near_f(d.MinLuminance, 0.01f, kExact))
         return V_STANDIN_HDR;
-    if (near_f(d.MaxLuminance, 270.0f, 0.5f) && near_f(d.MaxFullFrameLuminance, 270.0f, 0.5f) &&
-        near_f(d.MinLuminance, 0.5f, 0.0005f))
+    if (near_f(d.MaxLuminance, 270.0f, 0.01f) && near_f(d.MaxFullFrameLuminance, 270.0f, 0.01f) &&
+        near_f(d.MinLuminance, 0.5f, kExact))
         return V_STANDIN_SDR;
     return V_SCREEN;
 }
 
-// DXVK's HDR stand-in primaries (P3, D65) when no chromaticity data arrived.
-bool p3_standin_primaries() {
-    if (!S.have_desc) return false;
+// Chromaticities as red x,y / green x,y / blue x,y / white x,y.
+const float kPrimP3[8] = {0.680f, 0.320f, 0.265f, 0.690f, 0.150f, 0.060f, 0.3127f, 0.3290f};    // DXVK HDR stand-in
+const float kPrim709[8] = {0.640f, 0.330f, 0.300f, 0.600f, 0.150f, 0.060f, 0.3127f, 0.3290f};   // DXVK SDR stand-in
+const float kPrim2020[8] = {0.708f, 0.292f, 0.170f, 0.797f, 0.131f, 0.046f, 0.3127f, 0.3290f};
+
+enum { PRIM_NONE = 0, PRIM_STANDIN_P3, PRIM_STANDIN_709, PRIM_SCREEN };
+
+float prim_dev(const DXGI_OUTPUT_DESC1 &d, const float *ref) {
+    const float v[8] = {d.RedPrimary[0], d.RedPrimary[1], d.GreenPrimary[0], d.GreenPrimary[1],
+                        d.BluePrimary[0], d.BluePrimary[1], d.WhitePoint[0], d.WhitePoint[1]};
+    float m = 0.0f;
+    for (int i = 0; i < 8; ++i) {
+        float e = fabsf(v[i] - ref[i]);
+        if (e > m) m = e;
+    }
+    return m;
+}
+
+// Stand-in only when EVERY value equals DXVK's constant (P3 with DXVK_HDR, Rec.709
+// without); anything else came from the screen description.
+int primaries_kind() {
+    if (!S.have_desc) return PRIM_NONE;
     const DXGI_OUTPUT_DESC1 &d = S.desc;
-    const float t = 0.0005f;
-    return near_f(d.RedPrimary[0], 0.680f, t) && near_f(d.RedPrimary[1], 0.320f, t) &&
-           near_f(d.GreenPrimary[0], 0.265f, t) && near_f(d.GreenPrimary[1], 0.690f, t) &&
-           near_f(d.BluePrimary[0], 0.150f, t) && near_f(d.BluePrimary[1], 0.060f, t);
+    if (prim_dev(d, kPrimP3) <= kExact) return PRIM_STANDIN_P3;
+    if (prim_dev(d, kPrim709) <= kExact) return PRIM_STANDIN_709;
+    static const float kZero[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    if (prim_dev(d, kZero) <= kExact) return PRIM_NONE;
+    return PRIM_SCREEN;
+}
+
+const char *primaries_text(char *buf, size_t cap, ImU32 *col) {
+    switch (primaries_kind()) {
+        case PRIM_STANDIN_P3:
+            snprintf(buf, cap, "DXVK's P3 stand-in (no chromaticity data arrived)");
+            if (col) *col = C_WARN;
+            break;
+        case PRIM_STANDIN_709:
+            snprintf(buf, cap, "DXVK's Rec.709 stand-in (DXVK HDR off, no chromaticity data arrived)");
+            if (col) *col = C_WARN;
+            break;
+        case PRIM_SCREEN: {
+            // Name the gamut they sit close to (within 0.01 on every value), as a hint.
+            const DXGI_OUTPUT_DESC1 &d = S.desc;
+            const char *hint = nullptr;
+            if (prim_dev(d, kPrimP3) <= 0.01f) hint = "Display P3";
+            else if (prim_dev(d, kPrim709) <= 0.01f) hint = "BT.709";
+            else if (prim_dev(d, kPrim2020) <= 0.01f) hint = "BT.2020";
+            if (hint) snprintf(buf, cap, "your screen's colours (from the layer's description), close to %s", hint);
+            else snprintf(buf, cap, "your screen's colours (from the layer's description)");
+            if (col) *col = C_GOOD;
+            break;
+        }
+        default:
+            snprintf(buf, cap, "none reported");
+            if (col) *col = C_WARN;
+            break;
+    }
+    return buf;
 }
 
 const char *verdict_text(char *buf, size_t cap, ImU32 *col) {
@@ -1124,8 +1179,12 @@ void build_rows() {
         row_kv("Green primary", C_TEXT, "%.4f, %.4f", d.GreenPrimary[0], d.GreenPrimary[1]);
         row_kv("Blue primary", C_TEXT, "%.4f, %.4f", d.BluePrimary[0], d.BluePrimary[1]);
         row_kv("White point", C_TEXT, "%.4f, %.4f", d.WhitePoint[0], d.WhitePoint[1]);
-        if (p3_standin_primaries())
-            row_kv("Primaries", C_WARN, "DXVK's P3 stand-in (no chromaticity data arrived)");
+        {
+            char pv[160];
+            ImU32 pc = C_TEXT;
+            primaries_text(pv, sizeof(pv), &pc);
+            row_kv("Primaries", pc, "%s", pv);
+        }
     } else {
         row_kv("GetDesc1", C_BAD, "%s", S.out6 ? "failed" : "IDXGIOutput6 not available");
     }

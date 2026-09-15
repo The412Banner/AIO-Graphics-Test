@@ -705,3 +705,15 @@ broken-DXVK containers). The default D3D11 path is 100% unchanged; GL is a fallb
   CreateSwapChainForHwnd E_FAIL + VK_ERROR_SURFACE_LOST_KHR); aio_hdr_shutdown() just releases.
 - Vulkan probe names a 10-bit HDR10 format when one is offered (the Fold offers R8G8B8A8 and
   A2B10G10R10 in HDR10_ST2084; round 1 printed the first, 8-bit one).
+
+## 2026-09-15 — HDR test card round 2e: primaries stand-in check made exact
+- Round 2 (`52f317c1`) proven on three phones: the Fold (fullscreen yes 1280x960, zero-copy proven, EDID
+  1345.4 nits), an Adreno 735 (892 nits) and an ASUS ROG Phone 9 Pro (1207 nits); the report survived a
+  drawer Exit.
+- Bug: "Primaries: DXVK's P3 stand-in" showed even when the layer's EDID primaries arrived. The EDID's
+  10-bit chromaticities (0.6797,0.3203 / 0.2646,0.6904 / 0.1504,0.0596 / 0.3125,0.3291) were within the old
+  +-0.0005 tolerance of DXVK's exact constants (0.680,0.320 / 0.265,0.690 / 0.150,0.060 / 0.3127,0.3290).
+- Fix: stand-in only when all 8 values match to +-0.00005 (P3 with DXVK_HDR, and now also DXVK's Rec.709
+  stand-in without it); otherwise "your screen's colours (from the layer's description)", with a
+  "close to Display P3 / BT.709 / BT.2020" hint within 0.01. Luminance stand-in match tightened the same
+  way (1499/799 +-0.01, 0.01 +-0.00005), so a real EDID peak coded as 1499.3 cannot read as the stand-in.
