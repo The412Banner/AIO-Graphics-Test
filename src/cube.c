@@ -1350,6 +1350,18 @@ static void demo_prepare_buffers(struct demo *demo) {
             }
         }
     }
+    // Uncapped runs ask for IMMEDIATE, which some presentation engines never offer (a Wayland
+    // compositor without tearing control). Fall back to MAILBOX, still uncapped, then to FIFO,
+    // which every engine supports, instead of exiting.
+    if (swapchainPresentMode != demo->presentMode && demo->presentMode == VK_PRESENT_MODE_IMMEDIATE_KHR) {
+        for (size_t i = 0; i < presentModeCount; ++i) {
+            if (presentModes[i] == VK_PRESENT_MODE_MAILBOX_KHR) {
+                swapchainPresentMode = VK_PRESENT_MODE_MAILBOX_KHR;
+                break;
+            }
+        }
+        demo->presentMode = swapchainPresentMode;
+    }
     if (swapchainPresentMode != demo->presentMode) {
         ERR_EXIT("Present mode specified is not supported\n", "Present mode unsupported");
     }
