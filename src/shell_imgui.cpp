@@ -3069,6 +3069,18 @@ static void aio_hud_build_path(const Test *t, char *out, size_t cap) {
     out[o] = '\0';
 }
 
+// The Graphics Backends entry a running benchmark row drives, or nullptr when no
+// row is running. D3D11 rows render in-device scenes; the rest map through their
+// embedded backend (DirectDraw 2D and DX7 share the DirectDraw entry).
+static const Test *bench_row_test(void) {
+    if (!bench_any_active()) return nullptr;
+    if (g_bench_active_scene >= 0) return &kBackends[3];
+    if (!g_bench_active_embed) return nullptr;
+    for (int li = 0; li < 8; ++li)
+        if (kBackendEmbed[li] == g_bench_active_embed) return &kBackends[li];
+    return nullptr;
+}
+
 // Atomically publish the active-test status file. Fully guarded / silent no-op.
 static void aio_hud_write_status(const Test *t) {
     if (!t) return;
@@ -3389,13 +3401,17 @@ extern "C" int aio_run_imgui_shell(HINSTANCE hInstance) {
         // and gates on <2000 ms). When we're not authoritative we simply STOP
         // refreshing so the file goes stale and the HUD reverts to its own detection.
         {
+            // A benchmark (Run / Run All / --sweep) renders its rows under the Benchmark
+            // tool page, so g_sel is the tool: publish the backend the running row drives.
             static const Test *pub_test = nullptr;
             static double pub_last_ms = -1.0e9;
-            bool authoritative = (!g_sel->tool && g_scene_live) || hdr_on;
+            const Test *pub = bench_row_test();
+            if (!pub) pub = g_sel;
+            bool authoritative = (!pub->tool && g_scene_live) || hdr_on;
             if (authoritative) {
-                if (g_sel != pub_test || (now_ms - pub_last_ms) >= 500.0) {
-                    aio_hud_write_status(g_sel);
-                    pub_test = g_sel;
+                if (pub != pub_test || (now_ms - pub_last_ms) >= 500.0) {
+                    aio_hud_write_status(pub);
+                    pub_test = pub;
                     pub_last_ms = now_ms;
                 }
             } else {
