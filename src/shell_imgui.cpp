@@ -3202,8 +3202,31 @@ extern "C" int aio_run_imgui_shell(HINSTANCE hInstance) {
         g_sel_group = "Tools";
         g_fullscreen = true;
         g_sweep_cli = true;
+        // --apis=gl,dx9,... runs only those backends (the first word of each kSweepArgs
+        // entry: vk gl dx12 dx11 dx10 dx9 dx8 dx7), in the usual order. Absent = all eight.
+        const char *ap = strstr(cl, "--apis");
+        char apis[128] = "";
+        if (ap) {
+            ap += 6;
+            while (*ap == ' ' || *ap == '=') ++ap;
+            size_t len = strcspn(ap, " \t\"");
+            if (len >= sizeof(apis)) len = sizeof(apis) - 1;
+            memcpy(apis, ap, len);
+            apis[len] = 0;
+        }
         int rows[8], n = 0;
         for (int k = 0; k < 8; ++k) {
+            if (apis[0]) {
+                size_t kl = strcspn(kSweepArgs[k], " ");
+                bool want = false;
+                for (const char *t = apis; *t;) {
+                    size_t tl = strcspn(t, ",");
+                    if (tl == kl && _strnicmp(t, kSweepArgs[k], kl) == 0) want = true;
+                    t += tl;
+                    if (*t == ',') ++t;
+                }
+                if (!want) continue;
+            }
             int i = bench_row_by_arg(kSweepArgs[k]);
             if (i >= 0 && bench_row_available(i)) rows[n++] = i;
         }
@@ -3215,8 +3238,8 @@ extern "C" int aio_run_imgui_shell(HINSTANCE hInstance) {
         }
         HANDLE wd = CreateThread(nullptr, 0, sweep_watchdog, nullptr, 0, nullptr);
         if (wd) CloseHandle(wd);
-        char m[112];
-        snprintf(m, sizeof(m), "--sweep: %d backends, %d s each, fullscreen, uncapped", n, secs);
+        char m[240];
+        snprintf(m, sizeof(m), "--sweep: %d backends (%s), %d s each, fullscreen, uncapped", n, apis[0] ? apis : "all", secs);
         aio_diag_log(m);
     }
 
