@@ -1,0 +1,32 @@
+name: Build CursorTest (Windows PE)
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'tools/cursor-test/**'
+      - '.github/workflows/build-cursor-test.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cross toolchain
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q gcc-mingw-w64-x86-64
+
+      - name: Build CursorTest.exe
+        run: |
+          x86_64-w64-mingw32-gcc -O2 -Wall -Wextra -o CursorTest.exe \
+            tools/cursor-test/cursortest.c \
+            -mwindows -lgdi32 -luser32 -lmsimg32 -lm -static-libgcc
+          file CursorTest.exe
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CursorTest
+          path: CursorTest.exe
