@@ -4,7 +4,7 @@ name: Release (publish the CI-built exes)
 # tagged commit, entirely on GitHub's side: nothing is uploaded from a device. Push
 # the tag first (v2.x tags have no "v", e.g. 2.1.0), then dispatch this with the tag,
 # the title and the notes file. The assets keep the names every v2 release used:
-# AIO-Graphics-Test-32bit.exe and AIO-Graphics-Test-64bit.exe.
+# AIO-Graphics-Test-32bit.exe and AIO-Graphics-Test-64bit.exe, plus CursorTest.exe since 2.2.0.
 
 on:
   workflow_dispatch:
@@ -70,28 +70,30 @@ jobs:
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "run=$run" >> "$GITHUB_OUTPUT"
 
-      - name: Download both exes from that run
+      - name: Download the exes from that run
         env:
           RUN: ${{ steps.build.outputs.run }}
         run: |
           set -euo pipefail
           gh run download "$RUN" -R "$REPO" -n AIO-Graphics-Test-windows-64bit -D dl64
           gh run download "$RUN" -R "$REPO" -n AIO-Graphics-Test-windows-32bit -D dl32
+          gh run download "$RUN" -R "$REPO" -n CursorTest -D dlct
           mkdir -p out
           cp dl64/AIO-Graphics-Test-64bit.exe out/AIO-Graphics-Test-64bit.exe
           cp dl32/AIO-Graphics-Test-32bit.exe out/AIO-Graphics-Test-32bit.exe
+          cp dlct/CursorTest.exe out/CursorTest.exe
           ls -l out
-          (cd out && sha256sum AIO-Graphics-Test-32bit.exe AIO-Graphics-Test-64bit.exe) | tee sha256.txt
+          (cd out && sha256sum AIO-Graphics-Test-32bit.exe AIO-Graphics-Test-64bit.exe CursorTest.exe) | tee sha256.txt
 
       - name: Publish the release (marked Latest)
         run: |
           set -euo pipefail
           if gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then
             # A re-run: replace the assets and refresh title, notes and the Latest flag.
-            gh release upload "$TAG" -R "$REPO" out/AIO-Graphics-Test-32bit.exe out/AIO-Graphics-Test-64bit.exe --clobber
+            gh release upload "$TAG" -R "$REPO" out/AIO-Graphics-Test-32bit.exe out/AIO-Graphics-Test-64bit.exe out/CursorTest.exe --clobber
             gh release edit "$TAG" -R "$REPO" --title "$TITLE" --notes-file "$NOTES" --latest
           else
-            gh release create "$TAG" -R "$REPO" out/AIO-Graphics-Test-32bit.exe out/AIO-Graphics-Test-64bit.exe \
+            gh release create "$TAG" -R "$REPO" out/AIO-Graphics-Test-32bit.exe out/AIO-Graphics-Test-64bit.exe out/CursorTest.exe \
               --verify-tag --title "$TITLE" --notes-file "$NOTES" --latest
           fi
 
@@ -101,8 +103,8 @@ jobs:
           RUN: ${{ steps.build.outputs.run }}
         run: |
           set -euo pipefail
-          gh release download "$TAG" -R "$REPO" -D check -p 'AIO-Graphics-Test-*bit.exe'
-          (cd check && sha256sum AIO-Graphics-Test-32bit.exe AIO-Graphics-Test-64bit.exe) > published.txt
+          gh release download "$TAG" -R "$REPO" -D check -p 'AIO-Graphics-Test-*bit.exe' -p 'CursorTest.exe'
+          (cd check && sha256sum AIO-Graphics-Test-32bit.exe AIO-Graphics-Test-64bit.exe CursorTest.exe) > published.txt
           diff sha256.txt published.txt || { echo "::error::published assets differ from build run $RUN"; exit 1; }
           latest=$(gh api "repos/$REPO/releases/latest" --jq .tag_name)
           [ "$latest" = "$TAG" ] || { echo "::error::Latest release is $latest, not $TAG"; exit 1; }

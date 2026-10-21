@@ -7,6 +7,7 @@ on:
     paths:
       - 'src/**'
       - 'cmake/**'
+      - 'tools/cursor-test/**'
       - '.github/workflows/build-windows.yml'
 
 jobs:
@@ -166,3 +167,20 @@ jobs:
           path: |
             ${{ matrix.out }}
             vk/bin/vulkan-1.dll
+
+      # CursorTest (tools/cursor-test): a separate small 64-bit exe, built here so one
+      # run carries every exe a release publishes.
+      - name: Build CursorTest.exe
+        if: matrix.arch == 'x86_64'
+        run: |
+          ${{ matrix.prefix }}-gcc -O2 -Wall -Wextra -o CursorTest.exe \
+            tools/cursor-test/cursortest.c \
+            -mwindows -lgdi32 -luser32 -lmsimg32 -lm -static-libgcc
+          file CursorTest.exe
+
+      - name: Upload CursorTest artifact
+        if: matrix.arch == 'x86_64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: CursorTest
+          path: CursorTest.exe
