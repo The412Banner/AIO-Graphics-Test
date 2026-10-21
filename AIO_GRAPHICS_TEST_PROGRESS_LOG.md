@@ -752,3 +752,20 @@ broken-DXVK containers). The default D3D11 path is 100% unchanged; GL is a fallb
   host can't run are skipped), runs them uncapped, writes the usual reports, then posts WM_CLOSE. A
   watchdog thread ends the process after 60 s without a frame (partial report marked INCOMPLETE, exit
   code 3; exit 0 if only the shutdown stalled after a complete report).
+
+## 2026-10-21 — RELEASE v2.2.0 (stable): fullscreen-all + sweep + Vulkan MAILBOX fallback + CursorTest
+- User: merge every side branch built off 2.1.0 into main and cut one new stable. In: `feat/sweep-apis`
+  (includes `feat/fullscreen-all`: `51c9196` fullscreen for every test + `--sweep`, `1d23eeb` Vulkan
+  IMMEDIATE -> MAILBOX -> FIFO fallback, `39afef4` HUD side-channel, `aad3cd2` `--apis=`) and
+  `feat/cursor-test` (`7bf71d1` CursorTest.exe). Left out: `feat/bionic-fg-tester` (July diag branch,
+  older than 2.1.0).
+- CursorTest is now built in build-windows.yml (x86_64 leg, artifact `CursorTest`) and published by
+  release.yml as a third asset.
+- Integration branch `feat/2.2.0-integration` @ `e0e204f`, CI 39538935823 green (both legs). Main
+  fast-forwarded to it (backup `refs/backup/20261021/main-before-2.2.0` = `582454d`).
+- Device (AYANEO Pocket FIT, Adreno 750, Bannerlator main `117f8b5` Wayland session, Proton 11 arm64ec,
+  DXVK 2.4.1, VKD3D 3.0.1): standalone `--cube vk --bench 15` ran through the MAILBOX fallback, 2884 fps
+  avg (2.1.0 exits "Present mode unsupported" there); `--cube dx11` 4331 avg, matching 2.1.0;
+  CursorTest launches and its 2D strip draws (cursor tiles need hovering, not checked).
+- Caveat kept in the notes: Benchmark view / `--sweep` rows other than D3D11 go through the D3D11 shell
+  (offscreen + readback); true per-API numbers come from `--cube <api>`.

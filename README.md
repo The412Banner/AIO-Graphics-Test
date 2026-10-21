@@ -21,7 +21,7 @@ dark themes**.
 > professional instrument feel, with a live HUD, a frametime graph, and a telemetry read-out
 > composited over the render.
 >
-> **This is v2.1.0** — the single-window app, now with an **[HDR test card](#hdr-test-card)**. Grab it from the [Releases](https://github.com/The412Banner/AIO-Graphics-Test/releases) page.
+> **This is v2.2.0** — the single-window app with an **[HDR test card](#hdr-test-card)**, fullscreen for every test, an unattended `--sweep`, and the new **CursorTest.exe**. Grab it from the [Releases](https://github.com/The412Banner/AIO-Graphics-Test/releases) page.
 
 Forked from Khronos [Vulkan-Tools `vkcube`](https://github.com/KhronosGroup/Vulkan-Tools)
 (`cube.c`, tag `sdk-1.3.239.0`, Apache-2.0). The self-contained pre-codegen base links `vulkan-1`
