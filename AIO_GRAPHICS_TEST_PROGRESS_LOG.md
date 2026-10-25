@@ -769,3 +769,16 @@ broken-DXVK containers). The default D3D11 path is 100% unchanged; GL is a fallb
   CursorTest launches and its 2D strip draws (cursor tiles need hovering, not checked).
 - Caveat kept in the notes: Benchmark view / `--sweep` rows other than D3D11 go through the D3D11 shell
   (offscreen + readback); true per-API numbers come from `--cube <api>`.
+
+## 2026-10-25 — copy-paste command boxes (docs only)
+- User: add the exe / launcher commands for per-API runs and API sweeps to the 2.2.0 release description,
+  as easy copy-and-paste boxes, and to the README in an expandable section.
+- 2.2.0 release body: the short "Measuring per-API performance" paragraph became "Command line: per-API
+  runs and sweeps" with one code box per command (every `--cube <api> --bench 15 --autoclose 5`,
+  `--sweep 15`, `--apis=`, a `.bat` loop, launcher argument boxes, Steam `%command%` and plain Wine,
+  `--gpuinfo`). Facts checked against the 2.2.0 source (cube.c CLI dispatch, shell_imgui.cpp --sweep,
+  bench.c result files). Tag, title, assets unchanged.
+- README: the same commands in a collapsible section under "CLI shortcuts". docs/releases/2.2.0.md now
+  equals the live release body.
+- The `.bat` loop is marked untested in launchers.
+

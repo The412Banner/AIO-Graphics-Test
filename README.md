@@ -268,6 +268,172 @@ power users and automation:
 | `--autoclose <sec>` | Auto-dismiss the benchmark result popup after N s (Run All uses 3) |
 | `--semaphore timeline\|binary` | Force the DXVK semaphore path (the probe uses this) |
 
+<details>
+<summary><b>▶️ Copy-paste commands: per-API runs and sweeps (tap to open)</b></summary>
+
+Start the exe from its own folder: results are written to `AIO Results\Benchmark\` in the folder the app is started from. The 32-bit build takes the same arguments (`AIO-Graphics-Test-32bit.exe …`). Every box below has a copy button.
+
+#### One API at a time (true per-API numbers)
+Each command opens that API's own window with a real present, benchmarks for 15 seconds, shows the result window and closes 5 seconds later.
+
+**Vulkan**
+```text
+AIO-Graphics-Test-64bit.exe --cube vk --bench 15 --autoclose 5
+```
+
+**OpenGL**
+```text
+AIO-Graphics-Test-64bit.exe --cube gl --bench 15 --autoclose 5
+```
+
+**Direct3D 12**
+```text
+AIO-Graphics-Test-64bit.exe --cube dx12 --bench 15 --autoclose 5
+```
+
+**Direct3D 11**
+```text
+AIO-Graphics-Test-64bit.exe --cube dx11 --bench 15 --autoclose 5
+```
+
+**Direct3D 10**
+```text
+AIO-Graphics-Test-64bit.exe --cube dx10 --bench 15 --autoclose 5
+```
+
+**Direct3D 9**
+```text
+AIO-Graphics-Test-64bit.exe --cube dx9 --bench 15 --autoclose 5
+```
+
+**Direct3D 8**
+```text
+AIO-Graphics-Test-64bit.exe --cube dx8 --bench 15 --autoclose 5
+```
+
+**DirectDraw / Direct3D 7** (`--cube ddraw` works too)
+```text
+AIO-Graphics-Test-64bit.exe --cube dx7 --bench 15 --autoclose 5
+```
+
+**DirectDraw 2D blit**
+```text
+AIO-Graphics-Test-64bit.exe --cube ddraw2d --bench 15 --autoclose 5
+```
+
+Options for `--cube` runs:
+- `--bench <sec>`: timed benchmark, then the result window and the report files. Leave it out to just run the cube.
+- `--autoclose <sec>`: closes the result window, and with it the app, after `<sec>` seconds. Leave it out to keep the result on screen.
+- `--vsync`: present with vsync. The default is uncapped.
+- `--scene phong` or `--scene meshshader`: alternative Vulkan scenes.
+
+Result files in `AIO Results\Benchmark\`:
+- `AIO-Graphics-Test_bench.csv`: the latest run only, overwritten each time. Line 3 holds `avg_fps`, `min_fps`, `max_fps` and `low1pct_fps`; per-frame times follow.
+- `AIO-Graphics-Test_bench_<API>.txt`: `avg|min|max` FPS, one file per API, kept between runs.
+
+#### All eight APIs, one after another
+Save this as a `.bat` file next to the exe and run it (Windows or plain Wine; not tested in every launcher). Each API runs as its own launch:
+
+```bat
+@echo off
+for %%a in (vk gl dx12 dx11 dx10 dx9 dx8 dx7) do start "" /wait AIO-Graphics-Test-64bit.exe --cube %%a --bench 15 --autoclose 5
+```
+
+The CSV ends up holding only the last API; each API's `.txt` summary stays. In a launcher that runs one shortcut at a time, make one launch per API instead (arguments below).
+
+#### In-app sweep (`--sweep`)
+All eight backends, 15 seconds each (default 15, maximum 600), fullscreen, uncapped. It writes the sweep report (also as `AIO-Graphics-Test_bench_report_latest.txt`) and closes. A watchdog ends a backend that stops rendering for 60 s and keeps the rows that finished.
+
+```text
+AIO-Graphics-Test-64bit.exe --sweep 15
+```
+
+Only the backends you name (`vk gl dx12 dx11 dx10 dx9 dx8 dx7`), always run in that order:
+
+```text
+AIO-Graphics-Test-64bit.exe --sweep 15 --apis=gl,dx9,dx11
+```
+
+In the sweep (and the app's Benchmark view) every backend except D3D11 renders off-screen and is shown through the app's D3D11 window, so those rows include a GPU→CPU copy and run through DXVK's D3D11. Use the sweep to compare builds or settings of the same setup; use the `--cube` runs above for per-API numbers.
+
+#### In launchers
+Put only the arguments in the launcher's argument field: the shortcut's **exec arguments** in Winlator / Bannerlator, or the **launch options** in Steam / DroidDeck (added as a non-Steam game).
+
+<details>
+<summary><b>Arguments for each API (tap to open)</b></summary>
+
+**Vulkan**
+```text
+--cube vk --bench 15 --autoclose 5
+```
+
+**OpenGL**
+```text
+--cube gl --bench 15 --autoclose 5
+```
+
+**Direct3D 12**
+```text
+--cube dx12 --bench 15 --autoclose 5
+```
+
+**Direct3D 11**
+```text
+--cube dx11 --bench 15 --autoclose 5
+```
+
+**Direct3D 10**
+```text
+--cube dx10 --bench 15 --autoclose 5
+```
+
+**Direct3D 9**
+```text
+--cube dx9 --bench 15 --autoclose 5
+```
+
+**Direct3D 8**
+```text
+--cube dx8 --bench 15 --autoclose 5
+```
+
+**DirectDraw / Direct3D 7**
+```text
+--cube dx7 --bench 15 --autoclose 5
+```
+
+**DirectDraw 2D blit**
+```text
+--cube ddraw2d --bench 15 --autoclose 5
+```
+
+**In-app sweep**
+```text
+--sweep 15
+```
+
+</details>
+
+Steam / DroidDeck launch options with an environment variable:
+
+```text
+VAR=value %command% --cube dx11 --bench 15 --autoclose 5
+```
+
+Plain Wine:
+
+```text
+wine AIO-Graphics-Test-64bit.exe --cube dx11 --bench 15 --autoclose 5
+```
+
+Print the OpenGL and Vulkan adapter info and exit:
+
+```text
+AIO-Graphics-Test-64bit.exe --gpuinfo
+```
+
+</details>
+
 ## Build
 
 CI only (no local builds). Cross-compiled Linux → Windows PE on GitHub Actions
