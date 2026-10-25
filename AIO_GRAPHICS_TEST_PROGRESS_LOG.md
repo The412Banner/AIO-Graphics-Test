@@ -782,3 +782,10 @@ broken-DXVK containers). The default D3D11 path is 100% unchanged; GL is a fallb
   equals the live release body.
 - The `.bat` loop is marked untested in launchers.
 
+
+## 2026-10-25 — copy-paste boxes: arguments first
+- User (DroidDeck launch-options screenshot): launchers take only the arguments. The main boxes are now
+  argument-only (`--cube vk --bench 15 --autoclose 5`, `--sweep 15`, ...); the exe + arguments forms moved
+  into "From a command prompt or Wine terminal" fold-outs; new "Where to paste the arguments" list
+  (DroidDeck launch options, Steam Properties > Launch options, Winlator/Bannerlator exec arguments, plain Wine).
+  Same change in the 2.2.0 release body, the README section and docs/releases/2.2.0.md.
