@@ -1,4 +1,4 @@
-## 2026-11-24 17:05 EST — Device test of 71832cb on the Pocket FIT, then 2.3.0-pre1 (feat/upscaler-test-scene, IN PROGRESS)
+## 2026-11-24 17:05–17:25 EST — Device test of 71832cb on the Pocket FIT, result-box fix, 2.3.0-pre1 prep (feat/upscaler-test-scene)
 - User 16:52 EST: "merge nis to main, aio as pre-release first" -> publish a PRE-release (not Latest) after the device test.
   release.yml always passes --latest, so the pre-release is made with `gh release create --prerelease --target <full sha>`
   from the CI-built exes (build-windows 45496003919: 64-bit c332fd8f..., 32-bit 7caa0316..., hashes checked on the device).
@@ -7,6 +7,21 @@
   harness /sdcard/Download/perf-harness/aio-func.sh, tag aiofunc-1124: upscale static (2 shots 3 s apart) / bench / motion /
   --width --height, scaletest_combo bench, --cursortest 64 + 32, upscale bench 32-bit, --open upscaler-test, --open
   cursor-test, city bench (default 640x480 window), --hdr, app --fullscreen.
+- RESULTS aiofunc-1124 (17:05-17:10 EST, 14 launches, 0 Android FATAL/ANR, all benches wrote the CSV): upscale bench 64
+  2916.6 fps / 32 2941.2, scaletest_combo 64 3207.5 / 32 3141.7, city (default 640x480 window) 263.1; screenshots: chart
+  correct (all regions, header "AIO UPSCALER TEST 1280X720 STATIC"), motion header MOTION + pan/zoom, --width 960 --height
+  540 framed window, Cursor Test 64 + 32 (6 tiles + GDI strip), --open upscaler-test (breadcrumb Scaling Tests > Upscaler
+  Test, chart in the viewport), --open cursor-test (pane + Open Cursor Test button; Cursor Test under Display Tests), --hdr
+  card ("HDR10 NOT AVAILABLE", expected under DXVK without HDR), app --fullscreen (Exit Fullscreen pill).
+  Problems: (1) upscale --fullscreen --bench: the result box was not visible (ownerless MessageBox behind the WS_EX_TOPMOST
+  window) -> fixed a5ce378 (MB_TOPMOST | MB_SETFOREGROUND in aio_bench_show_result). (2) up64_static: screenshot at 15 s
+  black (12 s fine) on the first start of the new exe; rerun aioblack-1124 (17:13-17:15): --fullscreen --nohud,
+  --fullscreen (HUD), windowed --nohud, 7 screenshots each 6-24 s: no black frame; --fullscreen --nohud frames
+  pixel-identical over 24 s (BL's own HUD masked); HUD run differs only in the FPS bar, windowed only in the title FPS.
+  Not reproduced -> listed as known in the notes.
+- Pre-release prep: AIO_VERSION "v2.3.0-pre1" (the bench report records it), docs/releases/2.3.0-pre1.md. Next: CI on this
+  commit, result-box check on the device, tag 2.3.0-pre1 at the full built SHA, `gh release create --prerelease
+  --latest=false` with the two CI exes (release.yml always marks Latest), verify tag/assets/hashes, Latest stays 2.2.0.
 - Resume point: results in /sdcard/Download/perf-harness/results/aiofunc-1124/run.log; if interrupted: rm the temp shortcut
   (.../Desktop/ZZ AIO new.desktop), bring Termux back.
 
