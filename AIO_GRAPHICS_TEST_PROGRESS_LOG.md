@@ -31,6 +31,10 @@
   Then: tag 2.3.0-pre1 at 48f032ac149d4ba21a8417353de164e17935c78b (full SHA), `gh release create 2.3.0-pre1 --prerelease
   --latest=false --target 48f032ac149d4ba21a8417353de164e17935c78b --title "AIO Graphics Test v2.3.0-pre1" --notes-file
   docs/releases/2.3.0-pre1.md` + the two exes from run 45499293469, verify tag == built commit, asset hashes, Latest = 2.2.0.
+- 18:13 EST user home. Made 3 shortcuts in Bannerlator container 1 for the user's Cursor Test check (64-bit 48f032ac exe,
+  execArgs --cursortest, copies of AIO.desktop): "AIO Cursor Test - X11" (renderer vulkan, displayBackend x11), "AIO Cursor
+  Test - X11 SGSR HQ" (same + scalingMode 8 = the Bannerlator cursor-after-upscale path from feat/upscaler-refresh), "AIO
+  Cursor Test - Wayland" (renderer opengl as AIO.desktop, displayBackend wayland). Remove them after the test. User launches.
 - Resume point: results in /sdcard/Download/perf-harness/results/aiofunc-1124/run.log; if interrupted: rm the temp shortcut
   (.../Desktop/ZZ AIO new.desktop), bring Termux back.
 
