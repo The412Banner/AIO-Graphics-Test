@@ -22,6 +22,15 @@
 - Pre-release prep: AIO_VERSION "v2.3.0-pre1" (the bench report records it), docs/releases/2.3.0-pre1.md. Next: CI on this
   commit, result-box check on the device, tag 2.3.0-pre1 at the full built SHA, `gh release create --prerelease
   --latest=false` with the two CI exes (release.yml always marks Latest), verify tag/assets/hashes, Latest stays 2.2.0.
+- 17:17 EST CI build-windows 45499293469 GREEN on 48f032ac (i686 + x86_64). Artifacts downloaded (zip digests OK):
+  64-bit a2c840b9..., 32-bit 4ced56b0... (contain "v2.3.0-pre1") -> /sdcard/Download/AIO-upscaletest/2.3.0-pre1-48f032ac/
+  (+ SHA256SUMS.txt) and copied over the test exes in Winlator/games/AIO-upscaletest.
+- 17:18 EST user (leaving work, losing Wi-Fi): "when I get home we will test the cursor test again to make sure it works on
+  x11 and Wayland" / "we will check that finished after I get home" -> PRE-RELEASE NOT PUBLISHED. Waiting for: (1) the user's
+  cursor test on X11 and Wayland, (2) my result-box check on the device with 48f032ac (upscale --fullscreen --bench 10).
+  Then: tag 2.3.0-pre1 at 48f032ac149d4ba21a8417353de164e17935c78b (full SHA), `gh release create 2.3.0-pre1 --prerelease
+  --latest=false --target 48f032ac149d4ba21a8417353de164e17935c78b --title "AIO Graphics Test v2.3.0-pre1" --notes-file
+  docs/releases/2.3.0-pre1.md` + the two exes from run 45499293469, verify tag == built commit, asset hashes, Latest = 2.2.0.
 - Resume point: results in /sdcard/Download/perf-harness/results/aiofunc-1124/run.log; if interrupted: rm the temp shortcut
   (.../Desktop/ZZ AIO new.desktop), bring Termux back.
 
