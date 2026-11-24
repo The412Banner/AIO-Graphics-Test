@@ -1138,7 +1138,7 @@ static void show_dx11_scaling(HWND frame) {
         "STATIC",
         "Scaling/upscaler torture cards - set a sub-native container render-res, launch one,\n"
         "then flip the compositor's Scaling mode and compare. Keys in-test: C cycle card,\n"
-        "K toggle color, A toggle 4:3 aspect. (Banding test uses D dither / M pattern.) Esc to close.",
+        "K toggle color, A toggle 4:3 aspect. (Banding: D dither / M pattern; Upscaler: M motion.) Esc to close.",
         WS_CHILD | WS_VISIBLE | SS_LEFT, cr.left, cr.top, cr.right - cr.left, 86, frame, NULL, g_hinst,
         NULL);
     if (g_ui_font) SendMessage(g_placeholder, WM_SETFONT, (WPARAM)g_ui_font, TRUE);
@@ -1149,14 +1149,16 @@ static void show_dx11_scaling(HWND frame) {
                                    "Lines & diagonals (1px)",
                                    "Checkerboard (1/2/4px)",
                                    "Hard edges",
-                                   "Banding test (dither)"};
+                                   "Banding test (dither)",
+                                   "Upscaler Test (all-in-one chart)"};
     static const char *args[] = {"dx11 --scene scaletest_combo",
                                  "dx11 --scene scaletest_zoneplate",
                                  "dx11 --scene scaletest_wedge",
                                  "dx11 --scene scaletest_grid",
                                  "dx11 --scene scaletest_checker",
                                  "dx11 --scene scaletest_edges",
-                                 "dx11 --scene banding"};
+                                 "dx11 --scene banding",
+                                 "dx11 --scene upscale"};
     g_cbtn_n = (int)(sizeof(args) / sizeof(args[0]));
     int y = cr.top + 100;
     const int colw = 260, rowh = 38;

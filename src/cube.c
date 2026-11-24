@@ -4761,6 +4761,9 @@ int aio_vk_embed_get_frame(AioEmbedFrame *out) {
 
 double aio_vk_embed_gpu_ms(void) { return g_vke.ms; }
 
+// Colour-cursor test (tools/cursor-test/cursortest.c, compiled with AIO_CURSORTEST_EMBED).
+int aio_run_cursortest(HINSTANCE hinst);
+
 // AIO Graphics Test helpers for WinMain argument handling.
 static int aio_cli_has(int argc, char **argv, const char *flag) {
     for (int i = 0; i < argc; i++)
@@ -4849,6 +4852,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR pCmdLine,
         }
     }
 
+    // --cursortest: the colour-cursor test window (tools/cursor-test/cursortest.c,
+    // built into this exe).
+    if (AIO_CLI_HAS("--cursortest")) {
+        aio_diag_log("dispatch: --cursortest");
+        int rc = aio_run_cursortest(hInstance);
+        AIO_FREE_ARGV();
+        return rc;
+    }
+
     // AIO Graphics Test: the single-window Dear ImGui shell is the DEFAULT (v2.0.0).
     // --imgui is kept as an explicit alias; the no-args default (below) also runs it.
     if (AIO_CLI_HAS("--imgui")) {
@@ -4895,11 +4907,19 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR pCmdLine,
         }
         if (strcmp(api, "dx11") == 0) {
             const char *scene = NULL;  // optional: --scene <name>, --draws <n>
+            int cw = 0, ch = 0;        // optional: --width <w> --height <h> (client size)
             for (int iii = 0; iii < argc - 1; iii++) {
                 if (argv && argv[iii] && strcmp(argv[iii], "--scene") == 0) scene = argv[iii + 1];
                 if (argv && argv[iii] && strcmp(argv[iii], "--draws") == 0)
                     aio_d3d11_set_draws(atoi(argv[iii + 1]));
+                if (argv && argv[iii] && strcmp(argv[iii], "--width") == 0) cw = atoi(argv[iii + 1]);
+                if (argv && argv[iii] && strcmp(argv[iii], "--height") == 0) ch = atoi(argv[iii + 1]);
             }
+            // --fullscreen: borderless popup over the whole Wine desktop; --nohud: no FPS
+            // bar (pixel-identical frames); --motion: start the upscale scene moving.
+            aio_d3d11_set_window(cw, ch, AIO_CLI_HAS("--fullscreen"));
+            aio_d3d11_set_hud(!AIO_CLI_HAS("--nohud"));
+            aio_d3d11_set_motion(AIO_CLI_HAS("--motion"));
             int rc = aio_run_d3d11_cube(hInstance, scene);
             AIO_FREE_ARGV();
             return rc;

@@ -5,6 +5,9 @@
  * see is written in the tile. The strip at the bottom is plain GDI drawing (text, gradients,
  * alpha blending, stretching) that must look the same before and after a cursor change in the
  * emulator, as a quick check that 2D drawing was not affected.
+ *
+ * Built two ways: as CursorTest.exe on its own, and with -DAIO_CURSORTEST_EMBED into
+ * AIO-Graphics-Test.exe (started with --cursortest).
  */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -277,8 +280,7 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     return DefWindowProcA(hwnd, msg, wp, lp);
 }
 
-int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show) {
-    (void)prev; (void)cmd;
+static int cursortest_main(HINSTANCE inst) {
     g_cursors[0] = make_cursor(32, 32, 0, 0, px_quadrants, 0);
     g_cursors[1] = make_cursor(48, 48, 24, 24, px_shadow, 0);
     g_cursors[2] = make_cursor(64, 64, 32, 32, px_rainbow, 0);
@@ -307,3 +309,14 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show) {
     }
     return 0;
 }
+
+#ifdef AIO_CURSORTEST_EMBED
+/* Built into AIO-Graphics-Test.exe, which starts it for --cursortest. */
+int aio_run_cursortest(HINSTANCE inst);
+int aio_run_cursortest(HINSTANCE inst) { return cursortest_main(inst); }
+#else
+int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show) {
+    (void)prev; (void)cmd; (void)show;
+    return cursortest_main(inst);
+}
+#endif

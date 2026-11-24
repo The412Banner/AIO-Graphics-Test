@@ -50,8 +50,8 @@ dark:
   bottom reports **resolution, present mode, the exact translation path** (e.g. `d3d11 → DXVK →
   Turnip`), and the **GPU**. The viewport stays a dark instrument surface in both themes.
 - **Docked menu** (right) — every test grouped and one tap away: **Graphics Backends**, **Display
-  Tests** (the [HDR test card](#hdr-test-card)), **DX11 Scenes**, **Showcase Demos**, **Scaling
-  Tests**, and **Tools**. Each row carries a per-API colour chip and an fps hint; the selected row is
+  Tests** (the [HDR test card](#hdr-test-card) and the Cursor Test), **DX11 Scenes**, **Showcase Demos**,
+  **Scaling Tests**, and **Tools**. Every entry also has a [launch command](#launch-command-for-every-test). Each row carries a per-API colour chip and an fps hint; the selected row is
   highlighted. Toggle between a compact **List** and a visual **Grid** from the toolbar.
 - **Fullscreen** — a one-tap button (or **F11**) makes the running test a true fullscreen window:
   one borderless window over the whole screen, taskbar included, rendering at the screen's own size
@@ -151,6 +151,37 @@ dark:
 
   > 🎮 **Free Look** and **Planet Fly** are camera-controlled (keyboard / cursor-steer / gamepad),
   > steered directly inside the viewport; the rest of the gallery is auto-animated.
+
+- **Scaling Tests** — static, pixel-exact D3D11 cards for comparing an emulator compositor's
+  upscalers (SGSR, FSR, NIS, RCAS, CAS, ...): run the test below the screen resolution, then switch
+  the upscaler. **Combo Card**, **Zone Plate**, **Resolution Wedge**, **Lines & Diagonals**,
+  **Checkerboard**, **Hard Edges**, **Banding Test**, and the **Upscaler Test** chart, one labelled
+  screen with:
+
+  | Region | What it shows up |
+  |---|---|
+  | Line fan | 37 aliased 1 px lines, 0–180° in 5° steps (edge-direction handling) |
+  | Zone plate, Siemens star (48 cycles) | aliasing and moiré up to 2 px periods |
+  | Checkerboards 1 / 2 / 4 px | the finest detail a scaler keeps or smears |
+  | Text | 1 px bitmap text white on black, black on white, double size, yellow on blue, low contrast (sharpening halos / ringing) |
+  | Line pairs | vertical, horizontal and 45° bars, 2 / 3 / 4 / 6 px periods |
+  | Hard edges | white disc on black, rotated black square on white, 8-step grey wedge |
+  | Colour edges | red/green, blue/green, red/blue, magenta/green, yellow/blue, cyan/red: slanted edges and 2 px stripes |
+  | Ramps | grey 0–255, dark 0–32, red, green, blue, hue, dark hue (banding) |
+  | Soft noise / grain | smooth value noise and 1 px grain |
+
+  The header shows the render size. Its pixels depend only on position and render size, so
+  screenshots taken at different times can be compared pixel for pixel (`--fullscreen --nohud` keeps
+  the window frame and the FPS bar out of the picture). **M** (or `--motion`) adds a slow pan and zoom
+  for watching temporal behaviour; the moving chart is resampled nearest-neighbour, so some 1 px lines
+  double while it moves. Keys on the other cards: **C** next card, **K** colour, **A** 4:3 letterbox;
+  Banding Test: **D** dither, **M** dither pattern. In the app the keys work while the pointer is over
+  the viewport.
+
+- **Cursor Test** (Display Tests) — colour mouse cursors without a game: colour quadrants (channel
+  order), soft alpha shadow, 64×64 size, an animated cursor, the standard arrow and a hidden cursor,
+  plus a GDI strip (text, gradient, AlphaBlend, StretchBlt) for 2D drawing regressions. It opens in a
+  window of its own (a cursor belongs to a window) and is built into both exes (`--cursortest`).
 
 - **Native-Vulkan scenes** — beyond the textured cube, the Vulkan backend has a **Phong-lit** cube
   (full ambient + diffuse + specular on the *native* VK path, no DXVK) and a **mesh-shader probe**
@@ -261,12 +292,75 @@ power users and automation:
 | `--cube vk\|gl\|dx7\|dx8\|dx9\|dx10\|dx11\|dx12` | Run a single backend headless (its own window) — used by scripting and the benchmark sweeps |
 | `--cube ddraw2d` | The pure-2D DirectDraw blit test (`dx7` = the DirectDraw 3D cube) |
 | `--cube vk --scene phong\|meshshader` | Native-VK Phong-lit cube, or the mesh-shader probe |
-| `--cube dx11 --scene <name>` | Pick a DX11 scene. **Pipeline:** `spin` `textured` `instanced` `tess` `compute` `dolphin` `gsexplode` `atomics` `drawstress`. **Showcases:** `space` `city` `desert` `nebula2` `ocean2` `showcase` `raymarch` `ocean` `mandelbulb` `nebula` `cel` `matcap`. **Interactive:** `freelook` `planet` |
+| `--cube dx11 --scene <name>` | Pick a DX11 scene. **Pipeline:** `spin` `textured` `instanced` `tess` `compute` `dolphin` `gsexplode` `atomics` `drawstress`. **Showcases:** `space` `city` `desert` `nebula2` `ocean2` `showcase` `raymarch` `ocean` `mandelbulb` `nebula` `cel` `matcap`. **Interactive:** `freelook` `planet`. **Scaling tests:** `scaletest_combo` `scaletest_zoneplate` `scaletest_wedge` `scaletest_grid` `scaletest_checker` `scaletest_edges` `banding` `upscale` |
 | `--cube dx11 --scene drawstress --draws <n>` | Draw-stress with N draws (128 / 256 / 512 / 1024 / 2048) |
+| `--width <w> --height <h>` | DX11 scenes: window client size in pixels (either one alone keeps 640 / 480 for the other). Default: the 640x480 window |
+| `--fullscreen` | With `--cube dx11`: one borderless window over the whole Wine desktop, at its size. Without `--cube`: the app opens in its true fullscreen |
+| `--nohud` | DX11 scenes: no FPS bar (for pixel-identical screenshots) |
+| `--motion` | `--scene upscale`: start with the pan/zoom on (**M** toggles it) |
+| `--cursortest` | Opens the Cursor Test window |
+| `--open <name>` | Opens the app on any entry of its test list: `--open "Disk Speed"`, `--open disk-speed`, `--open zone-plate` (case, spaces and punctuation are ignored) |
 | `--bench <sec>` | Run the launched cube as a timed benchmark (avg/min/max/1%-low + CSV) |
 | `--vsync` | Present with vsync (default is uncapped) |
 | `--autoclose <sec>` | Auto-dismiss the benchmark result popup after N s (Run All uses 3) |
 | `--semaphore timeline\|binary` | Force the DXVK semaphore path (the probe uses this) |
+
+### Launch command for every test
+`--cube ...` runs the test in a window of its own (with `--bench <sec>` / `--autoclose <sec>`; DX11 scenes also take `--width` / `--height` / `--fullscreen` / `--nohud`). `--open <name>` opens the app with that entry selected (add `--fullscreen` for its true fullscreen).
+
+| List entry | Command |
+|---|---|
+| **Graphics Backends** | |
+| Vulkan | `--cube vk` |
+| OpenGL | `--cube gl` |
+| Direct3D 12 | `--cube dx12` |
+| Direct3D 11 | `--cube dx11` |
+| Direct3D 10 | `--cube dx10` |
+| Direct3D 9 | `--cube dx9` |
+| Direct3D 8 | `--cube dx8` |
+| DirectDraw (DX7) | `--cube dx7` (2D blit: `--cube ddraw2d`) |
+| **Display Tests** | |
+| HDR | `--hdr` (opens the app on the card) |
+| Cursor Test | `--cursortest` |
+| **DX11 Scenes** | |
+| Spin | `--cube dx11 --scene spin` |
+| Textured | `--cube dx11 --scene textured` |
+| Instanced 512x | `--cube dx11 --scene instanced` |
+| Tessellation | `--cube dx11 --scene tess` |
+| Compute Particles | `--cube dx11 --scene compute` |
+| GS Exploder | `--cube dx11 --scene gsexplode` |
+| Atomics | `--cube dx11 --scene atomics` |
+| Dolphin | `--cube dx11 --scene dolphin` |
+| Banding Test | `--cube dx11 --scene banding` |
+| Draw Stress 128 / 256 / 512 / 1024 / 2048 | `--cube dx11 --scene drawstress --draws 128` (or 256, 512, 1024, 2048) |
+| **Showcase Demos** | |
+| Free Look | `--cube dx11 --scene freelook` |
+| Planet Fly | `--cube dx11 --scene planet` |
+| Raymarch SDF | `--cube dx11 --scene raymarch` |
+| Ocean | `--cube dx11 --scene ocean` |
+| Ocean v2 | `--cube dx11 --scene ocean2` |
+| Mandelbulb | `--cube dx11 --scene mandelbulb` |
+| Nebula | `--cube dx11 --scene nebula` |
+| Nebula HD | `--cube dx11 --scene nebula2` |
+| Showcase | `--cube dx11 --scene showcase` |
+| Space | `--cube dx11 --scene space` |
+| Desert | `--cube dx11 --scene desert` |
+| Cityscape | `--cube dx11 --scene city` |
+| Cel Shading | `--cube dx11 --scene cel` |
+| Matcap | `--cube dx11 --scene matcap` |
+| **Scaling Tests** | |
+| Combo Card | `--cube dx11 --scene scaletest_combo` |
+| Zone Plate | `--cube dx11 --scene scaletest_zoneplate` |
+| Resolution Wedge | `--cube dx11 --scene scaletest_wedge` |
+| Lines & Diagonals | `--cube dx11 --scene scaletest_grid` |
+| Checkerboard | `--cube dx11 --scene scaletest_checker` |
+| Hard Edges | `--cube dx11 --scene scaletest_edges` |
+| Banding Test | `--cube dx11 --scene banding` |
+| Upscaler Test | `--cube dx11 --scene upscale` (`--motion` for the moving version) |
+| **Tools** | |
+| GPU Info | `--open gpu-info` (`--gpuinfo` writes the text report and exits) |
+| Benchmark | `--open benchmark` (`--sweep 15` runs the backends unattended) |
+| Disk Speed | `--open disk-speed` |
 
 <details>
 <summary><b>▶️ Copy-paste commands: per-API runs and sweeps (tap to open)</b></summary>
@@ -376,6 +470,23 @@ Options for `--cube` runs:
 - `--autoclose <sec>`: closes the result window, and with it the app, after `<sec>` seconds. Leave it out to keep the result on screen.
 - `--vsync`: present with vsync. The default is uncapped.
 - `--scene phong` or `--scene meshshader`: alternative Vulkan scenes.
+- DX11 only: `--width <w> --height <h>` (client size), `--fullscreen` (whole Wine desktop), `--nohud` (no FPS bar), `--motion` (Upscaler Test pan/zoom).
+
+Upscaler Test over the whole Wine desktop, static, no FPS bar (for screenshots):
+
+```text
+--cube dx11 --scene upscale --fullscreen --nohud
+```
+
+The same with the pan/zoom, or at a fixed render size:
+
+```text
+--cube dx11 --scene upscale --fullscreen --motion
+```
+
+```text
+--cube dx11 --scene upscale --width 1280 --height 720
+```
 
 Result files in `AIO Results\Benchmark\`:
 - `AIO-Graphics-Test_bench.csv`: the latest run only, overwritten each time. Line 3 holds `avg_fps`, `min_fps`, `max_fps` and `low1pct_fps`; per-frame times follow.
@@ -467,6 +578,7 @@ src/cube_d3d11.c        Direct3D 11 scene framework + scenes (pipeline tests, pr
 src/cube_d3d11_scene.h  C accessors that let the shell drive the DX11 scenes on its own device
 src/hdr_scene.cpp       HDR test card (Display Tests → HDR): HDR10 swapchain, DXGI + Vulkan probes, patterns, report
 src/hdr_scene.h         HDR test card entry points (driven by the shell)
+tools/cursor-test/cursortest.c  Cursor Test (built into the main exe for --cursortest; also builds alone as CursorTest.exe)
 src/cube_gl.c           OpenGL backend (WGL)
 src/cube_ddraw.c        DirectDraw / legacy Direct3D backend (DX7 cube + 2D blit)
 src/cube_d3d8.c         Direct3D 8 backend (DXVK d3d8 wrapper)

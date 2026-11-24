@@ -4072,6 +4072,506 @@ static void scale_cleanup(void) {
     g_scene_hud[0] = '\0';
 }
 
+// ============================ UPSCALER TEST chart ===========================
+// One static chart with labelled regions for comparing the host compositor's
+// spatial upscalers (SGSR, FSR 1 EASU+RCAS, NIS, RCAS, CAS): a 1 px line fan,
+// zone plate, Siemens star, 1/2/4 px checkerboards, 1 px bitmap text, line
+// pairs, hard grey edges, saturated colour edges, grey/dark/colour ramps and
+// soft noise + grain. Layout is in device pixels so 1 px detail stays 1 px at
+// any render size. The output depends only on the pixel position and the
+// back-buffer size, so frames are identical until the size or mode changes.
+// M (or --motion) toggles a slow pan/zoom of the chart below the header.
+//
+// Text uses a 5x7 bitmap font. The font, the strings and their ids are written
+// into the HLSL source at init (see up_build_hlsl).
+typedef struct {
+    char c;
+    const char *row[7];
+} UpGlyph;
+
+// '0'..'9' must stay at indices 0..9 (the shader draws digit d as glyph d).
+static const UpGlyph kUpFont[] = {
+    {'0', {".###.", "#...#", "#..##", "#.#.#", "##..#", "#...#", ".###."}},
+    {'1', {"..#..", ".##..", "..#..", "..#..", "..#..", "..#..", ".###."}},
+    {'2', {".###.", "#...#", "....#", "...#.", "..#..", ".#...", "#####"}},
+    {'3', {"#####", "...#.", "..#..", "...#.", "....#", "#...#", ".###."}},
+    {'4', {"...#.", "..##.", ".#.#.", "#..#.", "#####", "...#.", "...#."}},
+    {'5', {"#####", "#....", "####.", "....#", "....#", "#...#", ".###."}},
+    {'6', {"..##.", ".#...", "#....", "####.", "#...#", "#...#", ".###."}},
+    {'7', {"#####", "....#", "...#.", "..#..", ".#...", ".#...", ".#..."}},
+    {'8', {".###.", "#...#", "#...#", ".###.", "#...#", "#...#", ".###."}},
+    {'9', {".###.", "#...#", "#...#", ".####", "....#", "...#.", ".##.."}},
+    {' ', {".....", ".....", ".....", ".....", ".....", ".....", "....."}},
+    {'A', {".###.", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"}},
+    {'B', {"####.", "#...#", "#...#", "####.", "#...#", "#...#", "####."}},
+    {'C', {".###.", "#...#", "#....", "#....", "#....", "#...#", ".###."}},
+    {'D', {"###..", "#..#.", "#...#", "#...#", "#...#", "#..#.", "###.."}},
+    {'E', {"#####", "#....", "#....", "####.", "#....", "#....", "#####"}},
+    {'F', {"#####", "#....", "#....", "####.", "#....", "#....", "#...."}},
+    {'G', {".###.", "#...#", "#....", "#.###", "#...#", "#...#", ".####"}},
+    {'H', {"#...#", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"}},
+    {'I', {".###.", "..#..", "..#..", "..#..", "..#..", "..#..", ".###."}},
+    {'J', {"..###", "...#.", "...#.", "...#.", "...#.", "#..#.", ".##.."}},
+    {'K', {"#...#", "#..#.", "#.#..", "##...", "#.#..", "#..#.", "#...#"}},
+    {'L', {"#....", "#....", "#....", "#....", "#....", "#....", "#####"}},
+    {'M', {"#...#", "##.##", "#.#.#", "#.#.#", "#...#", "#...#", "#...#"}},
+    {'N', {"#...#", "#...#", "##..#", "#.#.#", "#..##", "#...#", "#...#"}},
+    {'O', {".###.", "#...#", "#...#", "#...#", "#...#", "#...#", ".###."}},
+    {'P', {"####.", "#...#", "#...#", "####.", "#....", "#....", "#...."}},
+    {'Q', {".###.", "#...#", "#...#", "#...#", "#.#.#", "#..#.", ".##.#"}},
+    {'R', {"####.", "#...#", "#...#", "####.", "#.#..", "#..#.", "#...#"}},
+    {'S', {".####", "#....", "#....", ".###.", "....#", "....#", "####."}},
+    {'T', {"#####", "..#..", "..#..", "..#..", "..#..", "..#..", "..#.."}},
+    {'U', {"#...#", "#...#", "#...#", "#...#", "#...#", "#...#", ".###."}},
+    {'V', {"#...#", "#...#", "#...#", "#...#", "#...#", ".#.#.", "..#.."}},
+    {'W', {"#...#", "#...#", "#...#", "#.#.#", "#.#.#", "#.#.#", ".#.#."}},
+    {'X', {"#...#", "#...#", ".#.#.", "..#..", ".#.#.", "#...#", "#...#"}},
+    {'Y', {"#...#", "#...#", ".#.#.", "..#..", "..#..", "..#..", "..#.."}},
+    {'Z', {"#####", "....#", "...#.", "..#..", ".#...", "#....", "#####"}},
+    {'-', {".....", ".....", ".....", "#####", ".....", ".....", "....."}},
+    {'/', {".....", "....#", "...#.", "..#..", ".#...", "#....", "....."}},
+    {'.', {".....", ".....", ".....", ".....", ".....", ".##..", ".##.."}},
+    {':', {".....", ".##..", ".##..", ".....", ".##..", ".##..", "....."}},
+    {'+', {".....", "..#..", "..#..", "#####", "..#..", "..#..", "....."}},
+};
+#define UP_NGLYPH ((int)(sizeof(kUpFont) / sizeof(kUpFont[0])))
+
+// Strings the shader draws, by id. S_T0..S_T9 (tile labels) and S_R0..S_R6
+// (ramp labels) and S_TX0..S_TX8 must stay consecutive: the shader adds an index.
+typedef struct {
+    const char *id, *text;
+} UpString;
+static const UpString kUpStrings[] = {
+    {"S_T0", "LINE FAN 1PX 5 DEG"},
+    {"S_T1", "ZONE PLATE"},
+    {"S_T2", "SIEMENS STAR 48"},
+    {"S_T3", "CHECKER 1/2/4 PX"},
+    {"S_T4", "TEXT 1PX STROKES"},
+    {"S_T5", "LINE PAIRS 2/3/4/6"},
+    {"S_T6", "HARD EDGES"},
+    {"S_T7", "COLOUR EDGES"},
+    {"S_T8", "RAMPS: GREY  DARK 0-32  R G B  HUE  DARK HUE"},
+    {"S_T9", "SOFT NOISE / GRAIN"},
+    {"S_R0", "GREY"},
+    {"S_R1", "DARK"},
+    {"S_R2", "RED"},
+    {"S_R3", "GREEN"},
+    {"S_R4", "BLUE"},
+    {"S_R5", "HUE"},
+    {"S_R6", "DHUE"},
+    {"S_TX0", "ABCDEFGHIJKLM"},
+    {"S_TX1", "NOPQRSTUVWXYZ"},
+    {"S_TX2", "0123456789 +-/:."},
+    {"S_TX3", "SHARPEN HALO"},
+    {"S_TX4", "RINGING TEST"},
+    {"S_TX5", "0123456789"},
+    {"S_TX6", "FSR NIS CAS"},
+    {"S_TX7", "SGSR EASU RCAS"},
+    {"S_TX8", "LOW CONTRAST"},
+    {"S_TITLE", "AIO UPSCALER TEST"},
+    {"S_STATIC", "STATIC"},
+    {"S_MOTION", "MOTION"},
+};
+#define UP_NSTR ((int)(sizeof(kUpStrings) / sizeof(kUpStrings[0])))
+
+// Shader body. Expects kFont[] (5 bits per row, bit 4 = left column), kChr[]
+// (glyph index per character), kStr[] ((offset << 8) | length), GLYPH_X and the
+// S_* ids, all generated in front of it.
+static const char *kUpscaleHLSL =
+    "cbuffer CB:register(b0){float iTime;float iMT;float2 iRes;float iMotion;float3 pad;}\n"
+    "struct VSOut{float4 pos:SV_POSITION;float2 ndc:TEXCOORD0;};\n"
+    "VSOut VSMain(uint vid:SV_VertexID){VSOut o;float2 q=float2((vid<<1)&2,vid&2);"
+    "o.pos=float4(q*2.0-1.0,0.0,1.0);o.ndc=o.pos.xy;return o;}\n"
+    "static const float PI=3.14159265;\n"
+    "static const uint kPow10[5]={1u,10u,100u,1000u,10000u};\n"
+    // 1 if pixel a is a set pixel of glyph g drawn at o with integer scale s.
+    "float glyph(int2 a,int2 o,int s,uint g){\n"
+    "  int2 l=a-o;\n"
+    "  if(l.x<0||l.y<0) return 0.0;\n"
+    "  int2 c=l/s;\n"
+    "  if(c.x>4||c.y>6) return 0.0;\n"
+    "  return (float)((kFont[g*7u+(uint)c.y]>>(uint)(4-c.x))&1u);\n"
+    "}\n"
+    "float str(int2 a,int2 o,int s,uint id){\n"
+    "  int2 l=a-o;\n"
+    "  if(l.x<0||l.y<0||l.y>=7*s) return 0.0;\n"
+    "  int ci=l.x/(6*s);\n"
+    "  uint e=kStr[id];\n"
+    "  if(ci>=(int)(e&255u)) return 0.0;\n"
+    "  return glyph(a,o+int2(ci*6*s,0),s,kChr[(e>>8)+(uint)ci]);\n"
+    "}\n"
+    "int ndig(uint n){return n>=10000u?5:(n>=1000u?4:(n>=100u?3:(n>=10u?2:1)));}\n"
+    "float num(int2 a,int2 o,int s,uint n){\n"
+    "  int2 l=a-o;\n"
+    "  int nd=ndig(n);\n"
+    "  if(l.x<0||l.y<0||l.y>=7*s) return 0.0;\n"
+    "  int ci=l.x/(6*s);\n"
+    "  if(ci>=nd) return 0.0;\n"
+    "  uint d=(n/kPow10[nd-1-ci])%10u;\n"
+    "  return glyph(a,o+int2(ci*6*s,0),s,d);\n"
+    "}\n"
+    "float3 hsv(float h,float s,float v){"
+    "float3 q=saturate(abs(frac(h+float3(1.0,2.0/3.0,1.0/3.0))*6.0-3.0)-1.0);"
+    "return v*lerp(float3(1.0,1.0,1.0),q,s);}\n"
+    "uint hashu(uint2 p){uint h=(p.x*0x8da6b343u)^(p.y*0xd8163841u);h^=h>>15;h*=0x2c1b3c6du;"
+    "h^=h>>12;h*=0x297a2d39u;h^=h>>15;return h;}\n"
+    "float hash01(int2 p){return (float)(hashu((uint2)p)&65535u)/65535.0;}\n"
+    "float vnoise(float2 x){float2 i=floor(x);float2 f=x-i;f=f*f*(3.0-2.0*f);int2 k=(int2)i;"
+    "return lerp(lerp(hash01(k),hash01(k+int2(1,0)),f.x),"
+    "lerp(hash01(k+int2(0,1)),hash01(k+int2(1,1)),f.x),f.y);}\n"
+    // Each tile function gets the pixel a inside the tile's pattern area of size sz.
+    // Line fan: 37 aliased 1 px rays from the bottom centre, 0..180 deg in 5 deg
+    // steps (one pixel per column or row, Bresenham style).
+    "float3 tFan(int2 a,int2 sz){\n"
+    "  int ox=sz.x/2,oy=sz.y-1;\n"
+    "  int dx=a.x-ox,dy=oy-a.y;\n"
+    "  int R=min(ox,oy);\n"
+    "  int r2=dx*dx+dy*dy;\n"
+    "  if(dy<0||r2>R*R||r2<4) return float3(0.0,0.0,0.0);\n"
+    "  float st=PI/36.0;\n"
+    "  int k0=(int)round(atan2((float)dy,(float)dx)/st);\n"
+    "  float v=0.0;\n"
+    "  [unroll] for(int j=-1;j<=1;j++){\n"
+    "    float th=(float)clamp(k0+j,0,36)*st;\n"
+    "    float c=cos(th),sn=sin(th);\n"
+    "    if(abs(c)>=abs(sn)){ if(dy==(int)round((float)dx*sn/c)) v=1.0; }\n"
+    "    else { if(dx==(int)round((float)dy*c/sn)) v=1.0; }\n"
+    "  }\n"
+    "  return float3(v,v,v);\n"
+    "}\n"
+    // Zone plate: rings reach Nyquist (2 px period) at the corners.
+    "float3 tZone(int2 a,int2 sz){\n"
+    "  float2 c=(float2)sz*0.5;\n"
+    "  float2 d=(float2)a+0.5-c;\n"
+    "  float k=PI/(2.0*length(c));\n"
+    "  float v=0.5+0.5*cos(k*dot(d,d));\n"
+    "  return float3(v,v,v);\n"
+    "}\n"
+    // Siemens star, 48 black/white cycles; spokes reach 2 px apart at r ~ 15 px.
+    "float3 tStar(int2 a,int2 sz){\n"
+    "  float2 c=(float2)sz*0.5;\n"
+    "  float2 d=(float2)a+0.5-c;\n"
+    "  float r=length(d);\n"
+    "  if(r>min(c.x,c.y)-1.0||r<1.5) return float3(0.5,0.5,0.5);\n"
+    "  float v=(frac(atan2(d.y,d.x)/(2.0*PI)*48.0)<0.5)?1.0:0.0;\n"
+    "  return float3(v,v,v);\n"
+    "}\n"
+    // Three panels: 1, 2 and 4 px cells.
+    "float3 tChecker(int2 a,int2 sz){\n"
+    "  int pw=(sz.x-4)/3;\n"
+    "  int j=a.x/(pw+2);\n"
+    "  int lx=a.x-j*(pw+2);\n"
+    "  if(j>2||lx>=pw) return float3(0.5,0.5,0.5);\n"
+    "  int cell=1<<j;\n"
+    "  float v=(float)(((lx/cell)^(a.y/cell))&1);\n"
+    "  return float3(v,v,v);\n"
+    "}\n"
+    // Text block (88*s px tall): white on black, black on white, double size,
+    // yellow on blue, low contrast. The tile shows it at scale 1, plus a scale 2
+    // copy below when that fits.
+    "float3 tTextBlock(int2 a,int s){\n"
+    "  int L=9*s;\n"
+    "  float v;\n"
+    "  if(a.y<3*L){ int r=a.y/L; v=str(a,int2(2*s,r*L+s),s,S_TX0+r); return float3(v,v,v); }\n"
+    "  if(a.y<6*L){ int r=(a.y-3*L)/L; v=1.0-str(a,int2(2*s,(3+r)*L+s),s,S_TX3+r); return float3(v,v,v); }\n"
+    "  if(a.y<6*L+16*s){ v=str(a,int2(2*s,6*L+s),2*s,S_TX6); return float3(v,v,v); }\n"
+    "  if(a.y<7*L+16*s){ v=str(a,int2(2*s,6*L+17*s),s,S_TX7);"
+    " return lerp(float3(0.0,0.0,0.55),float3(1.0,1.0,0.0),v); }\n"
+    "  if(a.y<8*L+16*s){ v=0.4+0.2*str(a,int2(2*s,7*L+17*s),s,S_TX8); return float3(v,v,v); }\n"
+    "  return float3(0.0,0.0,0.0);\n"
+    "}\n"
+    "float3 tText(int2 a,int2 sz){\n"
+    "  if(a.y<92) return tTextBlock(a,1);\n"
+    "  if(sz.y>=92+176) return tTextBlock(a-int2(0,92),2);\n"
+    "  return float3(0.0,0.0,0.0);\n"
+    "}\n"
+    // Line pairs: bands of vertical, horizontal and 45 deg bars; groups with
+    // period 2/3/4/6 px (1/1/2/3 px on).
+    "float3 tPairs(int2 a,int2 sz){\n"
+    "  int bh=(sz.y-4)/3;\n"
+    "  int b=a.y/(bh+2);\n"
+    "  int ly=a.y-b*(bh+2);\n"
+    "  int gw=(sz.x-6)/4;\n"
+    "  int g=a.x/(gw+2);\n"
+    "  int lx=a.x-g*(gw+2);\n"
+    "  if(b>2||ly>=bh||g>3||lx>=gw) return float3(0.5,0.5,0.5);\n"
+    "  int per=(g==0)?2:((g==1)?3:((g==2)?4:6));\n"
+    "  int on=(g<2)?1:((g==2)?2:3);\n"
+    "  int t=(b==0)?lx:((b==1)?ly:(lx+ly));\n"
+    "  float v=((t%per)<on)?1.0:0.0;\n"
+    "  return float3(v,v,v);\n"
+    "}\n"
+    // Hard grey edges: white disc on black, black square (22.5 deg) on white,
+    // 8-step grey wedge along the bottom third.
+    "float3 tEdges(int2 a,int2 sz){\n"
+    "  int top=(sz.y*2)/3;\n"
+    "  float v;\n"
+    "  if(a.y>=top){ v=(float)((a.x*8)/max(sz.x,1))/7.0; return float3(v,v,v); }\n"
+    "  int hw=sz.x/2;\n"
+    "  bool right=a.x>=hw;\n"
+    "  float2 qs=float2(right?sz.x-hw:hw,top);\n"
+    "  float2 d=float2(right?a.x-hw:a.x,a.y)+0.5-qs*0.5;\n"
+    "  float r=min(qs.x,qs.y)*0.36;\n"
+    "  if(!right){ v=(length(d)<r)?1.0:0.0; return float3(v,v,v); }\n"
+    "  float2 q=float2(d.x*0.92387953-d.y*0.38268343,d.x*0.38268343+d.y*0.92387953);\n"
+    "  v=(max(abs(q.x),abs(q.y))<r*0.8)?0.0:1.0;\n"
+    "  return float3(v,v,v);\n"
+    "}\n"
+    // Colour edges: six saturated pairs, each a slanted A|B edge (left half) and
+    // 2 px A/B stripes (right half).
+    "static const float3 kCA[6]={float3(1,0,0),float3(0,0,1),float3(1,0,0),"
+    "float3(1,0,1),float3(1,1,0),float3(0,1,1)};\n"
+    "static const float3 kCB[6]={float3(0,1,0),float3(0,1,0),float3(0,0,1),"
+    "float3(0,1,0),float3(0,0,1),float3(1,0,0)};\n"
+    "float3 tColour(int2 a,int2 sz){\n"
+    "  int rh=max(sz.y/6,1);\n"
+    "  int r=a.y/rh;\n"
+    "  if(r>5) return float3(0.0,0.0,0.0);\n"
+    "  int ly=a.y-r*rh;\n"
+    "  int hw=sz.x/2;\n"
+    "  float3 A=kCA[r],B=kCB[r];\n"
+    "  if(a.x<hw){ float e=(float)hw*0.5+((float)ly-(float)rh*0.5)*0.5;"
+    " return ((float)a.x+0.5<e)?A:B; }\n"
+    "  return ((((a.x-hw)/2)&1)!=0)?A:B;\n"
+    "}\n"
+    // Ramps (spans three columns): label column, then 0..1 left to right.
+    "float3 tRamps(int2 a,int2 sz,int s){\n"
+    "  int lw=32*s;\n"
+    "  int sh=max(sz.y/7,1);\n"
+    "  int r=a.y/sh;\n"
+    "  if(r>6) return float3(0.0,0.0,0.0);\n"
+    "  if(a.x<lw){ float v=str(a,int2(s,r*sh+(sh-7*s)/2),s,S_R0+r); return float3(v,v,v); }\n"
+    "  float u=(float)(a.x-lw)/(float)max(sz.x-lw-1,1);\n"
+    "  if(r==0) return float3(u,u,u);\n"
+    "  if(r==1) return float3(u,u,u)*(32.0/255.0);\n"
+    "  if(r==2) return float3(u,0.0,0.0);\n"
+    "  if(r==3) return float3(0.0,u,0.0);\n"
+    "  if(r==4) return float3(0.0,0.0,u);\n"
+    "  if(r==5) return hsv(u,1.0,1.0);\n"
+    "  return hsv(u,1.0,0.25);\n"
+    "}\n"
+    // Soft value noise (8 px cells, 3 octaves) on top, 1 px grain below.
+    "float3 tNoise(int2 a,int2 sz){\n"
+    "  float v;\n"
+    "  if(a.y<sz.y/2){ float2 x=(float2)a/8.0;"
+    " float n=0.5*vnoise(x)+0.3*vnoise(x*2.0+17.0)+0.2*vnoise(x*4.0+41.0);"
+    " v=0.15+0.7*n; return float3(v,v,v); }\n"
+    "  v=0.5+(hash01(a+int2(7919,1543))-0.5)*0.3;\n"
+    "  return float3(v,v,v);\n"
+    "}\n"
+    "float4 PSMain(VSOut inp):SV_TARGET{\n"
+    "  int W=(int)iRes.x,H=(int)iRes.y;\n"
+    "  int2 p=(int2)inp.pos.xy;\n"
+    "  int s=max(1,H/480);\n"              // text scale
+    "  int hh=min(44,H/5);\n"              // header; keeps the FPS bar off the tiles
+    "  if(p.x==0||p.y==0||p.x==W-1||p.y==H-1) return float4(1.0,1.0,1.0,1.0);\n"
+    "  if(p.y<hh){\n"
+    "    int ty=(hh-7*s)/2;\n"
+    "    int nw=ndig((uint)W),nh=ndig((uint)H);\n"
+    "    int cw=6*s;\n"
+    "    int x0=W-8-((28+nw+nh)*cw-s);\n"   // right-aligned "TITLE  WxH  MODE"
+    "    float v=str(p,int2(x0,ty),s,S_TITLE);\n"
+    "    v+=num(p,int2(x0+19*cw,ty),s,(uint)W);\n"
+    "    v+=glyph(p,int2(x0+(19+nw)*cw,ty),s,GLYPH_X);\n"
+    "    v+=num(p,int2(x0+(20+nw)*cw,ty),s,(uint)H);\n"
+    "    v+=str(p,int2(x0+(22+nw+nh)*cw,ty),s,(iMotion>0.5)?S_MOTION:S_STATIC);\n"
+    "    v=saturate(v);\n"
+    "    return float4(v,v,v,1.0);\n"
+    "  }\n"
+    "  float2 f=inp.pos.xy;\n"
+    "  if(iMotion>0.5){\n"                  // slow pan + zoom of everything below the header
+    "    float2 c=float2((float)W*0.5,(float)(hh+H)*0.5);\n"
+    "    float z=1.0+0.15*(0.5-0.5*cos(iMT*(2.0*PI/20.0)));\n"
+    "    float2 pan=float2(10.0*sin(iMT*(2.0*PI/14.0)),6.0*sin(iMT*(2.0*PI/11.0)));\n"
+    "    f=c+(f-c)/z+pan;\n"
+    "  }\n"
+    "  int2 q=(int2)floor(f);\n"
+    "  float4 bg=float4(0.1,0.1,0.1,1.0);\n"
+    "  int gap=4*s;\n"
+    "  int colw=(W-5*gap)/4,rowh=(H-hh-3*gap)/3;\n"
+    "  if(colw<8||rowh<8) return bg;\n"
+    "  int2 g=q-int2(gap,hh);\n"
+    "  if(g.x<0||g.y<0) return bg;\n"
+    "  int cx=g.x/(colw+gap),cy=g.y/(rowh+gap);\n"
+    "  int2 l=int2(g.x-cx*(colw+gap),g.y-cy*(rowh+gap));\n"
+    "  if(cy>2||cx>3||l.y>=rowh) return bg;\n"
+    "  int tile=cy*4+cx;\n"
+    "  int tw=colw;\n"
+    "  if(cy==2){ if(cx<3){ tile=8; l.x=g.x; tw=3*colw+2*gap; } else tile=9; }\n"
+    "  if(l.x>=tw) return bg;\n"
+    "  int lh=9*s+1;\n"                    // label strip height
+    "  if(l.x==0||l.y==0||l.x==tw-1||l.y==rowh-1||l.y==lh) return float4(0.5,0.5,0.5,1.0);\n"
+    "  if(l.y<lh){ float v=str(l,int2(1+2*s,1+s),s,S_T0+tile); return float4(v,v,v,1.0); }\n"
+    "  int2 a=l-int2(1,lh+1);\n"
+    "  int2 sz=int2(tw-2,rowh-lh-2);\n"
+    "  float3 col;\n"
+    "  if(tile==0) col=tFan(a,sz);\n"
+    "  else if(tile==1) col=tZone(a,sz);\n"
+    "  else if(tile==2) col=tStar(a,sz);\n"
+    "  else if(tile==3) col=tChecker(a,sz);\n"
+    "  else if(tile==4) col=tText(a,sz);\n"
+    "  else if(tile==5) col=tPairs(a,sz);\n"
+    "  else if(tile==6) col=tEdges(a,sz);\n"
+    "  else if(tile==7) col=tColour(a,sz);\n"
+    "  else if(tile==8) col=tRamps(a,sz,s);\n"
+    "  else col=tNoise(a,sz);\n"
+    "  return float4(col,1.0);\n"
+    "}\n";
+
+static int up_glyph_index(char c) {
+    for (int i = 0; i < UP_NGLYPH; i++)
+        if (kUpFont[i].c == c) return i;
+    return 10;  // space
+}
+
+// Font + string tables as HLSL, followed by kUpscaleHLSL. Caller frees.
+static char *up_build_hlsl(void) {
+    size_t cap = strlen(kUpscaleHLSL) + 24576;
+    char *s = (char *)malloc(cap);
+    if (!s) return NULL;
+    size_t n = 0;
+#define UP_PUT(...)                                                    \
+    do {                                                               \
+        if (n < cap) n += (size_t)snprintf(s + n, cap - n, __VA_ARGS__); \
+    } while (0)
+    UP_PUT("static const uint kFont[%d]={", UP_NGLYPH * 7);
+    for (int g = 0; g < UP_NGLYPH; g++)
+        for (int r = 0; r < 7; r++) {
+            unsigned bits = 0;
+            for (int c = 0; c < 5; c++)
+                if (kUpFont[g].row[r][c] == '#') bits |= 16u >> c;
+            UP_PUT("%s%uu", (g || r) ? "," : "", bits);
+        }
+    UP_PUT("};\n");
+    int total = 0;
+    for (int i = 0; i < UP_NSTR; i++) total += (int)strlen(kUpStrings[i].text);
+    UP_PUT("static const uint kChr[%d]={", total);
+    int k = 0;
+    for (int i = 0; i < UP_NSTR; i++)
+        for (const char *c = kUpStrings[i].text; *c; c++, k++)
+            UP_PUT("%s%du", k ? "," : "", up_glyph_index(*c));
+    UP_PUT("};\n");
+    UP_PUT("static const uint kStr[%d]={", UP_NSTR);
+    int off = 0;
+    for (int i = 0; i < UP_NSTR; i++) {
+        int len = (int)strlen(kUpStrings[i].text);
+        UP_PUT("%s%uu", i ? "," : "", ((unsigned)off << 8) | (unsigned)len);
+        off += len;
+    }
+    UP_PUT("};\n");
+    for (int i = 0; i < UP_NSTR; i++) UP_PUT("#define %s %d\n", kUpStrings[i].id, i);
+    UP_PUT("#define GLYPH_X %du\n", up_glyph_index('X'));
+    UP_PUT("%s", kUpscaleHLSL);
+#undef UP_PUT
+    if (n >= cap) {
+        free(s);
+        return NULL;
+    }
+    return s;
+}
+
+typedef struct {
+    float iTime, iMT;
+    float resx, resy;
+    float iMotion, pad0, pad1, pad2;
+} UpCB;
+
+static int g_up_motion_start = 0;  // --motion
+void aio_d3d11_set_motion(int on) { g_up_motion_start = on ? 1 : 0; }
+
+static struct {
+    ID3D11VertexShader *vs;
+    ID3D11PixelShader *ps;
+    ID3D11Buffer *cbo;
+    ID3D11RasterizerState *rs;
+    int motion;
+    double mt, last_t;  // motion clock: runs only while motion is on
+    unsigned char prevM;
+} g_up;
+
+static int up_init(ID3D11Device *dev, ID3D11DeviceContext *ctx, int w, int h) {
+    (void)ctx;
+    (void)w;
+    (void)h;
+    char *src = up_build_hlsl();
+    if (!src) return 1;
+    ID3DBlob *vsb = compile_hlsl(src, "VSMain", "vs_4_0");
+    ID3DBlob *psb = vsb ? compile_hlsl(src, "PSMain", "ps_4_0") : NULL;
+    free(src);
+    if (!vsb || !psb) {
+        if (vsb) ID3D10Blob_Release(vsb);
+        return 1;
+    }
+    ID3D11Device_CreateVertexShader(dev, ID3D10Blob_GetBufferPointer(vsb),
+                                    ID3D10Blob_GetBufferSize(vsb), NULL, &g_up.vs);
+    ID3D11Device_CreatePixelShader(dev, ID3D10Blob_GetBufferPointer(psb),
+                                   ID3D10Blob_GetBufferSize(psb), NULL, &g_up.ps);
+    ID3D10Blob_Release(vsb);
+    ID3D10Blob_Release(psb);
+    D3D11_BUFFER_DESC cbd;
+    memset(&cbd, 0, sizeof(cbd));
+    cbd.ByteWidth = sizeof(UpCB);
+    cbd.Usage = D3D11_USAGE_DYNAMIC;
+    cbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    cbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    ID3D11Device_CreateBuffer(dev, &cbd, NULL, &g_up.cbo);
+    D3D11_RASTERIZER_DESC rd;
+    memset(&rd, 0, sizeof(rd));
+    rd.FillMode = D3D11_FILL_SOLID;
+    rd.CullMode = D3D11_CULL_NONE;
+    rd.DepthClipEnable = TRUE;
+    ID3D11Device_CreateRasterizerState(dev, &rd, &g_up.rs);
+    g_up.motion = g_up_motion_start;
+    g_up.mt = 0.0;
+    g_up.last_t = 0.0;
+    g_up.prevM = 0;
+    g_scene_hud[0] = '\0';
+    return (g_up.vs && g_up.ps && g_up.cbo && g_up.rs) ? 0 : 1;
+}
+
+static void up_frame(ID3D11DeviceContext *ctx, double t, float aspect) {
+    (void)aspect;
+    unsigned char m_now = g_keys['M'] ? 1 : 0;
+    if (m_now && !g_up.prevM) {
+        g_up.motion = !g_up.motion;
+        g_up.mt = 0.0;  // each motion run starts from the static layout
+    }
+    g_up.prevM = m_now;
+    double dt = t - g_up.last_t;
+    g_up.last_t = t;
+    if (g_up.motion && dt > 0.0 && dt < 0.25) g_up.mt += dt;
+
+    D3D11_MAPPED_SUBRESOURCE m;
+    if (SUCCEEDED(ID3D11DeviceContext_Map(ctx, (ID3D11Resource *)g_up.cbo, 0,
+                                          D3D11_MAP_WRITE_DISCARD, 0, &m))) {
+        UpCB *cb = (UpCB *)m.pData;
+        cb->iTime = (float)t;
+        cb->iMT = (float)g_up.mt;
+        // Live back-buffer size (the runner and the shell update g_w/g_h on resize).
+        cb->resx = (float)g_w;
+        cb->resy = (float)g_h;
+        cb->iMotion = g_up.motion ? 1.0f : 0.0f;
+        cb->pad0 = cb->pad1 = cb->pad2 = 0.0f;
+        ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)g_up.cbo, 0);
+    }
+    ID3D11DeviceContext_RSSetState(ctx, g_up.rs);
+    ID3D11DeviceContext_IASetInputLayout(ctx, NULL);
+    ID3D11DeviceContext_IASetPrimitiveTopology(ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ID3D11DeviceContext_VSSetShader(ctx, g_up.vs, NULL, 0);
+    ID3D11DeviceContext_PSSetShader(ctx, g_up.ps, NULL, 0);
+    ID3D11DeviceContext_PSSetConstantBuffers(ctx, 0, 1, &g_up.cbo);
+    ID3D11DeviceContext_Draw(ctx, 3, 0);
+}
+
+static void up_cleanup(void) {
+    if (g_up.rs) ID3D11RasterizerState_Release(g_up.rs);
+    if (g_up.cbo) ID3D11Buffer_Release(g_up.cbo);
+    if (g_up.ps) ID3D11PixelShader_Release(g_up.ps);
+    if (g_up.vs) ID3D11VertexShader_Release(g_up.vs);
+    memset(&g_up, 0, sizeof(g_up));
+    g_scene_hud[0] = '\0';
+}
+
 // ============================== scene registry ==============================
 static const D3D11Scene kScenes[] = {
     {"spin", "D3D11 Cube", spin_init, spin_frame, spin_cleanup},
@@ -4104,6 +4604,8 @@ static const D3D11Scene kScenes[] = {
     {"scaletest_edges", "D3D11 Scaling: Hard Edges", scz_edges_init, scale_frame, scale_cleanup},
     {"freelook", "D3D11 Free Look", freelook_init, freelook_frame, freelook_cleanup},
     {"planet", "D3D11 Planet Fly", planet_init, planet_frame, planet_cleanup},
+    // Keep new scenes at the end: shell_imgui.cpp maps its list rows to these indices.
+    {"upscale", "D3D11 Upscaler Test", up_init, up_frame, up_cleanup},
 };
 
 static const D3D11Scene *pick_scene(const char *name) {
@@ -4201,6 +4703,20 @@ void aio_d3d11_input_reset(void) {
 }
 
 // ================================ the runner ================================
+// Window options for the standalone runner (--width / --height / --fullscreen /
+// --nohud). Defaults keep the original 640x480 framed window with the FPS bar.
+static int g_win_cw = 0, g_win_ch = 0;  // requested client size, 0 = default
+static int g_win_fullscreen = 0;
+static int g_win_hud = 1;
+
+void aio_d3d11_set_window(int client_w, int client_h, int fullscreen) {
+    g_win_cw = client_w > 0 ? client_w : 0;
+    g_win_ch = client_h > 0 ? client_h : 0;
+    g_win_fullscreen = fullscreen ? 1 : 0;
+}
+
+void aio_d3d11_set_hud(int on) { g_win_hud = on ? 1 : 0; }
+
 int aio_run_d3d11_cube(HINSTANCE hinst, const char *scene_name) {
     const D3D11Scene *scene = pick_scene(scene_name);
     const char *api = scene->label;
@@ -4224,8 +4740,30 @@ int aio_run_d3d11_cube(HINSTANCE hinst, const char *scene_name) {
                  api);
     else
         snprintf(wtitle, sizeof(wtitle), "AIO Graphics Test  -  %s", api);
-    HWND hwnd = CreateWindowA(cls, wtitle, WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT,
-                              CW_USEDEFAULT, 640, 480, NULL, NULL, hinst, NULL);
+    DWORD style = WS_OVERLAPPEDWINDOW | WS_VISIBLE, exstyle = 0;
+    int wx = CW_USEDEFAULT, wy = CW_USEDEFAULT, ww = 640, wh = 480;
+    if (g_win_fullscreen) {
+        // Borderless topmost popup over the primary monitor (= the Wine desktop),
+        // the same window state the shell's fullscreen uses.
+        MONITORINFO mi;
+        memset(&mi, 0, sizeof(mi));
+        mi.cbSize = sizeof(mi);
+        POINT origin = {0, 0};
+        if (GetMonitorInfoA(MonitorFromPoint(origin, MONITOR_DEFAULTTOPRIMARY), &mi)) {
+            style = WS_POPUP | WS_VISIBLE;
+            exstyle = WS_EX_TOPMOST;
+            wx = mi.rcMonitor.left;
+            wy = mi.rcMonitor.top;
+            ww = mi.rcMonitor.right - mi.rcMonitor.left;
+            wh = mi.rcMonitor.bottom - mi.rcMonitor.top;
+        }
+    } else if (g_win_cw > 0 || g_win_ch > 0) {
+        RECT wr = {0, 0, g_win_cw > 0 ? g_win_cw : 640, g_win_ch > 0 ? g_win_ch : 480};
+        AdjustWindowRectEx(&wr, WS_OVERLAPPEDWINDOW, FALSE, 0);
+        ww = wr.right - wr.left;
+        wh = wr.bottom - wr.top;
+    }
+    HWND hwnd = CreateWindowExA(exstyle, cls, wtitle, style, wx, wy, ww, wh, NULL, NULL, hinst, NULL);
     if (!hwnd) return 1;
     g_free_hwnd = hwnd;  // for the Free Look scene's cursor-position steering
 
@@ -4345,7 +4883,7 @@ int aio_run_d3d11_cube(HINSTANCE hinst, const char *scene_name) {
         return 1;
     }
 
-    aio_hud_create(hinst);
+    if (g_win_hud) aio_hud_create(hinst);  // without it aio_hud_update is a no-op
     char hud0[96];
     snprintf(hud0, sizeof(hud0), "%s  -  measuring...", api);
     aio_hud_update(hwnd, hud0);

@@ -30,6 +30,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cfloat>
+#include <cctype>
 
 #include "imgui.h"
 #include "backends/imgui_impl_win32.h"
@@ -674,6 +675,7 @@ static const Test kScaling[] = {
     {"Checkerboard", "Direct3D 11", "d3d11 -> DXVK -> Turnip", "FIFO (vsync off)", H_DX11, 3192, false},
     {"Hard Edges", "Direct3D 11", "d3d11 -> DXVK -> Turnip", "FIFO (vsync off)", H_DX11, 3186, false},
     {"Banding Test", "Direct3D 11", "d3d11 -> DXVK -> Turnip", "FIFO (vsync off)", H_DX11, 3180, false},
+    {"Upscaler Test", "Direct3D 11", "d3d11 -> DXVK -> Turnip", "FIFO (vsync off)", H_DX11, 0, false},
 };
 static const Test kTools[] = {
     {"GPU Info", "GPU Info", nullptr, nullptr, H_TOOL, 0, true},
@@ -682,8 +684,11 @@ static const Test kTools[] = {
 };
 // Display tests. "HDR" is the D3D11 HDR10 test card (hdr_scene.cpp): not a
 // kScenes[] entry, because it swaps its own flip-model swapchain in while selected.
+// "Cursor Test" (tools/cursor-test/cursortest.c) needs a plain window of its own, so
+// its pane opens it as a second process of this exe (--cursortest).
 static const Test kDisplay[] = {
     {"HDR", "Direct3D 11", "d3d11 -> DXGI HDR10 -> DXVK", "Flip discard (vsync)", H_DX11, 0, false},
+    {"Cursor Test", "Cursor Test", nullptr, nullptr, H_TOOL, 0, true},
 };
 static const Group kGroups[] = {
     {"Graphics Backends", kBackends, (int)(sizeof(kBackends) / sizeof(kBackends[0]))},
@@ -705,6 +710,30 @@ static const Test *g_sel = &kBackends[3];  // Direct3D 11 preselected (matches m
 static const char *g_sel_group = "Graphics Backends";
 
 static bool is_hdr_test(const Test *t) { return t == &kDisplay[0]; }
+
+// A list entry by name for --open: case, spaces and punctuation are ignored, so
+// "Disk Speed", "disk-speed" and "diskspeed" all match. First match wins.
+static void norm_test_name(const char *in, char *out, size_t cap) {
+    size_t n = 0;
+    for (; *in && n + 1 < cap; ++in)
+        if (isalnum((unsigned char)*in)) out[n++] = (char)tolower((unsigned char)*in);
+    out[n] = 0;
+}
+static bool find_test_by_name(const char *name, const Test **t_out, const char **group_out) {
+    char want[96], have[96];
+    norm_test_name(name, want, sizeof(want));
+    if (!want[0]) return false;
+    for (int g = 0; g < kGroupCount; ++g)
+        for (int i = 0; i < kGroups[g].n; ++i) {
+            norm_test_name(kGroups[g].items[i].name, have, sizeof(have));
+            if (strcmp(want, have) == 0) {
+                *t_out = &kGroups[g].items[i];
+                *group_out = kGroups[g].name;
+                return true;
+            }
+        }
+    return false;
+}
 
 // ===========================================================================
 // Phase 2: embed the DX11 scene family (cube_d3d11.c kScenes[]) in the viewport.
@@ -1030,8 +1059,8 @@ static int cube_scene_for(const Test *t, const char *group, int *draws_out) {
     static const int dx11_draws[14] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 256, 512, 1024, 2048};
     // Showcase Demos (14 rows).
     static const int demo_map[14] = {28, 29, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 17, 18};
-    // Scaling Tests (7 rows).
-    static const int scale_map[7] = {22, 23, 24, 25, 26, 27, 21};
+    // Scaling Tests (8 rows).
+    static const int scale_map[8] = {22, 23, 24, 25, 26, 27, 21, 30};
     if (grp->items == kScenes) { *draws_out = dx11_draws[li]; return dx11_map[li]; }
     if (grp->items == kDemos) return demo_map[li];
     if (grp->items == kScaling) return scale_map[li];
@@ -2604,10 +2633,53 @@ static void draw_disk_pane(ImVec2 o, float w, float h) {
     ImGui::EndChild();
 }
 
+// Cursor Test: opens the colour-cursor test window as a second process of this exe.
+static char g_cursor_msg[96] = "";
+
+static void launch_cursor_test() {
+    char exe[MAX_PATH];
+    if (!GetModuleFileNameA(nullptr, exe, MAX_PATH)) return;
+    char cmd[MAX_PATH + 32];
+    snprintf(cmd, sizeof(cmd), "\"%s\" --cursortest", exe);
+    STARTUPINFOA si;
+    ZeroMemory(&si, sizeof(si));
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi;
+    ZeroMemory(&pi, sizeof(pi));
+    // The fullscreen shell is topmost and would cover the new window.
+    g_fullscreen = false;
+    if (CreateProcessA(nullptr, cmd, nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        snprintf(g_cursor_msg, sizeof(g_cursor_msg), "Opened. Esc in the cursor test window closes it.");
+        aio_diag_log("cursor test: started --cursortest");
+    } else {
+        snprintf(g_cursor_msg, sizeof(g_cursor_msg), "Could not start it (error %lu).", GetLastError());
+    }
+}
+
+static void draw_cursor_pane(ImVec2 o, float w, float h) {
+    ImGui::SetCursorScreenPos(o);
+    ImGui::BeginChild("##cursorpane", ImVec2(w, h), false, ImGuiWindowFlags_NoBackground);
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    ImVec2 base = ImGui::GetCursorScreenPos();
+    float x0 = base.x + 20.0f, y0 = base.y + 14.0f;
+    dp_header(dl, ImVec2(x0, y0), "Cursor test");
+    if (screen_button("##curopen", ImVec2(x0, y0 + 22.0f), ImVec2(150, 26), "Open Cursor Test", true))
+        launch_cursor_test();
+    text_at(dl, g_mono_sm, 11.0f, ImVec2(x0, y0 + 62.0f), PAL.scrMuted,
+            "Colour cursors, in a window of its own: hover each tile.");
+    text_at(dl, g_mono_sm, 11.0f, ImVec2(x0, y0 + 80.0f), PAL.scrMuted, "Command line: --cursortest");
+    if (g_cursor_msg[0]) text_at(dl, g_mono_sm, 11.0f, ImVec2(x0, y0 + 104.0f), PAL.scrText, g_cursor_msg);
+    ImGui::Dummy(ImVec2(w - 40.0f, 130.0f));
+    ImGui::EndChild();
+}
+
 static void draw_tool_pane(ImVec2 o, float w, float h) {
     if (strcmp(g_sel->name, "GPU Info") == 0) draw_gpu_pane(o, w, h);
     else if (strcmp(g_sel->name, "Benchmark") == 0) draw_bench_pane(o, w, h);
     else if (strcmp(g_sel->name, "Disk Speed") == 0) draw_disk_pane(o, w, h);
+    else if (strcmp(g_sel->name, "Cursor Test") == 0) draw_cursor_pane(o, w, h);
 }
 
 // Compact progress overlay drawn OVER the live bench render in the viewport while a
@@ -3187,6 +3259,30 @@ extern "C" int aio_run_imgui_shell(HINSTANCE hInstance) {
         g_sel = &kDisplay[0];
         g_sel_group = "Display Tests";
     }
+    // --open <name> (or --open=<name>, quotes for names with spaces): open on any list
+    // entry, e.g. --open "Disk Speed", --open disk-speed, --open zone-plate.
+    if (cl && strstr(cl, "--open") != nullptr) {
+        const char *oa = strstr(cl, "--open") + 6;
+        while (*oa == ' ' || *oa == '=') ++oa;
+        char want[96] = "";
+        size_t len = (*oa == '"') ? strcspn(++oa, "\"") : strcspn(oa, " \t");
+        if (len >= sizeof(want)) len = sizeof(want) - 1;
+        memcpy(want, oa, len);
+        want[len] = 0;
+        const Test *t = nullptr;
+        const char *grp = nullptr;
+        char m[160];
+        if (find_test_by_name(want, &t, &grp) && !(is_hdr_test(t) && g_host != HOST_D3D11)) {
+            g_sel = t;
+            g_sel_group = grp;
+            snprintf(m, sizeof(m), "--open: %s / %s", grp, t->name);
+        } else {
+            snprintf(m, sizeof(m), "--open: no usable test named '%s'", want);
+        }
+        aio_diag_log(m);
+    }
+    // --fullscreen: start in the true fullscreen (same as the corner button / F11).
+    if (cl && strstr(cl, "--fullscreen") != nullptr) g_fullscreen = true;
     // --sweep <sec> (or --sweep=<sec>): an unattended benchmark of the eight Graphics
     // Backends, <sec> seconds each (default 15), in true fullscreen and uncapped. It is
     // reported to AIO Results\Benchmark\ like any sweep (plus a fixed "latest" copy),
@@ -3471,6 +3567,21 @@ extern "C" int aio_run_imgui_shell(HINSTANCE hInstance) {
                     if (io.MouseWheel != 0.0f) aio_d3d11_input_wheel(io.MouseWheel);
                 } else {
                     aio_d3d11_input_reset();  // pointer left the viewport: release keys
+                }
+            }
+            // Scaling cards (21-27) and the upscaler chart (30): their toggle keys (C/K/A
+            // cards, D/M banding, M motion), only while the pointer is over the viewport.
+            bool cards = ((cur_sc >= 21 && cur_sc <= 27) || cur_sc == 30) && g_scene_live && g_bench_ip_row < 0;
+            if (cards) {
+                ImVec2 vmin = view_o, vmax(view_o.x + rvW, view_o.y + rvH);
+                if (ImGui::IsMouseHoveringRect(vmin, vmax, false)) {
+                    static const struct { ImGuiKey k; int vk; } ck[] = {
+                        {ImGuiKey_C, 'C'}, {ImGuiKey_K, 'K'}, {ImGuiKey_A, 'A'}, {ImGuiKey_D, 'D'}, {ImGuiKey_M, 'M'},
+                    };
+                    for (int i = 0; i < (int)(sizeof(ck) / sizeof(ck[0])); ++i)
+                        aio_d3d11_input_key(ck[i].vk, ImGui::IsKeyDown(ck[i].k) ? 1 : 0);
+                } else {
+                    aio_d3d11_input_reset();
                 }
             }
         }

@@ -75,6 +75,11 @@ jobs:
               -mno-avx -mno-avx2 \
               -O2 -o $f.o
           done
+          # Cursor test (tools/cursor-test), built into the main exe for --cursortest.
+          ${{ matrix.prefix }}-gcc -c tools/cursor-test/cursortest.c \
+            -DAIO_CURSORTEST_EMBED -D_WIN32_WINNT=0x0A00 \
+            -mno-avx -mno-avx2 \
+            -O2 -o cursortest.o
 
       - name: Fetch + compile Dear ImGui shell (C++ / DX11)
         run: |
@@ -150,13 +155,13 @@ jobs:
           # Win32 backend.
           ${{ matrix.prefix }}-g++ \
             cube.o gpuinfo.o menu.o bench.o hud.o disk.o cube_gl.o cube_d3d11.o cube_d3d12.o \
-            cube_d3d10.o cube_d3d9.o cube_d3d8.o cube_ddraw.o watchdog.o app_res.o \
+            cube_d3d10.o cube_d3d9.o cube_d3d8.o cube_ddraw.o watchdog.o cursortest.o app_res.o \
             imgui.o imgui_draw.o imgui_tables.o imgui_widgets.o \
             imgui_impl_dx11.o imgui_impl_opengl3.o imgui_impl_win32.o shell_imgui.o hdr_scene.o \
             -mwindows \
             -L vk/lib \
             -o ${{ matrix.out }} \
-            -lvulkan-1 -lgdi32 -luser32 -lopengl32 -lcomctl32 -ldxguid -limm32 -ldwmapi \
+            -lvulkan-1 -lgdi32 -luser32 -lopengl32 -lcomctl32 -ldxguid -limm32 -ldwmapi -lmsimg32 \
             -static-libstdc++ -static-libgcc
           file ${{ matrix.out }}
 
