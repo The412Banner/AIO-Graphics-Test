@@ -1,4 +1,62 @@
 
+## 2026-11-24 — Upscaler Test chart, a launch command for every test, Cursor Test in the main exe (feat/upscaler-test-scene, not merged, no release)
+- Why: Bannerlator's compositor runs spatial upscalers (SGSR, SGSR HQ, FSR 1 EASU+RCAS, NIS, Sharpen/RCAS,
+  AMD CAS) over the whole Wine desktop when a game renders below the panel resolution; we need test content
+  that makes them comparable. User 16:40 EST: every test as an option with a launch command like the cube
+  tests, in one 32/64-bit exe pair; 16:44 EST: all of them as entries in the app's right-side list.
+- Checked first (main 0f71730): the Scaling Tests (Combo Card, Zone Plate, Resolution Wedge, Lines &
+  Diagonals, Checkerboard, Hard Edges, Banding) are cube_d3d11.c kScenes entries (`scaletest_*`, `banding`)
+  and already ran standalone with `--cube dx11 --scene <name>`, `--bench` / `--autoclose` included; they were
+  only missing from the README. The 3180-3200 next to them in the list are fixed fps hints in
+  shell_imgui.cpp, not measurements. `--hdr` already opened the app on the HDR card. Combo Card has a zone
+  plate, a 1 px grid with 3 diagonals, 1/2 px checkers and a wedge, but no line fan, 4 px checker, text,
+  colour edges, ramps or noise, so a new chart was added.
+- Built (commit 71832cb):
+  - `--cube dx11 --scene upscale` (D3D11 Upscaler Test): one static chart, layout in device pixels: 1 px
+    line fan (37 rays, 0-180 deg in 5 deg steps), zone plate (Nyquist at the corners), Siemens star (48
+    cycles), 1/2/4 px checkers, 5x7 bitmap text (1 px strokes; white on black, black on white, double size,
+    yellow on blue, low contrast; a 2x copy when the tile is tall enough), line pairs (V/H/45 deg, periods
+    2/3/4/6), hard grey edges + 8-step wedge, six saturated colour pairs (slanted edge + 2 px stripes), ramps
+    (grey, dark 0-32, R, G, B, hue, dark hue), soft value noise + 1 px grain. Header: title, render size,
+    STATIC/MOTION; 1 px white frame on the outer pixels. Output depends only on pixel position and
+    back-buffer size. M or `--motion`: slow pan/zoom below the header (nearest-neighbour resample). Font and
+    strings are generated into the HLSL source at init. Appended LAST in kScenes (index 30) because the
+    shell maps its rows to kScenes indices.
+  - D3D11 runner: `--width W --height H` (client size, AdjustWindowRectEx), `--fullscreen` (WS_POPUP +
+    WS_EX_TOPMOST at the primary monitor rect), `--nohud`. No flags = the same CreateWindow 640x480 frame as
+    before. Swapchain size comes from GetClientRect as before; the WM_SIZE resize path is unchanged.
+  - Cursor test: cursortest.c body moved into cursortest_main(); `-DAIO_CURSORTEST_EMBED` builds it into
+    both main exes as aio_run_cursortest() (`--cursortest`), without it it is still CursorTest.exe.
+    build-windows.yml compiles it and links -lmsimg32 (new static import MSIMG32.dll, a Wine builtin).
+    build-cursor-test.yml and the CursorTest artifact are unchanged.
+  - App list: Scaling Tests + "Upscaler Test" (scale_map -> 30), Display Tests + "Cursor Test" (tool pane
+    with an "Open Cursor Test" button that starts `--cursortest` as a second process; leaves fullscreen
+    first because the fullscreen shell is topmost). Keys C/K/A/D/M reach the scaling cards and the chart
+    while the pointer is over the viewport (before, only Free Look / Planet Fly got keys). New app flags:
+    `--open <name>` (any list entry; case, spaces and punctuation ignored, e.g. `--open disk-speed`) and
+    `--fullscreen`. List count 47 -> 49.
+  - Classic menu (`--classic`): Upscaler Test on its Scaling Tests page. HDR / Cursor Test not added there.
+  - README: Scaling Tests + chart regions, Cursor Test, new flags, a "Launch command for every test" table.
+- Local checks (no Wine / fxc / mingw g++ here): the generated HLSL compiles in glslang's HLSL front end
+  (fxc not run); a Python port of the pixel shader rendered 640x480, 1280x720, 1920x1080 and a motion frame
+  as intended; cube.c, cube_d3d11.c, menu.c and cursortest.c (both variants) cross-compile with x86_64
+  mingw gcc; shell_imgui.cpp passes a clang syntax-only check with stub C++ headers.
+- CI: build-windows run 45496003919 (workflow_dispatch, headSha 71832cb), jobs build-i686 + build-x86_64
+  success; only the pre-existing warnings (cube.c pointer casts, WIN32_LEAN_AND_MEAN redefinitions).
+  build-cursor-test run 45495973565 (push) success.
+- Artifacts (zip sha256 == artifact digest): AIO-Graphics-Test-windows-64bit (14969245760) exe sha256
+  c332fd8fb930e9ba804d740d238b5dc1f38b6f2c4422bac07d4dd70c67cd9592; AIO-Graphics-Test-windows-32bit
+  (14969385599) exe sha256 7caa0316179ca19012e09d567540d99837ba3eb44f172adb54124b631792560c. Staged in
+  /sdcard/Download/AIO-upscaletest/ (+ SHA256SUMS.txt), hashes re-checked there.
+- Device test: NOT device-tested.
+- Open / Next: device run by the main session: chart shader compiles under the container's d3dcompiler
+  (fxc rules differ from glslang), static frames identical with `--fullscreen --nohud`, M / `--motion`,
+  `--width/--height`, default window unchanged, `--bench 15 --autoclose 5` on `upscale` and a scaletest card,
+  Cursor Test from the app and `--cursortest` (both bitnesses), `--open`, app `--fullscreen`. Then the user
+  decides merge + release (no version bump / notes / tag done). CursorTest.exe workflow kept until then.
+- Resume point: branch feat/upscaler-test-scene @ 71832cb (worktree /root/src/AIO-wt/upscaler-test-scene);
+  exes in /sdcard/Download/AIO-upscaletest/; nothing installed or running.
+
 ## 2026-08-05 — Phase 3 — Tool datapanes + interactive input + real HUD throughput
 Why: Phase 2 embedded the live DX11 viewport. Phase 3 finishes the remaining app
 surfaces so the single-window shell replaces the classic menus for the Tools, the
