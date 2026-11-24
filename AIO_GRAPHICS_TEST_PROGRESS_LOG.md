@@ -41,6 +41,10 @@
   the embed change in cursortest.c is only WinMain -> cursortest_main, so the cause is open: AIO main-exe setup vs a BL
   Wayland cursor path issue. A/B shortcut made: "AIO Cursor Test - Wayland OLD 2.2.0" -> C:\AIO Graphics Test 2.2.0\CursorTest.exe
   (baked in the container, sha256 56a6cac4... = 2.2.0 asset). Waiting for the user's run of it + the two X11 shortcuts.
+- 18:3x EST user: "it's the same on wayland old, works correctly on x11. we need to make it work on Wayland please" -> the
+  2.2.0 CursorTest.exe shows the same plain arrow on Wayland; X11 correct (incl. the X11 SGSR HQ path). AIO's embedded Cursor
+  Test is NOT the cause; the gap is Bannerlator's Wayland cursor path -> fix in Bannerlator (separate branch). AIO 2.3.0-pre1
+  can go out once the user OKs it (Wayland cursor = Bannerlator issue, noted).
 - Resume point: results in /sdcard/Download/perf-harness/results/aiofunc-1124/run.log; if interrupted: rm the temp shortcut
   (.../Desktop/ZZ AIO new.desktop), bring Termux back.
 
