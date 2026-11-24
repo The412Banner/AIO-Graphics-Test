@@ -35,6 +35,12 @@
   execArgs --cursortest, copies of AIO.desktop): "AIO Cursor Test - X11" (renderer vulkan, displayBackend x11), "AIO Cursor
   Test - X11 SGSR HQ" (same + scalingMode 8 = the Bannerlator cursor-after-upscale path from feat/upscaler-refresh), "AIO
   Cursor Test - Wayland" (renderer opengl as AIO.desktop, displayBackend wayland). Remove them after the test. User launches.
+- 18:20 EST user's Wayland screenshots (6, 18:13:15-18:13:30, "AIO Cursor Test - Wayland", 64-bit 48f032ac): the pointer is the
+  SAME plain arrow on all 6 tiles (zoomed crops identical), incl. tile 6 (should be hidden); GDI strip correct. BL's Wayland
+  compositor does take guest cursors (compositor.c pointer_set_cursor + cursor_publish_shm -> app overlay, hide on NULL), and
+  the embed change in cursortest.c is only WinMain -> cursortest_main, so the cause is open: AIO main-exe setup vs a BL
+  Wayland cursor path issue. A/B shortcut made: "AIO Cursor Test - Wayland OLD 2.2.0" -> C:\AIO Graphics Test 2.2.0\CursorTest.exe
+  (baked in the container, sha256 56a6cac4... = 2.2.0 asset). Waiting for the user's run of it + the two X11 shortcuts.
 - Resume point: results in /sdcard/Download/perf-harness/results/aiofunc-1124/run.log; if interrupted: rm the temp shortcut
   (.../Desktop/ZZ AIO new.desktop), bring Termux back.
 
