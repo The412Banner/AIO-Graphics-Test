@@ -58,7 +58,9 @@ void aio_bench_show_result(const char *text) {
     HANDLE th = NULL;
     if (aio_autoclose_sec > 0)
         th = CreateThread(NULL, 0, aio_box_closer, (LPVOID)(INT_PTR)aio_autoclose_sec, 0, NULL);
-    MessageBoxA(NULL, text, AIO_BENCH_TITLE, MB_OK | MB_ICONINFORMATION);
+    // Topmost: a --fullscreen D3D11 window is WS_EX_TOPMOST and would cover an
+    // ownerless box (the result was saved, but the box was not visible).
+    MessageBoxA(NULL, text, AIO_BENCH_TITLE, MB_OK | MB_ICONINFORMATION | MB_TOPMOST | MB_SETFOREGROUND);
     if (th) CloseHandle(th);
 }
 
