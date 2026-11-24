@@ -1,3 +1,15 @@
+## 2026-11-24 17:05 EST — Device test of 71832cb on the Pocket FIT, then 2.3.0-pre1 (feat/upscaler-test-scene, IN PROGRESS)
+- User 16:52 EST: "merge nis to main, aio as pre-release first" -> publish a PRE-release (not Latest) after the device test.
+  release.yml always passes --latest, so the pre-release is made with `gh release create --prerelease --target <full sha>`
+  from the CI-built exes (build-windows 45496003919: 64-bit c332fd8f..., 32-bit 7caa0316..., hashes checked on the device).
+- Device test (Bannerlator 09f3d8b0 = main code, container 1 Wayland, temporary shortcut "ZZ AIO new" = copy of the user's
+  AIO.desktop pointing at E:\Winlator\games\AIO-upscaletest; the user's AIO-2.2.0 folder untouched):
+  harness /sdcard/Download/perf-harness/aio-func.sh, tag aiofunc-1124: upscale static (2 shots 3 s apart) / bench / motion /
+  --width --height, scaletest_combo bench, --cursortest 64 + 32, upscale bench 32-bit, --open upscaler-test, --open
+  cursor-test, city bench (default 640x480 window), --hdr, app --fullscreen.
+- Resume point: results in /sdcard/Download/perf-harness/results/aiofunc-1124/run.log; if interrupted: rm the temp shortcut
+  (.../Desktop/ZZ AIO new.desktop), bring Termux back.
+
 
 ## 2026-11-24 — Upscaler Test chart, a launch command for every test, Cursor Test in the main exe (feat/upscaler-test-scene, not merged, no release)
 - Why: Bannerlator's compositor runs spatial upscalers (SGSR, SGSR HQ, FSR 1 EASU+RCAS, NIS, Sharpen/RCAS,
