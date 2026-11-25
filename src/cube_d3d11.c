@@ -44,6 +44,12 @@ static int g_quit;
 // image, squashing the aspect ratio (e.g. the Space planet goes oval).
 static volatile int g_resize_pending = 0;
 static int g_resize_w = 0, g_resize_h = 0;
+// Windows runs its own modal loop while the window is sized or moved, so the render
+// loop below stops until the mouse is released. This timer draws frames meanwhile
+// (WM_ENTERSIZEMOVE .. WM_EXITSIZEMOVE), so the picture follows the new size live
+// instead of leaving the new area unpainted.
+#define AIO_SIZEMOVE_TIMER 0xA10
+static void d3d11_live_frame(void);
 
 // ---- Free Look interactive camera (only the "freelook" scene reads these) ---
 // The single wndproc serves every scene, so all camera input is gated behind
@@ -114,6 +120,18 @@ static LRESULT CALLBACK d3d11_wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
                 }
             }
             return 0;
+        case WM_ENTERSIZEMOVE:
+            SetTimer(h, AIO_SIZEMOVE_TIMER, USER_TIMER_MINIMUM, NULL);
+            return 0;
+        case WM_EXITSIZEMOVE:
+            KillTimer(h, AIO_SIZEMOVE_TIMER);
+            return 0;
+        case WM_TIMER:
+            if (w == AIO_SIZEMOVE_TIMER) {
+                d3d11_live_frame();
+                return 0;
+            }
+            break;
         case WM_CLOSE:
             g_quit = 1;
             PostQuitMessage(0);
@@ -4717,6 +4735,74 @@ void aio_d3d11_set_window(int client_w, int client_h, int fullscreen) {
 
 void aio_d3d11_set_hud(int on) { g_win_hud = on ? 1 : 0; }
 
+// What one frame needs; shared by the render loop and the size/move timer.
+typedef struct {
+    ID3D11Device *dev;
+    ID3D11DeviceContext *ctx;
+    IDXGISwapChain *swap;
+    ID3D11RenderTargetView **rtv;
+    ID3D11Texture2D **backbuf;
+    ID3D11DepthStencilView **dsv;
+    ID3D11Texture2D **depth_tex;
+    D3D11_TEXTURE2D_DESC *dd;
+    D3D11_VIEWPORT *vp;
+    const D3D11Scene *scene;
+    const float *clear;
+    float *aspect;
+    LARGE_INTEGER start, qpf;
+    uint64_t *frames;
+} D3D11Frame;
+static D3D11Frame *g_live;  // set while aio_run_d3d11_cube's loop runs
+
+// Apply a pending window resize, then draw and present one frame. Returns the scene time.
+static double d3d11_frame(D3D11Frame *f, LARGE_INTEGER *now_out) {
+    ID3D11DeviceContext *ctx = f->ctx;
+    // Apply a pending window resize: resize the swapchain + recreate RTV/DSV +
+    // viewport, and refresh the aspect ratio (so circles stay round, not oval).
+    if (g_resize_pending) {
+        g_resize_pending = 0;
+        int nw = g_resize_w, nh = g_resize_h;
+        if (nw > 0 && nh > 0 && (nw != g_w || nh != g_h)) {
+            ID3D11DeviceContext_OMSetRenderTargets(ctx, 0, NULL, NULL);
+            if (*f->rtv) { ID3D11RenderTargetView_Release(*f->rtv); *f->rtv = NULL; }
+            if (*f->backbuf) { ID3D11Texture2D_Release(*f->backbuf); *f->backbuf = NULL; }
+            if (*f->dsv) { ID3D11DepthStencilView_Release(*f->dsv); *f->dsv = NULL; }
+            if (*f->depth_tex) { ID3D11Texture2D_Release(*f->depth_tex); *f->depth_tex = NULL; }
+            if (SUCCEEDED(IDXGISwapChain_ResizeBuffers(f->swap, 0, nw, nh, DXGI_FORMAT_UNKNOWN, 0))) {
+                g_w = nw;
+                g_h = nh;
+                IDXGISwapChain_GetBuffer(f->swap, 0, &IID_ID3D11Texture2D, (void **)f->backbuf);
+                ID3D11Device_CreateRenderTargetView(f->dev, (ID3D11Resource *)*f->backbuf, NULL, f->rtv);
+                f->dd->Width = g_w;
+                f->dd->Height = g_h;
+                ID3D11Device_CreateTexture2D(f->dev, f->dd, NULL, f->depth_tex);
+                ID3D11Device_CreateDepthStencilView(f->dev, (ID3D11Resource *)*f->depth_tex, NULL, f->dsv);
+                ID3D11DeviceContext_OMSetRenderTargets(ctx, 1, f->rtv, *f->dsv);
+                f->vp->Width = (float)g_w;
+                f->vp->Height = (float)g_h;
+                ID3D11DeviceContext_RSSetViewports(ctx, 1, f->vp);
+                *f->aspect = (g_h > 0) ? (float)g_w / (float)g_h : 1.0f;
+            }
+        }
+    }
+
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    double t = (double)(now.QuadPart - f->start.QuadPart) / (double)f->qpf.QuadPart;
+
+    ID3D11DeviceContext_ClearRenderTargetView(ctx, *f->rtv, f->clear);
+    ID3D11DeviceContext_ClearDepthStencilView(ctx, *f->dsv, D3D11_CLEAR_DEPTH, 1.0f, 0);
+    f->scene->frame(ctx, t, *f->aspect);
+    IDXGISwapChain_Present(f->swap, aio_vsync ? 1 : 0, 0);
+    (*f->frames)++;
+    if (now_out) *now_out = now;
+    return t;
+}
+
+static void d3d11_live_frame(void) {
+    if (g_live) d3d11_frame(g_live, NULL);
+}
+
 int aio_run_d3d11_cube(HINSTANCE hinst, const char *scene_name) {
     const D3D11Scene *scene = pick_scene(scene_name);
     const char *api = scene->label;
@@ -4728,6 +4814,8 @@ int aio_run_d3d11_cube(HINSTANCE hinst, const char *scene_name) {
     wc.lpfnWndProc = d3d11_wndproc;
     wc.hInstance = hinst;
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    // Black, not undefined pixels, where the window grows before the next frame.
+    wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
     wc.hIcon = LoadIconA(hinst, MAKEINTRESOURCEA(1));
     wc.lpszClassName = cls;
     RegisterClassA(&wc);
@@ -4899,6 +4987,10 @@ int aio_run_d3d11_cube(HINSTANCE hinst, const char *scene_name) {
     const float clear[4] = {0.10f, 0.10f, 0.12f, 1.0f};
     float aspect = (g_h > 0) ? (float)g_w / (float)g_h : 1.0f;
 
+    D3D11Frame fr = {dev, ctx, swap, &rtv, &backbuf, &dsv, &depth_tex, &dd, &vp,
+                     scene, clear, &aspect, start, qpf, &frames};
+    g_live = &fr;
+
     MSG msg;
     aio_watchdog_start(&frames, 12);
     g_quit = 0;
@@ -4913,44 +5005,8 @@ int aio_run_d3d11_cube(HINSTANCE hinst, const char *scene_name) {
         }
         if (g_quit) break;
 
-        // Apply a pending window resize: resize the swapchain + recreate RTV/DSV +
-        // viewport, and refresh the aspect ratio (so circles stay round, not oval).
-        if (g_resize_pending) {
-            g_resize_pending = 0;
-            int nw = g_resize_w, nh = g_resize_h;
-            if (nw > 0 && nh > 0 && (nw != g_w || nh != g_h)) {
-                ID3D11DeviceContext_OMSetRenderTargets(ctx, 0, NULL, NULL);
-                if (rtv) { ID3D11RenderTargetView_Release(rtv); rtv = NULL; }
-                if (backbuf) { ID3D11Texture2D_Release(backbuf); backbuf = NULL; }
-                if (dsv) { ID3D11DepthStencilView_Release(dsv); dsv = NULL; }
-                if (depth_tex) { ID3D11Texture2D_Release(depth_tex); depth_tex = NULL; }
-                if (SUCCEEDED(IDXGISwapChain_ResizeBuffers(swap, 0, nw, nh, DXGI_FORMAT_UNKNOWN, 0))) {
-                    g_w = nw;
-                    g_h = nh;
-                    IDXGISwapChain_GetBuffer(swap, 0, &IID_ID3D11Texture2D, (void **)&backbuf);
-                    ID3D11Device_CreateRenderTargetView(dev, (ID3D11Resource *)backbuf, NULL, &rtv);
-                    dd.Width = g_w;
-                    dd.Height = g_h;
-                    ID3D11Device_CreateTexture2D(dev, &dd, NULL, &depth_tex);
-                    ID3D11Device_CreateDepthStencilView(dev, (ID3D11Resource *)depth_tex, NULL, &dsv);
-                    ID3D11DeviceContext_OMSetRenderTargets(ctx, 1, &rtv, dsv);
-                    vp.Width = (float)g_w;
-                    vp.Height = (float)g_h;
-                    ID3D11DeviceContext_RSSetViewports(ctx, 1, &vp);
-                    aspect = (g_h > 0) ? (float)g_w / (float)g_h : 1.0f;
-                }
-            }
-        }
-
         LARGE_INTEGER now;
-        QueryPerformanceCounter(&now);
-        double t = (double)(now.QuadPart - start.QuadPart) / (double)qpf.QuadPart;
-
-        ID3D11DeviceContext_ClearRenderTargetView(ctx, rtv, clear);
-        ID3D11DeviceContext_ClearDepthStencilView(ctx, dsv, D3D11_CLEAR_DEPTH, 1.0f, 0);
-        scene->frame(ctx, t, aspect);
-        IDXGISwapChain_Present(swap, aio_vsync ? 1 : 0, 0);
-        frames++;
+        double t = d3d11_frame(&fr, &now);
 
         if (bench_on) {
             double dt_ms = (double)(now.QuadPart - prev.QuadPart) * 1000.0 / (double)qpf.QuadPart;
@@ -4979,6 +5035,7 @@ int aio_run_d3d11_cube(HINSTANCE hinst, const char *scene_name) {
         }
     }
 
+    g_live = NULL;
     aio_watchdog_stop();
 
     if (bench_on) {
