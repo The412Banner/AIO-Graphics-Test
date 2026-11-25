@@ -9,6 +9,16 @@
   points at E:\Winlator\games\AIO-2.2.0 (2.2.0 exe). Both left for the user to decide.
 - Branch feat/upscaler-test-scene kept (== main); delete only on the user's word.
 
+## 2026-11-24 — v2.3.1 RELEASED (stable, Latest; tag 2.3.1 -> 50ec41e4)
+- User 22:2x EST: "yes release 2.3.1 as latest and bake it in".
+- Release cut 50ec41e4 on main (AIO_VERSION v2.3.1, README line, docs/releases/2.3.1.md; backup
+  refs/backup/20261124/main-before-2.3.1 = 0dd736d8). Build 45539129847 GREEN (x86_64 + i686, headSha == 50ec41e4).
+- Tag 2.3.1 (lightweight, like 2.3.0) -> 50ec41e4484d44eb5c05969396c1091c1bd9a1b3; release.yml run 45539328450 GREEN.
+- Verified: release "AIO Graphics Test v2.3.1 — DX11 windows keep drawing while resized", not prerelease, Latest = 2.3.1;
+  assets sha256 == CI build: 64-bit 7f005809, 32-bit 926b9fd2, CursorTest b0ee6280; exe reports v2.3.1.
+- Contents vs 2.3.0: only the D3D11 resize redraw fix (7197b132) + version/notes. Next: bake 2.3.1 into Bannerlator's
+  container pattern (coordinating with the BL bake branch feat/bake-aio-2.3.0).
+
 ## 2026-11-24 — D3D11 scenes keep drawing while the window is sized/moved (MERGED main 7197b132, device-proven)
 - Why: user report (Bannerlator Wayland): while dragging the D3D11 cube window's edge the new area showed stripes and the
   picture kept its old size until release (Windows' modal size loop stops the render loop; class had no background brush).
