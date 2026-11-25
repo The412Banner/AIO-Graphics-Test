@@ -9,6 +9,17 @@
   points at E:\Winlator\games\AIO-2.2.0 (2.2.0 exe). Both left for the user to decide.
 - Branch feat/upscaler-test-scene kept (== main); delete only on the user's word.
 
+## 2026-11-24 — D3D11 scenes keep drawing while the window is sized/moved (MERGED main 7197b132, device-proven)
+- Why: user report (Bannerlator Wayland): while dragging the D3D11 cube window's edge the new area showed stripes and the
+  picture kept its old size until release (Windows' modal size loop stops the render loop; class had no background brush).
+- Built: fix/resize-redraw 5c332930 (frame function shared by the render loop and a WM_ENTERSIZEMOVE..WM_EXITSIZEMOVE
+  timer, USER_TIMER_MINIMUM; black class brush). CI 45531899038 green (i686 + x86_64); compiled locally with CI flags.
+- Device test: Pocket FIT, Bannerlator Wayland, real held-button edge drags (test uinput mouse): cube redrawn live at the
+  new size at ~100 fps during the drag, no stripes; ~2500 fps after release (results
+  /sdcard/Download/perf-harness/results/wlcursor6-9-1124). Other APIs' windows (GL, D3D9/10/12, Vulkan...) unchanged.
+- Merged 21:57 EST on the user's word: --no-ff 7197b132 (backup refs/backup/20261124/main-before-resize-redraw), main build
+  45536472395. No release (2.3.1 = user word).
+
 ## 2026-11-24 20:05 EST — 2.3.0 STABLE release cut (feat/upscaler-test-scene)
 - User 20:0x EST: "yes do the check and publish a new stable" -> stable 2.3.0 (plain tag, Latest) instead of 2.3.0-pre1.
   The cursor hold is cleared: X11 correct; the Wayland single-arrow is Bannerlator/Wine (2.2.0 CursorTest.exe same),
