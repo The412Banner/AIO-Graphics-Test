@@ -1,4 +1,4 @@
-## 2026-11-24 20:05 EST — 2.3.0 STABLE release cut (feat/upscaler-test-scene, in progress)
+## 2026-11-24 20:05 EST — 2.3.0 STABLE release cut (feat/upscaler-test-scene)
 - User 20:0x EST: "yes do the check and publish a new stable" -> stable 2.3.0 (plain tag, Latest) instead of 2.3.0-pre1.
   The cursor hold is cleared: X11 correct; the Wayland single-arrow is Bannerlator/Wine (2.2.0 CursorTest.exe same),
   fixed on Bannerlator fix/wayland-desktop-cursor + Wine staging/*/wayland-cursor (user hand test passed 19:58 EST,
@@ -12,6 +12,16 @@
   -> release.yml (tag 2.3.0, notes docs/releases/2.3.0.md, run_id 45523279993) -> verify tag/assets/Latest.
 - Resume point: if the session dies mid-check: rm the FIT temp shortcut ".../Desktop/ZZ AIO new.desktop", run
   `rootsh "sh /sdcard/Download/perf-harness/fan-restore.sh"`, bring Termux back, read results/aio230-1124/run.log.
+- 20:08 EST CI 45523279993 GREEN (build-i686 + build-x86_64; warnings only the usual pointer-cast / WIN32_LEAN_AND_MEAN).
+  Exes: 64-bit 31e43ea3..., 32-bit 498d9a8c..., CursorTest 8e076d80... (both AIO exes contain "v2.3.0"); staged
+  /sdcard/Download/AIO-upscaletest/2.3.0-68cdcf81/ + SHA256SUMS.txt, copied to Winlator/games/AIO-upscaletest (hashes
+  checked on the device).
+- 20:09 EST DEVICE CHECK PASSED (tag aio230-1124, Pocket FIT, Bannerlator a915ce79 = fix/wayland-desktop-cursor test build,
+  apk sha 7f121d06, container 1 Wayland, DD 12.8 v17 layer with a TEST winewayland.so c3b19f80 (cursor only); fan max):
+  `--cube dx11 --scene upscale --fullscreen --bench 10 --autoclose 5` 64-bit avg 2842.3 / min 156.8 / 1 % low 742.1,
+  32-bit avg 2898.3 / min 147.2 / 1 % low 911.1. Screenshots: the result box is on top of the fullscreen chart in both
+  (a5ce378 fix device-proven). 0 FATAL/ANR lines. Standalone --cube benches write only the CSV + one-line txt (no version
+  line); the version string was checked in the exes instead.
 
 ## 2026-11-24 17:05–17:25 EST — Device test of 71832cb on the Pocket FIT, result-box fix, 2.3.0-pre1 prep (feat/upscaler-test-scene)
 - User 16:52 EST: "merge nis to main, aio as pre-release first" -> publish a PRE-release (not Latest) after the device test.
