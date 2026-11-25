@@ -1,3 +1,14 @@
+## 2026-11-24 20:11 EST — RELEASE v2.3.0 (stable, Latest)
+- Merged: backup refs/backup/20261124/main-before-2.3.0 = 0f71730; main fast-forwarded to 5dce8b79 (feat/upscaler-test-scene;
+  differs from the built commit 68cdcf81 only in this log).
+- Tag 2.3.0 (lightweight) -> 68cdcf8171da833aae7ee983a7867db46272b4c6 = the commit CI 45523279993 built and the device check ran.
+- release.yml run 45523791535 GREEN (all steps; run_id 45523279993). Checked afterwards: releases/latest = 2.3.0
+  (prerelease false), assets downloaded again = 64-bit 31e43ea3..., 32-bit 498d9a8c..., CursorTest 8e076d80... (== CI ==
+  device-tested exes), release body == docs/releases/2.3.0.md. 2.3.0-pre1 was never published (its notes file stays).
+- Not changed: Bannerlator still bakes 2.2.0 (bake-aio.yml aio_tag input); the user's own AIO.desktop on the FIT still
+  points at E:\Winlator\games\AIO-2.2.0 (2.2.0 exe). Both left for the user to decide.
+- Branch feat/upscaler-test-scene kept (== main); delete only on the user's word.
+
 ## 2026-11-24 20:05 EST — 2.3.0 STABLE release cut (feat/upscaler-test-scene)
 - User 20:0x EST: "yes do the check and publish a new stable" -> stable 2.3.0 (plain tag, Latest) instead of 2.3.0-pre1.
   The cursor hold is cleared: X11 correct; the Wayland single-arrow is Bannerlator/Wine (2.2.0 CursorTest.exe same),
