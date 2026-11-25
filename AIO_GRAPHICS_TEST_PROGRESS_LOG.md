@@ -1,3 +1,18 @@
+## 2026-11-24 20:05 EST — 2.3.0 STABLE release cut (feat/upscaler-test-scene, in progress)
+- User 20:0x EST: "yes do the check and publish a new stable" -> stable 2.3.0 (plain tag, Latest) instead of 2.3.0-pre1.
+  The cursor hold is cleared: X11 correct; the Wayland single-arrow is Bannerlator/Wine (2.2.0 CursorTest.exe same),
+  fixed on Bannerlator fix/wayland-desktop-cursor + Wine staging/*/wayland-cursor (user hand test passed 19:58 EST,
+  not merged/released there).
+- Release-cut commit 68cdcf81: AIO_VERSION "v2.3.0", docs/releases/2.3.0.md (from 2.3.0-pre1.md: stable header,
+  Wayland cursor note, Downloads + Credits; CursorTest.exe still published by release.yml), README "This is v2.3.0".
+  2.3.0-pre1.md kept. CI build-windows 45523279993 (dispatched, headSha 68cdcf81 checked).
+- Plan: stage the CI exes (sha checked) -> device check on the FIT with the exact release exe: upscale --fullscreen
+  --bench 10 (result box must show over the fullscreen window; report must say v2.3.0) + logcat FATAL check ->
+  backup refs/backup/20261124/main-before-2.3.0 (= main 0f71730) -> fast-forward main to 68cdcf81 -> tag 2.3.0 (full SHA)
+  -> release.yml (tag 2.3.0, notes docs/releases/2.3.0.md, run_id 45523279993) -> verify tag/assets/Latest.
+- Resume point: if the session dies mid-check: rm the FIT temp shortcut ".../Desktop/ZZ AIO new.desktop", run
+  `rootsh "sh /sdcard/Download/perf-harness/fan-restore.sh"`, bring Termux back, read results/aio230-1124/run.log.
+
 ## 2026-11-24 17:05–17:25 EST — Device test of 71832cb on the Pocket FIT, result-box fix, 2.3.0-pre1 prep (feat/upscaler-test-scene)
 - User 16:52 EST: "merge nis to main, aio as pre-release first" -> publish a PRE-release (not Latest) after the device test.
   release.yml always passes --latest, so the pre-release is made with `gh release create --prerelease --target <full sha>`
